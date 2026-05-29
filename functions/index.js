@@ -429,6 +429,12 @@ exports.onGameSummaryWritten = onDocumentWritten("pwhl_game_summaries/{gameId}",
   // Add global default fallback context
   scoringContexts.push({ id: "global", scoring: defaultScoring });
 
+  // Use simulated mock date for updatedAt if time travel is active, else serverTimestamp
+  const isTimeTravelActive = Math.abs(cutoffDate.getTime() - new Date().getTime()) > 10000;
+  const timestampValue = isTimeTravelActive 
+    ? admin.firestore.Timestamp.fromDate(cutoffDate) 
+    : admin.firestore.FieldValue.serverTimestamp();
+
   for (const context of scoringContexts) {
     const leagueId = context.id;
     const rules = context.scoring;
@@ -467,7 +473,7 @@ exports.onGameSummaryWritten = onDocumentWritten("pwhl_game_summaries/{gameId}",
         position: playerRef.position,
         stats: s,
         fantasyPoints: fantasyPoints,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt: timestampValue
       }, { merge: true });
 
       count++;
@@ -504,7 +510,7 @@ exports.onGameSummaryWritten = onDocumentWritten("pwhl_game_summaries/{gameId}",
         position: playerRef.position,
         stats: g,
         fantasyPoints: fantasyPoints,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        updatedAt: timestampValue
       }, { merge: true });
 
       count++;
