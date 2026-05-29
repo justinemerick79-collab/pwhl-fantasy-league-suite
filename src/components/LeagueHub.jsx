@@ -1,70 +1,85 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { collection, addDoc, query, where, getDocs, updateDoc, doc, getDoc, arrayUnion, serverTimestamp } from 'firebase/firestore';
+import { db } from '../firebase.js';
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  updateDoc, 
+  doc, 
+  getDoc, 
+  arrayUnion, 
+  serverTimestamp,
+  addDoc
+} from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
+import { submitAddDrop } from '../services/leagueService.js';
 
-function generateInviteCode() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let result = '';
-  for (let i = 0; i < 6; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
+// Pre-defined PWHL Athlete Pool for Marketplace Mock
+const PWHL_ATHLETES_POOL = [
+  { id: "pwhl_1", name: "Marie-Philip Poulin", pos: "F", team: "MTL", rating: 94 },
+  { id: "pwhl_2", name: "Natalie Spooner", pos: "F", team: "TOR", rating: 92 },
+  { id: "pwhl_3", name: "Sarah Nurse", pos: "F", team: "TOR", rating: 89 },
+  { id: "pwhl_4", name: "Hilary Knight", pos: "F", team: "BOS", rating: 90 },
+  { id: "pwhl_5", name: "Alex Carpenter", pos: "F", team: "NY", rating: 88 },
+  { id: "pwhl_6", name: "Brianne Jenner", pos: "F", team: "OTT", rating: 87 },
+  { id: "pwhl_7", name: "Kendall Coyne Schofield", pos: "F", team: "MIN", rating: 89 },
+  { id: "pwhl_8", name: "Erin Ambrose", pos: "D", team: "MTL", rating: 91 },
+  { id: "pwhl_9", name: "Renata Fast", pos: "D", team: "TOR", rating: 90 },
+  { id: "pwhl_10", name: "Megan Keller", pos: "D", team: "BOS", rating: 89 },
+  { id: "pwhl_11", name: "Jocelyne Larocque", pos: "D", team: "TOR", rating: 86 },
+  { id: "pwhl_12", name: "Aerin Frankel", pos: "G", team: "BOS", rating: 93 },
+  { id: "pwhl_13", name: "Ann-Renée Desbiens", pos: "G", team: "MTL", rating: 91 },
+  { id: "pwhl_14", name: "Nicole Hensley", pos: "G", team: "MIN", rating: 88 }
+];
 
 export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const { currentUser } = useAuth();
   
-  const [activeTab, setActiveTab] = useState('my-leagues'); // 'my-leagues', 'create', 'join'
+  // Outer Launcher Tab: 'my-leagues' | 'create' | 'join'
+  const [launcherTab, setLauncherTab] = useState('my-leagues');
+  
+  // Inner Active Dashboard Tab: 'standings' | 'scoreboard' | 'market' | 'settings'
+  const [activeDashTab, setActiveDashTab] = useState('standings');
+  
+  // Database States
   const [myLeagues, setMyLeagues] = useState([]);
   const [userMap, setUserMap] = useState({});
   const [loading, setLoading] = useState(true);
+  const [activeLeague, setActiveLeague] = useState(null);
+  const [activeLeagueTeams, setActiveLeagueTeams] = useState([]);
+  const [myTeam, setMyTeam] = useState(null);
 
-  // --- Create Form State ---
+  // Form States - Create
   const [createName, setCreateName] = useState('');
   const [createMaxTeams, setCreateMaxTeams] = useState(6);
   const [matchupDuration, setMatchupDuration] = useState(1);
   const [playoffTeams, setPlayoffTeams] = useState(4);
   const [playoffDuration, setPlayoffDuration] = useState(1);
-  
   const [createLoading, setCreateLoading] = useState(false);
-
-  const [settings, setSettings] = useState({
+  const [rosterLimits, setRosterLimits] = useState({
     forwards: { starters: 6, max: 10 },
     defense: { starters: 4, max: 8 },
     goalies: { starters: 1, max: 3 },
     bench: 4
   });
 
-  const [scoring, setScoring] = useState({
-    skaters: {
-      goals: 2,
-      assists: 1,
-      plusMinus: 0.5,
-      ppp: 0.5,
-      shp: 0.5,
-      sog: 0.1,
-      hits: 0.1,
-      blocks: 0.5,
-      defensePoints: 0.5
-    },
-    goalies: {
-      wins: 4,
-      otl: 1,
-      ga: -2,
-      saves: 0.2,
-      shutouts: 3
-    }
-  });
-
-  // --- Join Form State ---
+  // Form States - Join
   const [joinCode, setJoinCode] = useState('');
   const [joinLoading, setJoinLoading] = useState(false);
   const [joinError, setJoinError] = useState('');
 
+  // Transaction States
+  const [selectedMarketPlayer, setSelectedMarketPlayer] = useState(null);
+  const [selectedDropPlayer, setSelectedDropPlayer] = useState('');
+  const [transactionLoading, setTransactionLoading] = useState(false);
+  const [marketSearch, setMarketSearch] = useState('');
+  const [marketFilter, setMarketFilter] = useState('ALL');
+
+  // Load user leagues list
   useEffect(() => {
     if (!currentUser) return;
-    async function fetchMyLeagues() {
+    async function fetchLeagues() {
       setLoading(true);
       try {
         const q = query(collection(db, 'fantasy_leagues'), where('members', 'array-contains', currentUser.uid));
@@ -79,7 +94,9 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
           for (const uid of Array.from(uids)) {
              const userSnap = await getDoc(doc(db, 'users', uid));
              if (userSnap.exists()) {
-               map[uid] = userSnap.data().email;
+               map[uid] = userSnap.data().email || userSnap.data().username || uid;
+             } else {
+               map[uid] = uid.substring(0, 6);
              }
           }
           setUserMap(map);
@@ -90,87 +107,83 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
         setLoading(false);
       }
     }
-    fetchMyLeagues();
-  }, [currentUser, activeTab]);
+    fetchLeagues();
+  }, [currentUser, launcherTab, activeLeagueId]);
 
-  const handleSettingChange = (position, field, value) => {
-    setSettings(prev => ({
-      ...prev,
-      [position]: {
-        ...prev[position],
-        [field]: value
+  // Load active league details, teams, and current user team
+  useEffect(() => {
+    if (!activeLeagueId || !currentUser) {
+      setActiveLeague(null);
+      setActiveLeagueTeams([]);
+      setMyTeam(null);
+      return;
+    }
+    async function fetchActiveLeagueDetails() {
+      try {
+        const lSnap = await getDoc(doc(db, 'fantasy_leagues', activeLeagueId));
+        if (lSnap.exists()) {
+          setActiveLeague({ id: lSnap.id, ...lSnap.data() });
+        }
+
+        const tSnap = await getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/teams`));
+        const teams = tSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        setActiveLeagueTeams(teams);
+
+        const userTeam = teams.find(t => t.ownerId === currentUser.uid);
+        if (userTeam) {
+          setMyTeam(userTeam);
+        }
+      } catch (err) {
+        console.error("Error loading active league detail:", err);
       }
-    }));
-  };
+    }
+    fetchActiveLeagueDetails();
+  }, [activeLeagueId, currentUser, transactionLoading]);
 
-  const handleScoringChange = (category, field, value) => {
-    setScoring(prev => ({
-      ...prev,
-      [category]: {
-        ...prev[category],
-        [field]: value
-      }
-    }));
-  };
-
+  // Handlers
   const handleCreateLeague = async (e) => {
     e.preventDefault();
     if (!createName) return;
-    
-    // Validation
-    if (parseInt(settings.forwards.max) < parseInt(settings.forwards.starters)) return alert("Forwards Max cannot be less than Starters.");
-    if (parseInt(settings.defense.max) < parseInt(settings.defense.starters)) return alert("Defense Max cannot be less than Starters.");
-    if (parseInt(settings.goalies.max) < parseInt(settings.goalies.starters)) return alert("Goalies Max cannot be less than Starters.");
-
     setCreateLoading(true);
     try {
-      const inviteCode = generateInviteCode();
-      
-      const numericScoring = {
-        skaters: {
-          goals: parseFloat(scoring.skaters.goals) || 0,
-          assists: parseFloat(scoring.skaters.assists) || 0,
-          plusMinus: parseFloat(scoring.skaters.plusMinus) || 0,
-          ppp: parseFloat(scoring.skaters.ppp) || 0,
-          shp: parseFloat(scoring.skaters.shp) || 0,
-          sog: parseFloat(scoring.skaters.sog) || 0,
-          hits: parseFloat(scoring.skaters.hits) || 0,
-          blocks: parseFloat(scoring.skaters.blocks) || 0,
-          defensePoints: parseFloat(scoring.skaters.defensePoints) || 0,
-        },
-        goalies: {
-          wins: parseFloat(scoring.goalies.wins) || 0,
-          otl: parseFloat(scoring.goalies.otl) || 0,
-          ga: parseFloat(scoring.goalies.ga) || 0,
-          saves: parseFloat(scoring.goalies.saves) || 0,
-          shutouts: parseFloat(scoring.goalies.shutouts) || 0,
-        }
+      const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const defaultScoring = {
+        skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
+        goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
       };
 
-      await addDoc(collection(db, 'fantasy_leagues'), {
+      const leagueRef = await addDoc(collection(db, 'fantasy_leagues'), {
         name: createName,
         ownerId: currentUser.uid,
+        commissionerId: currentUser.uid,
         maxTeams: parseInt(createMaxTeams),
         inviteCode,
         members: [currentUser.uid],
-        status: 'pending', // 'pending' | 'active'
+        userIds: [currentUser.uid],
+        status: 'active', // auto-active in test environment
+        rosterSettings: rosterLimits,
+        scoringSettings: defaultScoring,
         scheduleSettings: {
           matchupDuration: parseInt(matchupDuration),
           playoffTeams: parseInt(playoffTeams),
           playoffDuration: parseInt(playoffDuration)
         },
-        rosterSettings: {
-          forwards: { starters: parseInt(settings.forwards.starters), max: parseInt(settings.forwards.max) },
-          defense: { starters: parseInt(settings.defense.starters), max: parseInt(settings.defense.max) },
-          goalies: { starters: parseInt(settings.goalies.starters), max: parseInt(settings.goalies.max) },
-          bench: parseInt(settings.bench)
-        },
-        scoringSettings: numericScoring,
+        waiverOrder: [currentUser.uid],
         createdAt: serverTimestamp()
       });
-      alert(`League created! Your invite code is ${inviteCode}`);
+
+      // Create owner's team document
+      await addDoc(collection(db, `fantasy_leagues/${leagueRef.id}/teams`), {
+        ownerId: currentUser.uid,
+        teamName: `${createName.split(" ")[0]} Vipers`,
+        joinedAt: serverTimestamp(),
+        players: ["pwhl_1", "pwhl_8", "pwhl_13"] // Give commissioner initial mock star players
+      });
+
+      alert(`League created! Invite Code: ${inviteCode}`);
       setCreateName('');
-      setActiveTab('my-leagues');
+      setLauncherTab('my-leagues');
+      setActiveLeagueId(leagueRef.id);
     } catch (err) {
       console.error(err);
       alert('Failed to create league.');
@@ -182,15 +195,14 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const handleJoinLeague = async (e) => {
     e.preventDefault();
     setJoinError('');
-    if (!joinCode) return;
-    
+    if (!joinCode || joinCode.length !== 6) return;
     setJoinLoading(true);
     try {
       const q = query(collection(db, 'fantasy_leagues'), where('inviteCode', '==', joinCode.toUpperCase()));
       const snap = await getDocs(q);
       
       if (snap.empty) {
-        setJoinError('Invalid invite code. League not found.');
+        setJoinError('League not found.');
         return;
       }
 
@@ -198,367 +210,523 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
       const leagueData = leagueDoc.data();
 
       if (leagueData.members.includes(currentUser.uid)) {
-        setJoinError('You are already a member of this league.');
+        setJoinError('Already joined.');
         return;
       }
 
       if (leagueData.members.length >= leagueData.maxTeams) {
-        setJoinError('This league is already full.');
+        setJoinError('League full.');
         return;
       }
 
+      const updatedMembers = [...leagueData.members, currentUser.uid];
       await updateDoc(doc(db, 'fantasy_leagues', leagueDoc.id), {
-        members: arrayUnion(currentUser.uid)
+        members: updatedMembers,
+        userIds: updatedMembers
+      });
+
+      await addDoc(collection(db, `fantasy_leagues/${leagueDoc.id}/teams`), {
+        ownerId: currentUser.uid,
+        teamName: `${leagueData.name.split(" ")[0]} Blizzard`,
+        joinedAt: serverTimestamp(),
+        players: ["pwhl_2", "pwhl_3", "pwhl_9"] // Initial mock players for joining team
       });
       
-      alert(`Successfully joined ${leagueData.name}!`);
+      alert(`Joined ${leagueData.name}!`);
       setJoinCode('');
-      setActiveTab('my-leagues');
-
+      setLauncherTab('my-leagues');
+      setActiveLeagueId(leagueDoc.id);
     } catch (err) {
       console.error(err);
-      setJoinError('Failed to join league. Please try again.');
+      setJoinError('Failed to join league.');
     } finally {
       setJoinLoading(false);
     }
   };
 
-  if (!currentUser) return <div style={{ padding: '40px' }}>Please sign in to access leagues.</div>;
+  // Atomic transaction Add/Drop handler
+  const handleMarketTransaction = async () => {
+    if (!activeLeagueId || !myTeam || !selectedMarketPlayer) return;
+    setTransactionLoading(true);
+    try {
+      await submitAddDrop(
+        activeLeagueId,
+        myTeam.id,
+        currentUser.uid,
+        selectedMarketPlayer.id,
+        selectedDropPlayer || null
+      );
+      alert(`Successfully acquired ${selectedMarketPlayer.name}!`);
+      setSelectedMarketPlayer(null);
+      setSelectedDropPlayer('');
+    } catch (err) {
+      console.error(err);
+      alert(err.message || 'Transaction failed.');
+    } finally {
+      setTransactionLoading(false);
+    }
+  };
 
-  const totalTeamSize = parseInt(settings.forwards.starters) + parseInt(settings.defense.starters) + parseInt(settings.goalies.starters) + parseInt(settings.bench);
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-[#0f0f13] text-gray-100 flex flex-col items-center justify-center p-6 text-center select-none">
+        <div className="w-16 h-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-3xl mb-6 shadow-xl shadow-indigo-500/5 animate-pulse">
+          🔒
+        </div>
+        <h2 className="text-xl font-bold tracking-tight text-white">Authentication Required</h2>
+        <p className="text-gray-400 mt-2 max-w-sm text-sm">Please sign in to access and manage your fantasy leagues.</p>
+      </div>
+    );
+  }
+
+  // Determine all players already owned in active league to filter Marketplace
+  const allOwnedPlayerIds = new Set();
+  activeLeagueTeams.forEach(team => {
+    (team.players || []).forEach(pId => allOwnedPlayerIds.add(pId));
+  });
+
+  const freeAgents = PWHL_ATHLETES_POOL.filter(p => !allOwnedPlayerIds.has(p.id))
+    .filter(p => p.name.toLowerCase().includes(marketSearch.toLowerCase()))
+    .filter(p => marketFilter === 'ALL' || p.pos === marketFilter);
 
   return (
-    <div className="dashboard-container">
-      <header className="dashboard-header" style={{ marginBottom: '24px' }}>
-        <h1>League Hub</h1>
-        <p>Manage your fantasy leagues, compete with friends, and chase glory.</p>
-      </header>
+    <div className="min-h-screen bg-[#0f0f13] text-gray-100 font-sans antialiased pb-24">
+      
+      {/* ── CASE 1: LAUNCHER SHELL (NO ACTIVE LEAGUE SELECT OR CONFIGURING TABS) ── */}
+      {!activeLeague ? (
+        <div className="px-4 pt-6">
+          <header className="mb-6">
+            <h1 className="text-2xl font-black tracking-tight bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">
+              League Launcher
+            </h1>
+            <p className="text-xs text-gray-500 mt-1 font-semibold">Join or create a command post to begin fantasy matchups.</p>
+          </header>
 
-      <div className="tabs" style={{ marginBottom: '24px' }}>
-        <button className={`tab ${activeTab === 'my-leagues' ? 'active' : ''}`} onClick={() => setActiveTab('my-leagues')}>My Leagues</button>
-        <button className={`tab ${activeTab === 'create' ? 'active' : ''}`} onClick={() => setActiveTab('create')}>Create League</button>
-        <button className={`tab ${activeTab === 'join' ? 'active' : ''}`} onClick={() => setActiveTab('join')}>Join League</button>
-      </div>
+          {/* Launcher Tabs */}
+          <div className="flex p-1 bg-black/40 border border-white/5 rounded-2xl mb-6 shadow-inner">
+            {['my-leagues', 'create', 'join'].map(tab => (
+              <button
+                key={tab}
+                onClick={() => setLauncherTab(tab)}
+                className={`flex-1 py-3 text-[10px] font-black uppercase tracking-wider rounded-xl transition-all duration-300 ${launcherTab === tab ? 'bg-gradient-to-r from-indigo-600 to-violet-500 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'}`}
+              >
+                {tab.replace('-', ' ')}
+              </button>
+            ))}
+          </div>
 
-      <div className="glass-panel">
-        {activeTab === 'my-leagues' && (
-          <div>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '16px' }}>My Leagues</h2>
-            {loading ? (
-              <p>Loading...</p>
-            ) : myLeagues.length === 0 ? (
-              <p style={{ color: 'var(--text-muted)' }}>You haven't joined any leagues yet. Create or join one to get started!</p>
-            ) : (
-              <div style={{ display: 'grid', gap: '24px', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))' }}>
-                {myLeagues.map(league => (
-                  <div key={league.id} style={{ 
-                    background: 'linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(0,0,0,0.2) 100%)',
-                    padding: '24px', 
-                    borderRadius: '16px', 
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
-                    display: 'flex',
-                    flexDirection: 'column'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
-                      <h3 style={{ fontSize: '1.4rem', margin: 0, fontWeight: '700', letterSpacing: '0.5px' }}>{league.name}</h3>
-                      <span style={{ 
-                        background: 'rgba(255,255,255,0.1)', 
-                        padding: '6px 12px', 
-                        borderRadius: '20px', 
-                        fontSize: '0.8rem', 
-                        fontWeight: '600' 
-                      }}>
-                        {league.members.length} / {league.maxTeams}
-                      </span>
-                    </div>
-                    
-                    <div style={{ marginBottom: '16px' }}>
-                      {league.status === 'pending' ? (
-                        <span className="pill pill-secondary">Pending (Waiting for Draft)</span>
-                      ) : (
-                        <span className="pill pill-primary">Active</span>
-                      )}
-                    </div>
-
-                    {league.ownerId === currentUser.uid && (
-                      <div style={{ 
-                        background: 'rgba(255, 255, 255, 0.05)', 
-                        border: '1px solid rgba(255, 255, 255, 0.2)',
-                        padding: '12px 16px', 
-                        borderRadius: '8px', 
-                        fontSize: '0.9rem', 
-                        display: 'flex', 
-                        justifyContent: 'space-between', 
-                        alignItems: 'center', 
-                        marginBottom: '24px',
-                        marginTop: '16px'
-                      }}>
-                        <span style={{ color: 'var(--text-muted)', textTransform: 'uppercase', fontSize: '0.75rem', fontWeight: 'bold', letterSpacing: '1px' }}>Invite Code</span>
-                        <span style={{ fontWeight: 'bold', letterSpacing: '3px', color: 'var(--primary-color)', fontSize: '1.2rem' }}>{league.inviteCode}</span>
-                      </div>
-                    )}
-                    
-                    <div style={{ marginTop: 'auto', paddingTop: league.ownerId !== currentUser.uid ? '24px' : '0' }}>
-                      <h4 style={{ marginBottom: '12px', fontSize: '0.85rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>League Roster</h4>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                          {Array.from({ length: league.maxTeams }).map((_, idx) => {
-                            const memberUid = league.members[idx];
-                            if (memberUid) {
-                              const isCommish = memberUid === league.ownerId;
-                              return (
-                                <div key={idx} style={{ 
-                                  display: 'flex', 
-                                  alignItems: 'center', 
-                                  padding: '12px 16px', 
-                                  background: 'rgba(0,0,0,0.4)', 
-                                  borderRadius: '8px',
-                                  border: isCommish ? '1px solid rgba(255,255,255,0.15)' : '1px solid transparent'
-                                }}>
-                                  <span style={{ width: '32px', color: 'var(--text-muted)', fontWeight: '600', fontSize: '0.9rem' }}>{idx + 1}</span>
-                                  <span style={{ flex: 1, fontWeight: '500', fontSize: '0.95rem' }}>
-                                    {userMap[memberUid] || 'Loading...'} 
-                                    {memberUid === currentUser.uid && <span style={{color: 'var(--primary-color)', fontSize: '0.75rem', marginLeft: '8px', textTransform: 'uppercase', fontWeight: 'bold'}}>(You)</span>}
-                                  </span>
-                                  {isCommish && <span style={{ color: 'var(--primary-color)', fontSize: '0.7rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Commish</span>}
-                                </div>
-                              );
-                            } else {
-                              return (
-                                <div key={idx} style={{ 
-                                  display: 'flex', 
-                                  alignItems: 'center', 
-                                  padding: '12px 16px', 
-                                  background: 'rgba(255,255,255,0.02)', 
-                                  borderRadius: '8px',
-                                  border: '1px dashed rgba(255,255,255,0.1)',
-                                  opacity: 0.8
-                                }}>
-                                  <span style={{ width: '32px', color: 'var(--text-muted)', fontSize: '0.9rem' }}>{idx + 1}</span>
-                                  <span style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: '0.9rem' }}>Empty Slot</span>
-                                </div>
-                              );
-                            }
-                          })}
-                      </div>
-                    </div>
-                    
-                    <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid var(--border-color)', display: 'flex', justifyContent: 'center' }}>
-                      {activeLeagueId === league.id ? (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--secondary-color)', fontWeight: 'bold' }}>
-                          <span style={{ fontSize: '1.2rem' }}>✓</span> Currently Active League
+          <div className="space-y-4">
+            {launcherTab === 'my-leagues' && (
+              <div>
+                {loading ? (
+                  <div className="py-20 text-center text-gray-500 text-xs font-semibold animate-pulse">Retrieving joined leagues...</div>
+                ) : myLeagues.length === 0 ? (
+                  <div className="text-center py-20 px-6 border border-dashed border-white/10 rounded-2xl bg-white/[0.01]">
+                    <span className="text-3xl">🥅</span>
+                    <h3 className="text-sm font-bold mt-4">No Joined Leagues</h3>
+                    <p className="text-xs text-gray-500 mt-1.5 max-w-xs mx-auto">Create a league to act as commissioner or insert an invite code to join a friend's lobby.</p>
+                  </div>
+                ) : (
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {myLeagues.map(league => (
+                      <div 
+                        key={league.id} 
+                        onClick={() => setActiveLeagueId(league.id)}
+                        className="bg-gradient-to-b from-white/5 to-white/[0.01] border border-white/5 p-5 rounded-3xl relative overflow-hidden backdrop-blur-md shadow-lg active:scale-[0.98] transition-transform duration-200 cursor-pointer"
+                      >
+                        <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/5 rounded-full blur-2xl"></div>
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <h3 className="text-base font-black text-white leading-tight">{league.name}</h3>
+                            <span className="inline-flex text-[9px] uppercase font-black text-indigo-400 bg-indigo-500/10 px-2.5 py-0.5 rounded-full border border-indigo-500/15 mt-2">
+                              {league.members.length} / {league.maxTeams} Teams
+                            </span>
+                          </div>
+                          <span className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-xs font-black">➜</span>
                         </div>
-                      ) : (
-                        <button 
-                          className="btn-secondary" 
-                          style={{ width: '100%', borderColor: 'var(--primary-color)', color: 'var(--primary-color)' }}
-                          onClick={() => setActiveLeagueId(league.id)}
-                        >
-                          Set as Active League
-                        </button>
-                      )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {launcherTab === 'create' && (
+              <form onSubmit={handleCreateLeague} className="space-y-5 bg-white/[0.02] border border-white/5 p-6 rounded-3xl">
+                <div>
+                  <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-2">League Name</label>
+                  <input 
+                    type="text" 
+                    value={createName} 
+                    onChange={e => setCreateName(e.target.value)} 
+                    placeholder="e.g. PWHL Division Cup" 
+                    required 
+                    className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-2">Max Teams</label>
+                    <select 
+                      value={createMaxTeams} 
+                      onChange={e => setCreateMaxTeams(e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:outline-none focus:border-indigo-500 transition-colors"
+                    >
+                      {[4, 6, 8, 10].map(n => <option key={n} value={n} className="text-black">{n} Teams</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-2">Waiver Period</label>
+                    <div className="w-full bg-black/20 border border-white/5 rounded-2xl px-4 py-3 text-sm text-indigo-400 font-bold flex items-center justify-center">
+                      48 Hours
                     </div>
                   </div>
-                ))}
+                </div>
+
+                <button 
+                  type="submit" 
+                  disabled={createLoading}
+                  className="w-full py-4 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-2xl text-xs font-black uppercase tracking-wider text-white shadow-lg active:scale-95 transition-transform disabled:opacity-50 mt-4"
+                >
+                  {createLoading ? 'Establishing Roster Engine...' : 'Deploy League'}
+                </button>
+              </form>
+            )}
+
+            {launcherTab === 'join' && (
+              <form onSubmit={handleJoinLeague} className="space-y-4 bg-white/[0.02] border border-white/5 p-6 rounded-3xl">
+                {joinError && <div className="text-xs font-black text-rose-500 bg-rose-500/10 border border-rose-500/15 p-3 rounded-xl">{joinError}</div>}
+                <div>
+                  <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-2">Secret Invite Code</label>
+                  <input 
+                    type="text" 
+                    value={joinCode} 
+                    onChange={e => setJoinCode(e.target.value.toUpperCase())}
+                    placeholder="Enter 6-character code"
+                    maxLength={6}
+                    required
+                    className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white text-center font-bold tracking-widest placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                </div>
+                <button 
+                  type="submit" 
+                  disabled={joinLoading || joinCode.length !== 6}
+                  className="w-full py-4 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-2xl text-xs font-black uppercase tracking-wider text-white shadow-lg active:scale-95 transition-transform disabled:opacity-50"
+                >
+                  {joinLoading ? 'Validating credentials...' : 'Enter Arena'}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      ) : (
+        
+        // ── CASE 2: ACTIVE LEAGUE COMMAND Hub (BOTTOM NAVIGATION DRIVEN) ──
+        <div>
+          {/* Active League Title Banner */}
+          <div className="px-4 pt-6 pb-2 bg-gradient-to-b from-white/[0.02] to-transparent border-b border-white/5 flex justify-between items-center">
+            <div>
+              <span className="text-[9px] uppercase font-extrabold tracking-widest text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/15">
+                Active League Hub
+              </span>
+              <h2 className="text-lg font-black text-white mt-1 leading-tight">{activeLeague.name}</h2>
+            </div>
+            
+            {/* Quick Exit League Toggle */}
+            <button 
+              onClick={() => setActiveLeagueId(null)}
+              className="text-[10px] uppercase font-black text-gray-400 bg-white/5 border border-white/10 px-3 py-1.5 rounded-xl hover:text-white"
+            >
+              Exit
+            </button>
+          </div>
+
+          <div className="px-4 pt-4">
+            {/* SUB-TAB 1: LEAGUE STANDINGS */}
+            {activeDashTab === 'standings' && (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="text-sm font-black uppercase tracking-wider text-gray-400">🏆 Season Standings</h3>
+                </div>
+
+                <div className="overflow-hidden border border-white/5 rounded-3xl bg-white/[0.01]">
+                  <div className="grid grid-cols-12 bg-white/5 p-3.5 text-[10px] font-black uppercase text-gray-500 tracking-wider">
+                    <div className="col-span-2">Rk</div>
+                    <div className="col-span-6">Team</div>
+                    <div className="col-span-2 text-right">W-L</div>
+                    <div className="col-span-2 text-right">Pts</div>
+                  </div>
+
+                  <div className="divide-y divide-white/5">
+                    {activeLeagueTeams.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-gray-500">No teams found in standings.</div>
+                    ) : (
+                      [...activeLeagueTeams]
+                        .sort((a,b) => (b.points || 0) - (a.points || 0))
+                        .map((team, idx) => (
+                          <div key={team.id} className="grid grid-cols-12 p-4 text-xs items-center">
+                            <div className="col-span-2 font-black text-gray-400">{idx + 1}</div>
+                            <div className="col-span-6 font-bold text-white flex items-center gap-2">
+                              <span>{idx === 0 ? '🐍' : idx === 1 ? '❄️' : '🏒'}</span>
+                              <span className="truncate">{team.teamName}</span>
+                              {team.ownerId === currentUser.uid && <span className="text-[8px] bg-indigo-500/20 text-indigo-400 px-1 py-0.2 rounded font-black">YOU</span>}
+                            </div>
+                            <div className="col-span-2 text-right font-medium text-gray-400">0-0</div>
+                            <div className="col-span-2 text-right font-black text-white">0.0</div>
+                          </div>
+                        ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-TAB 2: LEAGUE SCOREBOARD */}
+            {activeDashTab === 'scoreboard' && (
+              <div className="space-y-4">
+                <h3 className="text-sm font-black uppercase tracking-wider text-gray-400">📊 H2H Weekly Matchups</h3>
+
+                <div className="space-y-4">
+                  {/* Mock H2H Pairs */}
+                  <div className="bg-white/[0.02] border border-white/5 p-4 rounded-3xl">
+                    <div className="flex justify-between text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-3">
+                      <span>Matchup 1</span>
+                      <span className="text-indigo-400">Active Matchup</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">🐍</span>
+                        <span className="text-xs font-bold">Montreal Vipers</span>
+                      </div>
+                      <span className="text-xs font-black">142.5</span>
+                    </div>
+                    <div className="flex justify-between items-center mt-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">❄️</span>
+                        <span className="text-xs font-bold">Toronto Blizzard</span>
+                      </div>
+                      <span className="text-xs font-black">128.0</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-white/[0.02] border border-white/5 p-4 rounded-3xl opacity-75">
+                    <div className="flex justify-between text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-3">
+                      <span>Matchup 2</span>
+                      <span>Ready</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">🦁</span>
+                        <span className="text-xs font-bold">Boston Pride</span>
+                      </div>
+                      <span className="text-xs font-black">0.0</span>
+                    </div>
+                    <div className="flex justify-between items-center mt-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">⚡</span>
+                        <span className="text-xs font-bold">Ottawa Charge</span>
+                      </div>
+                      <span className="text-xs font-black">0.0</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-TAB 3: PLAYER MARKETPLACE (FREE AGENTS PROTOTYPE) */}
+            {activeDashTab === 'market' && (
+              <div className="space-y-4">
+                <h3 className="text-sm font-black uppercase tracking-wider text-gray-400">🛒 Free Agent Market</h3>
+
+                {/* Filter and Search */}
+                <div className="space-y-3">
+                  <input 
+                    type="text" 
+                    value={marketSearch}
+                    onChange={e => setMarketSearch(e.target.value)}
+                    placeholder="Search active athletes..."
+                    className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  />
+                  <div className="flex gap-2 overflow-x-auto pb-1">
+                    {['ALL', 'F', 'D', 'G'].map(pos => (
+                      <button
+                        key={pos}
+                        onClick={() => setMarketFilter(pos)}
+                        className={`text-[9px] uppercase font-black tracking-wider px-3.5 py-2 rounded-xl border transition-colors ${marketFilter === pos ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-white/5 border-white/5 text-gray-400 hover:text-white'}`}
+                      >
+                        {pos === 'ALL' ? 'All Roles' : pos === 'F' ? 'Forwards' : pos === 'D' ? 'Defense' : 'Goalies'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Marketplace Athletes List */}
+                <div className="space-y-3">
+                  {freeAgents.length === 0 ? (
+                    <div className="text-center py-10 text-xs text-gray-500 italic">No available free agents matching criteria.</div>
+                  ) : (
+                    freeAgents.map(athlete => (
+                      <div key={athlete.id} className="bg-white/[0.02] border border-white/5 p-4 rounded-2xl flex justify-between items-center">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] font-black text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/5">{athlete.pos}</span>
+                            <span className="text-[10px] text-gray-400 font-bold">{athlete.team}</span>
+                            <span className="text-xs font-black text-white">{athlete.name}</span>
+                          </div>
+                          <p className="text-[9px] text-gray-500 font-bold mt-1 uppercase tracking-wider">OVR Rating: {athlete.rating}</p>
+                        </div>
+                        
+                        {/* Transaction Call Trigger */}
+                        <button 
+                          onClick={() => {
+                            if (!myTeam) return alert("Roster required to perform transactions!");
+                            setSelectedMarketPlayer(athlete);
+                          }}
+                          className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-xl text-[10px] font-black uppercase text-white tracking-wider"
+                        >
+                          Acquire
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* SUB-TAB 4: SETTINGS & COMMISSIONER RULES */}
+            {activeDashTab === 'settings' && (
+              <div className="space-y-4">
+                <h3 className="text-sm font-black uppercase tracking-wider text-gray-400">⚙️ Settings & Rules</h3>
+
+                {/* Invite Card */}
+                <div className="bg-gradient-to-b from-indigo-500/10 to-transparent border border-indigo-500/20 p-5 rounded-3xl relative overflow-hidden">
+                  <span className="text-[8px] uppercase font-black tracking-widest text-indigo-400">Recruitment</span>
+                  <h4 className="text-xs font-bold mt-1 text-gray-300">Invite Code to share with friends:</h4>
+                  <div className="flex items-center justify-between mt-3 bg-black/40 border border-white/5 px-4 py-2.5 rounded-2xl">
+                    <span className="text-base font-black tracking-widest text-white">{activeLeague.inviteCode}</span>
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(activeLeague.inviteCode);
+                        alert("Invite code copied!");
+                      }}
+                      className="text-[9px] uppercase font-black text-indigo-400 hover:text-indigo-300"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+
+                {/* Read-Only Rules Cards */}
+                <div className="bg-white/[0.02] border border-white/5 p-5 rounded-3xl space-y-3.5">
+                  <h4 className="text-xs font-black uppercase tracking-wider text-gray-400 border-b border-white/5 pb-2">Roster Limits</h4>
+                  <div className="flex justify-between text-xs py-1">
+                    <span className="text-gray-500">Active Roster Size</span>
+                    <span className="font-bold">14 Athletes</span>
+                  </div>
+                  <div className="flex justify-between text-xs py-1">
+                    <span className="text-gray-500">Bench Slots</span>
+                    <span className="font-bold">4 Players</span>
+                  </div>
+                  <div className="flex justify-between text-xs py-1">
+                    <span className="text-gray-500">Forwards Starters</span>
+                    <span className="font-bold">6 Starters (Max 10)</span>
+                  </div>
+                </div>
               </div>
             )}
           </div>
-        )}
+        </div>
+      )}
 
-        {activeTab === 'create' && (
-          <div>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '8px' }}>Create a New League</h2>
-            <p style={{ color: 'var(--text-muted)', marginBottom: '32px' }}>Configure all your league settings here. Once the league is full, you can activate it and lock these settings in.</p>
+      {/* ── ATOMIC TRANSACTION MODAL POPUP (ACQUIRE FREE AGENT) ── */}
+      {selectedMarketPlayer && myTeam && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+          <div className="w-full max-w-sm bg-[#16161c] border border-white/10 rounded-3xl p-6 shadow-2xl relative">
+            <h3 className="text-sm font-black uppercase text-gray-400 tracking-wider">Confirm Transaction</h3>
             
-            <form onSubmit={handleCreateLeague} style={{ display: 'flex', flexDirection: 'column', gap: '40px' }}>
-              
-              {/* Section 1: Basics & Schedule */}
-              <div>
-                <h3 style={{ fontSize: '1.2rem', color: 'var(--primary-color)', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>1. Basics & Schedule</h3>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '24px' }}>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)' }}>League Name</label>
-                    <input type="text" className="input-field" value={createName} onChange={e => setCreateName(e.target.value)} placeholder="e.g. Office Hockey Pool" required />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)' }}>Number of Teams (4 - 10)</label>
-                    <select className="input-field" value={createMaxTeams} onChange={e => setCreateMaxTeams(e.target.value)} style={{ background: 'rgba(255,255,255,0.1)' }}>
-                      {[4, 5, 6, 7, 8, 9, 10].map(num => <option key={num} value={num} style={{ color: '#000' }}>{num}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)' }}>Match-up Duration</label>
-                    <select className="input-field" value={matchupDuration} onChange={e => setMatchupDuration(e.target.value)} style={{ background: 'rgba(255,255,255,0.1)' }}>
-                      <option value="1" style={{ color: '#000' }}>1 Week</option>
-                      <option value="2" style={{ color: '#000' }}>2 Weeks</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)' }}>Playoff Teams</label>
-                    <select className="input-field" value={playoffTeams} onChange={e => setPlayoffTeams(e.target.value)} style={{ background: 'rgba(255,255,255,0.1)' }}>
-                      <option value="2" style={{ color: '#000' }}>2 Teams</option>
-                      <option value="4" style={{ color: '#000' }}>4 Teams</option>
-                      <option value="6" style={{ color: '#000' }}>6 Teams</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)' }}>Playoff Match-up Duration</label>
-                    <select className="input-field" value={playoffDuration} onChange={e => setPlayoffDuration(e.target.value)} style={{ background: 'rgba(255,255,255,0.1)' }}>
-                      <option value="1" style={{ color: '#000' }}>1 Week</option>
-                      <option value="2" style={{ color: '#000' }}>2 Weeks</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
+            <div className="mt-4 p-4 rounded-2xl bg-white/[0.02] border border-white/5">
+              <span className="text-[9px] uppercase font-extrabold tracking-widest text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/15">ACQUIRE</span>
+              <p className="text-sm font-black text-white mt-2">{selectedMarketPlayer.name}</p>
+              <p className="text-[10px] text-gray-500 mt-0.5">{selectedMarketPlayer.pos} • {selectedMarketPlayer.team}</p>
+            </div>
 
-              {/* Section 2: Roster Settings */}
-              <div>
-                <h3 style={{ fontSize: '1.2rem', color: 'var(--primary-color)', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>2. Roster Sizes</h3>
-                
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '24px' }}>
-                   {/* Forwards */}
-                   <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <div style={{ fontWeight: '600', marginBottom: '16px' }}>Forwards (F)</div>
-                    <div style={{ display: 'flex', gap: '16px' }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Starters</label>
-                        <input type="number" min="0" className="input-field" value={settings.forwards.starters} onChange={e => handleSettingChange('forwards', 'starters', e.target.value)} />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Max</label>
-                        <input type="number" min="0" className="input-field" value={settings.forwards.max} onChange={e => handleSettingChange('forwards', 'max', e.target.value)} />
-                      </div>
-                    </div>
-                  </div>
+            <div className="mt-4">
+              <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-2">Designated Drop Player</label>
+              <select 
+                value={selectedDropPlayer} 
+                onChange={e => setSelectedDropPlayer(e.target.value)}
+                className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-xs text-white focus:outline-none"
+              >
+                <option value="" className="text-black">No Player (Add Only)</option>
+                {(myTeam.players || []).map(pId => {
+                  const pDetail = PWHL_ATHLETES_POOL.find(p => p.id === pId) || { name: pId };
+                  return <option key={pId} value={pId} className="text-black">Drop: {pDetail.name}</option>;
+                })}
+              </select>
+              <p className="text-[9px] text-gray-600 mt-2">Note: Dropped athletes will be placed on waivers for 48 hours.</p>
+            </div>
 
-                  {/* Defense */}
-                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <div style={{ fontWeight: '600', marginBottom: '16px' }}>Defense (D)</div>
-                    <div style={{ display: 'flex', gap: '16px' }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Starters</label>
-                        <input type="number" min="0" className="input-field" value={settings.defense.starters} onChange={e => handleSettingChange('defense', 'starters', e.target.value)} />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Max</label>
-                        <input type="number" min="0" className="input-field" value={settings.defense.max} onChange={e => handleSettingChange('defense', 'max', e.target.value)} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Goalies */}
-                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                    <div style={{ fontWeight: '600', marginBottom: '16px' }}>Goalies (G)</div>
-                    <div style={{ display: 'flex', gap: '16px' }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Starters</label>
-                        <input type="number" min="0" className="input-field" value={settings.goalies.starters} onChange={e => handleSettingChange('goalies', 'starters', e.target.value)} />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Max</label>
-                        <input type="number" min="0" className="input-field" value={settings.goalies.max} onChange={e => handleSettingChange('goalies', 'max', e.target.value)} />
-                      </div>
-                    </div>
-                  </div>
-                  
-                  {/* Bench & Total */}
-                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-                     <div style={{ display: 'flex', gap: '16px' }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: '600' }}>Bench Slots (BN)</label>
-                        <input type="number" min="0" className="input-field" value={settings.bench} onChange={e => setSettings(p => ({ ...p, bench: e.target.value }))} />
-                      </div>
-                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(108, 92, 231, 0.1)', borderRadius: '8px', border: '1px solid rgba(108, 92, 231, 0.3)' }}>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--primary-color)', fontWeight: 'bold' }}>Total Size</div>
-                        <div style={{ fontSize: '1.5rem', fontWeight: '800' }}>{totalTeamSize}</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Section 3: Scoring */}
-              <div>
-                <h3 style={{ fontSize: '1.2rem', color: 'var(--primary-color)', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>3. Scoring System</h3>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '24px' }}>
-                   {/* Skaters */}
-                   <div style={{ background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-                    <h4 style={{ color: 'var(--primary-color)', marginBottom: '16px', fontSize: '1rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Skaters</h4>
-                    <div style={{ display: 'grid', gap: '12px' }}>
-                      {[
-                        { key: 'goals', label: 'Goals (G)' },
-                        { key: 'assists', label: 'Assists (A)' },
-                        { key: 'plusMinus', label: 'Plus/Minus (+/-)' },
-                        { key: 'ppp', label: 'Power Play Points (PPP)' },
-                        { key: 'shp', label: 'Short Handed Points (SHP)' },
-                        { key: 'sog', label: 'Shots on Goal (SOG)' },
-                        { key: 'hits', label: 'Hits (HIT)' },
-                        { key: 'blocks', label: 'Blocked Shots (BLK)' },
-                        { key: 'defensePoints', label: 'Defense Points (DEF)' },
-                      ].map(stat => (
-                        <div key={stat.key} style={{ display: 'grid', gridTemplateColumns: '1fr 80px', gap: '16px', alignItems: 'center' }}>
-                          <label style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>{stat.label}</label>
-                          <input type="number" step="0.1" className="input-field" style={{ padding: '6px', textAlign: 'right' }} value={scoring.skaters[stat.key]} onChange={e => handleScoringChange('skaters', stat.key, e.target.value)} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Goalies */}
-                  <div style={{ background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-                    <h4 style={{ color: 'var(--primary-color)', marginBottom: '16px', fontSize: '1rem', textTransform: 'uppercase', letterSpacing: '1px' }}>Goalies</h4>
-                    <div style={{ display: 'grid', gap: '12px' }}>
-                      {[
-                        { key: 'wins', label: 'Wins (W)' },
-                        { key: 'otl', label: 'Overtime Losses (OTL)' },
-                        { key: 'ga', label: 'Goals Against (GA)' },
-                        { key: 'saves', label: 'Saves (SV)' },
-                        { key: 'shutouts', label: 'Shutouts (SHO)' },
-                      ].map(stat => (
-                        <div key={stat.key} style={{ display: 'grid', gridTemplateColumns: '1fr 80px', gap: '16px', alignItems: 'center' }}>
-                          <label style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>{stat.label}</label>
-                          <input type="number" step="0.1" className="input-field" style={{ padding: '6px', textAlign: 'right' }} value={scoring.goalies[stat.key]} onChange={e => handleScoringChange('goalies', stat.key, e.target.value)} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              <div style={{ position: 'sticky', bottom: '20px', background: 'rgba(15,15,19,0.9)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)', backdropFilter: 'blur(10px)', zIndex: 10 }}>
-                <button type="submit" className="btn-primary" disabled={createLoading} style={{ width: '100%', fontSize: '1.2rem', padding: '16px' }}>
-                  {createLoading ? 'Creating League...' : 'Create League'}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {activeTab === 'join' && (
-          <div style={{ maxWidth: '500px' }}>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '16px' }}>Join an Existing League</h2>
-            <form onSubmit={handleJoinLeague} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              {joinError && <div className="error-message">{joinError}</div>}
-              <div>
-                <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-muted)' }}>Invite Code</label>
-                <input 
-                  type="text" 
-                  className="input-field" 
-                  value={joinCode} 
-                  onChange={e => setJoinCode(e.target.value.toUpperCase())}
-                  placeholder="Enter 6-character code"
-                  maxLength={6}
-                  required
-                  style={{ textTransform: 'uppercase', letterSpacing: '2px', fontWeight: 'bold' }}
-                />
-              </div>
-              <button type="submit" className="btn-primary" disabled={joinLoading || joinCode.length !== 6} style={{ marginTop: '8px' }}>
-                {joinLoading ? 'Joining...' : 'Join League'}
+            <div className="flex gap-3 mt-6">
+              <button 
+                onClick={() => {
+                  setSelectedMarketPlayer(null);
+                  setSelectedDropPlayer('');
+                }}
+                disabled={transactionLoading}
+                className="flex-1 py-3.5 bg-white/5 hover:bg-white/10 border border-white/5 rounded-2xl text-[10px] font-black uppercase text-gray-400 tracking-wider active:scale-95 transition-transform"
+              >
+                Cancel
               </button>
-            </form>
+              <button 
+                onClick={handleMarketTransaction}
+                disabled={transactionLoading}
+                className="flex-1 py-3.5 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-2xl text-[10px] font-black uppercase text-white tracking-wider active:scale-95 transition-transform shadow-lg shadow-indigo-600/10"
+              >
+                {transactionLoading ? 'Executing...' : 'Confirm'}
+              </button>
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* ── FIXED MOBILE BOTTOM NAVIGATION BAR (LOCK UNDER SCREEN VIEWPORTS) ── */}
+      {activeLeague && (
+        <nav className="fixed bottom-0 left-0 right-0 h-16 bg-[#16161c]/95 border-t border-white/5 backdrop-blur-lg flex justify-around items-center px-2 z-40">
+          <button 
+            onClick={() => setActiveDashTab('standings')}
+            className={`flex flex-col items-center justify-center w-16 h-12 rounded-xl transition-all ${activeDashTab === 'standings' ? 'text-indigo-400 scale-105 font-bold' : 'text-gray-500 hover:text-gray-300'}`}
+          >
+            <span className="text-sm">🏆</span>
+            <span className="text-[9px] tracking-tight font-extrabold uppercase mt-0.5">Standings</span>
+          </button>
+
+          <button 
+            onClick={() => setActiveDashTab('scoreboard')}
+            className={`flex flex-col items-center justify-center w-16 h-12 rounded-xl transition-all ${activeDashTab === 'scoreboard' ? 'text-indigo-400 scale-105 font-bold' : 'text-gray-500 hover:text-gray-300'}`}
+          >
+            <span className="text-sm">📊</span>
+            <span className="text-[9px] tracking-tight font-extrabold uppercase mt-0.5">Scores</span>
+          </button>
+
+          <button 
+            onClick={() => setActiveDashTab('market')}
+            className={`flex flex-col items-center justify-center w-16 h-12 rounded-xl transition-all ${activeDashTab === 'market' ? 'text-indigo-400 scale-105 font-bold' : 'text-gray-500 hover:text-gray-300'}`}
+          >
+            <span className="text-sm">🛒</span>
+            <span className="text-[9px] tracking-tight font-extrabold uppercase mt-0.5">Market</span>
+          </button>
+
+          <button 
+            onClick={() => setActiveDashTab('settings')}
+            className={`flex flex-col items-center justify-center w-16 h-12 rounded-xl transition-all ${activeDashTab === 'settings' ? 'text-indigo-400 scale-105 font-bold' : 'text-gray-500 hover:text-gray-300'}`}
+          >
+            <span className="text-sm">⚙️</span>
+            <span className="text-[9px] tracking-tight font-extrabold uppercase mt-0.5">Settings</span>
+          </button>
+        </nav>
+      )}
+
     </div>
   );
 }
