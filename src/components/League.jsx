@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { db } from '../firebase.js';
+import { doc, getDoc, updateDoc, collection, getDocs } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 
 export default function League({ activeLeagueId }) {
   const { currentUser } = useAuth();
-  const [activeTab, setActiveTab] = useState('scoreboard');
+  const [activeTab, setActiveTab] = useState('scoreboard'); // 'scoreboard' | 'standings' | 'playoffs' | 'manager'
   const [leagueData, setLeagueData] = useState(null);
+  const [teams, setTeams] = useState([]);
   const [loading, setLoading] = useState(true);
 
   // Activation State
@@ -14,46 +15,57 @@ export default function League({ activeLeagueId }) {
   const [activating, setActivating] = useState(false);
   const [activateError, setActivateError] = useState('');
 
-  useEffect(() => {
+  const fetchLeagueDetails = async () => {
     if (!activeLeagueId) return;
-    async function fetchLeague() {
-      setLoading(true);
-      try {
-        const docRef = doc(db, 'fantasy_leagues', activeLeagueId);
-        const snap = await getDoc(docRef);
-        if (snap.exists()) {
-          setLeagueData(snap.data());
-        }
-      } catch (err) {
-        console.error("Error fetching league:", err);
-      } finally {
-        setLoading(false);
+    setLoading(true);
+    try {
+      const docRef = doc(db, 'fantasy_leagues', activeLeagueId);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        setLeagueData(snap.data());
       }
+
+      const tSnap = await getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/teams`));
+      setTeams(tSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (err) {
+      console.error("Error fetching league:", err);
+    } finally {
+      setLoading(false);
     }
-    fetchLeague();
+  };
+
+  useEffect(() => {
+    fetchLeagueDetails();
   }, [activeLeagueId]);
 
   if (!activeLeagueId) {
     return (
-      <div className="dashboard-container" style={{ textAlign: 'center', padding: '100px 20px' }}>
-        <h2>No Active League</h2>
-        <p style={{ color: 'var(--text-muted)' }}>Select or join a league to view its dashboard.</p>
+      <div className="min-h-[80vh] flex flex-col items-center justify-center px-6 text-center select-none">
+        <div className="w-16 h-16 rounded-full bg-indigo-500/10 border border-indigo-500/25 flex items-center justify-center text-3xl mb-6 shadow-xl animate-pulse">
+          🏆
+        </div>
+        <h2 className="text-xl font-bold text-white tracking-wide">No Active League</h2>
+        <p className="text-xs text-gray-500 mt-2 max-w-sm leading-relaxed">
+          Unlock your command center! Select or join a league to view schedules, standings, and playoff brackets.
+        </p>
       </div>
     );
   }
 
   if (loading) {
     return (
-      <div className="dashboard-container" style={{ textAlign: 'center', padding: '100px 20px' }}>
-        <p>Loading League Data...</p>
+      <div className="min-h-[85vh] flex items-center justify-center">
+        <div className="text-xs font-black tracking-widest text-gray-500 uppercase animate-pulse">
+          Loading League Command Center...
+        </div>
       </div>
     );
   }
 
   if (!leagueData) {
-     return (
-      <div className="dashboard-container" style={{ textAlign: 'center', padding: '100px 20px' }}>
-        <h2>League Not Found</h2>
+    return (
+      <div className="min-h-[80vh] flex flex-col items-center justify-center px-6 text-center">
+        <h2 className="text-lg font-bold text-white">League Not Found</h2>
       </div>
     );
   }
@@ -66,7 +78,7 @@ export default function League({ activeLeagueId }) {
     e.preventDefault();
     setActivateError('');
     if (!draftDate) {
-      setActivateError("Please select a draft date and time.");
+      setActivateError("Please select a draft date.");
       return;
     }
     
@@ -77,9 +89,8 @@ export default function League({ activeLeagueId }) {
         status: 'active',
         draftDate: new Date(draftDate).toISOString()
       });
-      // Update local state to reflect the change immediately
-      setLeagueData(prev => ({ ...prev, status: 'active', draftDate: new Date(draftDate).toISOString() }));
-      alert("League Activated Successfully!");
+      alert("League Activated successfully!");
+      fetchLeagueDetails();
     } catch (err) {
       console.error(err);
       setActivateError("Failed to activate league.");
@@ -88,198 +99,273 @@ export default function League({ activeLeagueId }) {
     }
   };
 
-  // Helper function to render a read-only stat row
-  const ReadOnlyRow = ({ label, value }) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
-      <span style={{ fontWeight: 'bold' }}>{value}</span>
-    </div>
-  );
-
   return (
-    <div className="dashboard-container">
-      <header className="dashboard-header" style={{ marginBottom: '32px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '8px' }}>
-          <h1 style={{ margin: 0 }}>{leagueData.name}</h1>
-          {leagueData.status === 'pending' ? (
-            <span className="pill pill-secondary">Pending</span>
-          ) : (
-            <span className="pill pill-primary">Active</span>
-          )}
+    <div className="min-h-screen bg-[#0f0f13] text-gray-100 px-4 pt-6 pb-24 select-none">
+      
+      {/* ── LEAGUE HEADER ── */}
+      <header className="mb-6">
+        <div className="flex items-center gap-3">
+          <span className="text-[9px] uppercase font-extrabold tracking-widest text-indigo-400 bg-indigo-500/10 px-2.5 py-0.5 rounded-full border border-indigo-500/15">
+            League Central
+          </span>
+          <span className={`text-[9px] uppercase font-extrabold tracking-widest px-2.5 py-0.5 rounded-full border ${isPending ? 'bg-amber-500/10 border-amber-500/15 text-amber-400' : 'bg-emerald-500/10 border-emerald-500/15 text-emerald-400'}`}>
+            {leagueData.status}
+          </span>
         </div>
-        <p>Your league's command center.</p>
+        <h1 className="text-2xl font-black mt-2 tracking-tight bg-gradient-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-transparent">
+          {leagueData.name}
+        </h1>
+        <p className="text-xs text-gray-500 font-semibold mt-1">Manage weekly standings, playoff trees, and commissioner configurations.</p>
       </header>
 
-      <div className="tabs" style={{ marginBottom: '32px' }}>
-        <button className={`tab ${activeTab === 'scoreboard' ? 'active' : ''}`} onClick={() => setActiveTab('scoreboard')}>Scoreboard</button>
-        <button className={`tab ${activeTab === 'standings' ? 'active' : ''}`} onClick={() => setActiveTab('standings')}>Standings</button>
-        <button className={`tab ${activeTab === 'schedule' ? 'active' : ''}`} onClick={() => setActiveTab('schedule')}>Schedule</button>
-        <button className={`tab ${activeTab === 'playoffs' ? 'active' : ''}`} onClick={() => setActiveTab('playoffs')}>Playoff Bracket</button>
-        {isCommish && (
-          <button className={`tab ${activeTab === 'manager' ? 'active' : ''}`} onClick={() => setActiveTab('manager')}>Manager Tools</button>
-        )}
+      {/* ── TAB NAVIGATION ── */}
+      <div className="flex p-1 bg-black/40 border border-white/5 rounded-2xl mb-6 shadow-inner overflow-x-auto scrollbar-none">
+        {[
+          { key: 'scoreboard', label: '📊 Scores' },
+          { key: 'standings', label: '🏆 Standings' },
+          { key: 'playoffs', label: '🌲 Bracket' },
+          ...(isCommish ? [{ key: 'manager', label: '⚙️ Commissioner' }] : [])
+        ].map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`flex-1 min-w-[80px] py-3 text-[10px] font-black uppercase tracking-wider rounded-xl transition-all duration-300 ${activeTab === tab.key ? 'bg-gradient-to-r from-indigo-600 to-violet-500 text-white shadow-md' : 'text-gray-400 hover:text-gray-200'}`}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
-      <div className="glass-panel">
-        {activeTab === 'scoreboard' && (
-          <div>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '16px' }}>Weekly Scoreboard</h2>
-            <p style={{ color: 'var(--text-muted)' }}>Displays the current matchups and live scores across the league for this week.</p>
-          </div>
-        )}
+      <div className="space-y-4">
         
-        {activeTab === 'standings' && (
-          <div>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '16px' }}>League Standings</h2>
-            <p style={{ color: 'var(--text-muted)' }}>Displays the ranked list of teams by Win/Loss record and total points.</p>
-          </div>
-        )}
-
-        {activeTab === 'schedule' && (
-          <div>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '16px' }}>Schedule & Results</h2>
-            <p style={{ color: 'var(--text-muted)' }}>Filter by team to see their past results and upcoming matchups.</p>
-          </div>
-        )}
-
-        {activeTab === 'playoffs' && (
-          <div>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '16px' }}>Playoff Bracket</h2>
-            <p style={{ color: 'var(--text-muted)' }}>The road to the championship. Visual bracket of the postseason.</p>
-          </div>
-        )}
-
-        {activeTab === 'manager' && isCommish && (
-          <div>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: '8px', color: 'var(--secondary-color)' }}>Commissioner Tools</h2>
+        {/* ── TAB 1: WEEKLY SCOREBOARDS ── */}
+        {activeTab === 'scoreboard' && (
+          <div className="space-y-4">
+            <h3 className="text-sm font-black uppercase tracking-wider text-gray-400 mb-2">H2H Matchup Arena</h3>
             
+            {/* Matchup Pair 1 */}
+            <div className="bg-white/[0.02] border border-white/5 p-5 rounded-3xl relative overflow-hidden">
+              <div className="flex justify-between items-center text-[9px] text-gray-500 font-bold uppercase tracking-wider mb-4">
+                <span>Matchup A</span>
+                <span className="text-emerald-400 flex items-center gap-1">
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                  </span>
+                  Active
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-xl">🐍</span>
+                  <span className="text-xs font-black text-white">Montreal Vipers</span>
+                </div>
+                <span className="text-sm font-black text-white">142.5</span>
+              </div>
+              <div className="flex justify-between items-center mt-3.5">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-xl">❄️</span>
+                  <span className="text-xs font-black text-white">Toronto Blizzard</span>
+                </div>
+                <span className="text-sm font-black text-white">128.0</span>
+              </div>
+            </div>
+
+            {/* Matchup Pair 2 */}
+            <div className="bg-white/[0.02] border border-white/5 p-5 rounded-3xl opacity-75">
+              <div className="flex justify-between items-center text-[9px] text-gray-500 font-bold uppercase tracking-wider mb-4">
+                <span>Matchup B</span>
+                <span>Ready</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-xl">🦁</span>
+                  <span className="text-xs font-black text-white">Boston Pride</span>
+                </div>
+                <span className="text-sm font-black text-white">0.0</span>
+              </div>
+              <div className="flex justify-between items-center mt-3.5">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-xl">⚡</span>
+                  <span className="text-xs font-black text-white">Ottawa Charge</span>
+                </div>
+                <span className="text-sm font-black text-white">0.0</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── TAB 2: STANDINGS LEADERBOARD ── */}
+        {activeTab === 'standings' && (
+          <div className="space-y-4">
+            <h3 className="text-sm font-black uppercase tracking-wider text-gray-400">Leaderboard Rankings</h3>
+
+            <div className="overflow-hidden border border-white/5 rounded-3xl bg-white/[0.01]">
+              <div className="grid grid-cols-12 bg-white/5 p-3.5 text-[10px] font-black uppercase text-gray-500 tracking-wider">
+                <div className="col-span-2">Rk</div>
+                <div className="col-span-6">Team</div>
+                <div className="col-span-2 text-right">W-L</div>
+                <div className="col-span-2 text-right">Pts</div>
+              </div>
+
+              <div className="divide-y divide-white/5">
+                {teams.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-gray-500">Standings loading or empty.</div>
+                ) : (
+                  [...teams]
+                    .sort((a,b) => (b.points || 0) - (a.points || 0))
+                    .map((team, idx) => (
+                      <div key={team.id} className="grid grid-cols-12 p-4 text-xs items-center">
+                        <div className="col-span-2 font-black text-gray-400">{idx + 1}</div>
+                        <div className="col-span-6 font-bold text-white flex items-center gap-2.5">
+                          <span>{idx === 0 ? '🐍' : idx === 1 ? '❄️' : '🏒'}</span>
+                          <span className="truncate">{team.teamName}</span>
+                          {team.ownerId === currentUser.uid && <span className="text-[8px] bg-indigo-500/20 text-indigo-400 px-1 py-0.2 rounded font-black">YOU</span>}
+                        </div>
+                        <div className="col-span-2 text-right font-medium text-gray-400">0-0</div>
+                        <div className="col-span-2 text-right font-black text-white">0.0</div>
+                      </div>
+                    ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── TAB 3: PLAYOFF BRACKET FLOWCHART ── */}
+        {activeTab === 'playoffs' && (
+          <div className="space-y-4">
+            <h3 className="text-sm font-black uppercase tracking-wider text-gray-400 mb-2">Playoff Tree Bracket</h3>
+            
+            <div className="space-y-6 relative pl-4 border-l border-white/5 py-2 select-none">
+              {/* Semifinal 1 */}
+              <div className="relative">
+                <div className="absolute -left-[21px] top-4 w-4 h-[1px] bg-white/10"></div>
+                <span className="text-[9px] uppercase font-black text-indigo-400 tracking-wider">Semifinal Match A</span>
+                <div className="bg-white/[0.02] border border-white/5 p-3 rounded-2xl mt-1 space-y-1">
+                  <div className="flex justify-between text-xs font-bold text-white">
+                    <span>#1 Seed</span>
+                    <span className="text-gray-500">-</span>
+                  </div>
+                  <div className="flex justify-between text-xs font-bold text-gray-400">
+                    <span>#4 Seed</span>
+                    <span className="text-gray-500">-</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Semifinal 2 */}
+              <div className="relative">
+                <div className="absolute -left-[21px] top-4 w-4 h-[1px] bg-white/10"></div>
+                <span className="text-[9px] uppercase font-black text-indigo-400 tracking-wider">Semifinal Match B</span>
+                <div className="bg-white/[0.02] border border-white/5 p-3 rounded-2xl mt-1 space-y-1">
+                  <div className="flex justify-between text-xs font-bold text-white">
+                    <span>#2 Seed</span>
+                    <span className="text-gray-500">-</span>
+                  </div>
+                  <div className="flex justify-between text-xs font-bold text-gray-400">
+                    <span>#3 Seed</span>
+                    <span className="text-gray-500">-</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Championship Match */}
+              <div className="relative pt-4 border-t border-white/5 mt-4">
+                <span className="text-[9px] uppercase font-black text-amber-400 tracking-wider flex items-center gap-1">👑 PWHL Championship Final</span>
+                <div className="bg-gradient-to-tr from-amber-500/10 to-transparent border border-amber-500/20 p-4 rounded-3xl mt-1 space-y-1.5">
+                  <div className="flex justify-between text-xs font-black text-white">
+                    <span>Winner Match A</span>
+                    <span className="text-amber-400">Ready</span>
+                  </div>
+                  <div className="flex justify-between text-xs font-black text-white">
+                    <span>Winner Match B</span>
+                    <span className="text-amber-400">Ready</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── TAB 4: COMMISSIONER TOOLS ── */}
+        {activeTab === 'manager' && isCommish && (
+          <div className="space-y-4">
+            <h3 className="text-sm font-black uppercase tracking-wider text-rose-400 mb-2">⚙️ Commissioner Rules & Status</h3>
+
             {isPending ? (
-              <div style={{ maxWidth: '600px', marginTop: '24px' }}>
-                <div style={{ background: 'rgba(0,0,0,0.3)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)', marginBottom: '32px' }}>
-                  <h3 style={{ marginBottom: '16px', color: 'var(--primary-color)' }}>Activation Status</h3>
-                  
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                    <span style={{ color: 'var(--secondary-color)', fontSize: '1.2rem' }}>✓</span>
-                    <span>League Created</span>
+              <div className="space-y-4">
+                <div className="bg-[#16161c] border border-white/10 p-5 rounded-3xl">
+                  <span className="text-[9px] uppercase font-black text-indigo-400">Recruitment Invite Code</span>
+                  <div className="flex items-center justify-between mt-3 bg-black/40 border border-white/5 px-4 py-2.5 rounded-2xl">
+                    <span className="text-base font-black tracking-widest text-white">{leagueData.inviteCode}</span>
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(leagueData.inviteCode);
+                        alert("Invite code copied!");
+                      }}
+                      className="text-[9px] uppercase font-black text-indigo-400 hover:text-indigo-300"
+                    >
+                      Copy
+                    </button>
                   </div>
-                  
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    {isFull ? (
-                      <span style={{ color: 'var(--secondary-color)', fontSize: '1.2rem' }}>✓</span>
-                    ) : (
-                      <span style={{ color: 'var(--text-muted)', fontSize: '1.2rem' }}>○</span>
-                    )}
-                    <span style={{ color: isFull ? 'var(--text-main)' : 'var(--text-muted)' }}>
-                      Members Joined ({leagueData.members.length} / {leagueData.maxTeams})
-                    </span>
-                  </div>
-                  
-                  {!isFull && (
-                    <div style={{ marginTop: '24px', padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                      <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginBottom: '8px' }}>Share this code with friends to join:</p>
-                      <p style={{ fontSize: '1.5rem', fontWeight: 'bold', letterSpacing: '2px', color: 'var(--primary-color)' }}>{leagueData.inviteCode}</p>
-                    </div>
-                  )}
                 </div>
 
                 {isFull && (
-                  <form onSubmit={handleActivateLeague} style={{ background: 'rgba(108, 92, 231, 0.1)', padding: '32px', borderRadius: '12px', border: '1px solid rgba(108, 92, 231, 0.3)' }}>
-                    <h3 style={{ marginBottom: '16px', fontSize: '1.3rem' }}>Ready to Activate</h3>
-                    <p style={{ color: 'var(--text-muted)', marginBottom: '24px' }}>
-                      Your league is full! Set a draft date to activate the league. 
-                      <strong> Activating the league will permanently lock all roster sizes, scoring, and playoff settings.</strong>
-                    </p>
+                  <form onSubmit={handleActivateLeague} className="bg-gradient-to-tr from-indigo-500/10 to-transparent border border-indigo-500/20 p-5 rounded-3xl space-y-4">
+                    <h4 className="text-xs font-black text-white">Ready for Activation</h4>
+                    <p className="text-[10px] text-gray-500 leading-relaxed">Your league is fully occupied. Enter a draft schedule date to activate weekly H2H points tracking. Activating will lock rules settings.</p>
                     
-                    {activateError && <div className="error-message">{activateError}</div>}
-                    
-                    <div style={{ marginBottom: '24px' }}>
-                      <label style={{ display: 'block', marginBottom: '8px', fontWeight: '600' }}>Draft Date & Time</label>
+                    {activateError && <div className="text-xs font-black text-rose-500 bg-rose-500/10 p-2.5 rounded-xl">{activateError}</div>}
+
+                    <div>
+                      <label className="block text-[9px] uppercase font-black tracking-widest text-gray-500 mb-2">Draft Schedule</label>
                       <input 
                         type="datetime-local" 
-                        className="input-field" 
-                        style={{ background: 'rgba(0,0,0,0.5)' }}
-                        value={draftDate}
-                        onChange={e => setDraftDate(e.target.value)}
-                        required
+                        value={draftDate} 
+                        onChange={e => setDraftDate(e.target.value)} 
+                        required 
+                        className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-xs text-white focus:outline-none"
                       />
                     </div>
-                    
-                    <button type="submit" className="btn-primary" disabled={activating} style={{ width: '100%', fontSize: '1.1rem', padding: '16px' }}>
-                      {activating ? 'Activating...' : 'Activate League & Lock Settings'}
+
+                    <button 
+                      type="submit" 
+                      disabled={activating}
+                      className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-2xl text-xs font-black uppercase tracking-wider text-white active:scale-95 transition-transform"
+                    >
+                      {activating ? 'Configuring arena...' : 'Activate League & Lock Rules'}
                     </button>
                   </form>
                 )}
               </div>
             ) : (
-              <div style={{ marginTop: '24px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '32px', color: 'var(--secondary-color)', background: 'rgba(0, 206, 201, 0.1)', padding: '16px', borderRadius: '8px' }}>
-                  <span style={{ fontSize: '1.2rem' }}>🔒</span>
-                  <span>League settings are locked.</span>
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 text-emerald-400 bg-emerald-500/10 border border-emerald-500/15 p-4 rounded-2xl text-xs font-black uppercase">
+                  <span>🔒 League settings are locked & active.</span>
                 </div>
 
-                <div style={{ display: 'flex', gap: '32px', flexWrap: 'wrap' }}>
-                  
-                  {/* Basic & Schedule Info */}
-                  <div style={{ flex: '1 1 300px', background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-                    <h3 style={{ marginBottom: '20px', fontSize: '1.2rem', color: 'var(--primary-color)', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>League Rules</h3>
-                    <ReadOnlyRow label="Match-up Duration" value={`${leagueData.scheduleSettings.matchupDuration} Week(s)`} />
-                    <ReadOnlyRow label="Playoff Teams" value={leagueData.scheduleSettings.playoffTeams} />
-                    <ReadOnlyRow label="Playoff Match-up" value={`${leagueData.scheduleSettings.playoffDuration} Week(s)`} />
-                    <ReadOnlyRow label="Draft Date" value={new Date(leagueData.draftDate).toLocaleString()} />
+                <div className="bg-white/[0.02] border border-white/5 p-5 rounded-3xl space-y-3">
+                  <h4 className="text-xs font-black uppercase tracking-wider text-gray-400 border-b border-white/5 pb-2">Active Configuration</h4>
+                  <div className="flex justify-between text-xs py-1">
+                    <span className="text-gray-500">Match-up Duration</span>
+                    <span className="font-bold">{leagueData.scheduleSettings?.matchupDuration || 1} Week(s)</span>
                   </div>
-
-                  {/* Roster Settings */}
-                  <div style={{ flex: '1 1 300px', background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-                    <h3 style={{ marginBottom: '20px', fontSize: '1.2rem', color: 'var(--primary-color)', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>Roster Structure</h3>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', color: 'var(--text-muted)', fontSize: '0.8rem', textTransform: 'uppercase', fontWeight: 'bold' }}>
-                      <span>Position</span>
-                      <div style={{ display: 'flex', gap: '24px', width: '120px', justifyContent: 'flex-end' }}>
-                        <span>Start</span>
-                        <span>Max</span>
-                      </div>
-                    </div>
-                    
-                    {['forwards', 'defense', 'goalies'].map(pos => (
-                      <div key={pos} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                        <span style={{ textTransform: 'capitalize' }}>{pos}</span>
-                        <div style={{ display: 'flex', gap: '24px', width: '120px', justifyContent: 'flex-end', fontWeight: 'bold' }}>
-                          <span>{leagueData.rosterSettings[pos].starters}</span>
-                          <span style={{ color: 'var(--text-muted)' }}>{leagueData.rosterSettings[pos].max}</span>
-                        </div>
-                      </div>
-                    ))}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                      <span>Bench</span>
-                      <span style={{ fontWeight: 'bold' }}>{leagueData.rosterSettings.bench}</span>
-                    </div>
+                  <div className="flex justify-between text-xs py-1">
+                    <span className="text-gray-500">Playoff Entrants</span>
+                    <span className="font-bold">{leagueData.scheduleSettings?.playoffTeams || 4} Teams</span>
                   </div>
-
-                </div>
-                
-                {/* Scoring Settings */}
-                <div style={{ marginTop: '32px', background: 'rgba(0,0,0,0.2)', padding: '24px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
-                  <h3 style={{ marginBottom: '20px', fontSize: '1.2rem', color: 'var(--primary-color)', borderBottom: '1px solid var(--border-color)', paddingBottom: '8px' }}>Scoring System</h3>
-                  <div style={{ display: 'flex', gap: '32px', flexWrap: 'wrap' }}>
-                    <div style={{ flex: '1 1 300px' }}>
-                      <h4 style={{ color: 'var(--text-muted)', marginBottom: '16px', textTransform: 'uppercase' }}>Skaters</h4>
-                      {Object.entries(leagueData.scoringSettings.skaters).map(([key, value]) => (
-                        <ReadOnlyRow key={key} label={key.replace(/([A-Z])/g, ' $1').trim().toUpperCase()} value={value} />
-                      ))}
-                    </div>
-                    <div style={{ flex: '1 1 300px' }}>
-                      <h4 style={{ color: 'var(--text-muted)', marginBottom: '16px', textTransform: 'uppercase' }}>Goalies</h4>
-                      {Object.entries(leagueData.scoringSettings.goalies).map(([key, value]) => (
-                        <ReadOnlyRow key={key} label={key.toUpperCase()} value={value} />
-                      ))}
-                    </div>
+                  <div className="flex justify-between text-xs py-1">
+                    <span className="text-gray-500">Draft Date</span>
+                    <span className="font-bold">{leagueData.draftDate ? new Date(leagueData.draftDate).toLocaleString() : 'N/A'}</span>
                   </div>
                 </div>
-
               </div>
             )}
           </div>
         )}
       </div>
+
     </div>
   );
 }
