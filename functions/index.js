@@ -1,6 +1,7 @@
 const functions = require("firebase-functions");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
+const { Timestamp } = require("firebase-admin/firestore");
 const { getSystemDate } = require("./utils");
 
 admin.initializeApp();
@@ -392,7 +393,7 @@ async function crunchStatsAndFantasyPoints(seasonIdStr, cutoffDate) {
   }));
   scoringContexts.push({ id: "global", scoring: defaultScoring });
 
-  const timestampValue = admin.firestore.Timestamp.fromDate(cutoffDate);
+  const timestampValue = Timestamp.fromDate(cutoffDate);
 
   for (const context of scoringContexts) {
     const leagueId = context.id;
@@ -610,7 +611,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
     }
 
     const systemTimeMs = await getSystemDate();
-    const systemTimestamp = admin.firestore.Timestamp.fromMillis(systemTimeMs);
+    const systemTimestamp = Timestamp.fromMillis(systemTimeMs);
 
     // A. Create 7 Bot Users
     for (let i = 0; i < 7; i++) {
@@ -930,7 +931,7 @@ async function handleDraftStateChange(docSnap) {
       const totalPicks = maxRounds * N;
 
       const systemTimeMs = await getSystemDate();
-      const systemTimestamp = admin.firestore.Timestamp.fromMillis(systemTimeMs);
+      const systemTimestamp = Timestamp.fromMillis(systemTimeMs);
 
       // Create new pick entry
       const newPickEntry = {
@@ -965,7 +966,7 @@ async function handleDraftStateChange(docSnap) {
         }
       }
 
-      const nextDeadline = admin.firestore.Timestamp.fromMillis(systemTimeMs + 60000);
+      const nextDeadline = Timestamp.fromMillis(systemTimeMs + 60000);
 
       // Prepare schema updates (supports both camelCase and snake_case schemas)
       const draftUpdates = {
@@ -1331,7 +1332,7 @@ exports.onSimulationStateWritten = onDocumentWritten("admin_settings/simulation_
           awayScore: awayScore,
           status: "completed",
           winnerId: homeWin ? matchup.homeTeamId : (awayWin ? matchup.awayTeamId : "TIE"),
-          updatedAt: admin.firestore.Timestamp.fromMillis(Date.now())
+          updatedAt: Timestamp.fromMillis(Date.now())
         });
       }
 
