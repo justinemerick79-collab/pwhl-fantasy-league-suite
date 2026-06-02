@@ -93,15 +93,21 @@ export default function AdminPanel() {
   const [isUpdatingDate, setIsUpdatingDate] = useState(false);
 
   useEffect(() => {
-    const unsub = onSnapshot(doc(db, "admin_settings", "simulation_state"), (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setSimulationState(data);
-        if (data.current_simulated_date) {
-          setJumpDate(data.current_simulated_date);
+    const unsub = onSnapshot(
+      doc(db, "admin_settings", "simulation_state"), 
+      (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setSimulationState(data);
+          if (data.current_simulated_date) {
+            setJumpDate(data.current_simulated_date);
+          }
         }
+      },
+      (err) => {
+        console.warn("Time Machine subscription error (doc may not exist or permission denied):", err);
       }
-    });
+    );
     return () => unsub();
   }, []);
 
@@ -427,7 +433,7 @@ export default function AdminPanel() {
                     background: user.role === 'admin' ? 'rgba(108, 92, 231, 0.2)' : 'rgba(255, 255, 255, 0.1)',
                     color: user.role === 'admin' ? 'var(--primary-color)' : 'var(--text-main)'
                   }}>
-                    {user.role.toUpperCase()}
+                    {(user.role || 'user').toUpperCase()}
                   </span>
                 </td>
                 <td style={{ padding: '16px 24px' }}>
