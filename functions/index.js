@@ -1,6 +1,7 @@
 const functions = require("firebase-functions");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
+const { getSystemDate } = require("./utils");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -169,7 +170,7 @@ async function getCutoffDate() {
     console.error("Error reading app_settings/time_travel:", err);
   }
   
-  return new Date();
+  return new Date(await getSystemDate());
 }
 
 /**
@@ -429,11 +430,9 @@ exports.onGameSummaryWritten = onDocumentWritten("pwhl_game_summaries/{gameId}",
   // Add global default fallback context
   scoringContexts.push({ id: "global", scoring: defaultScoring });
 
-  // Use simulated mock date for updatedAt if time travel is active, else serverTimestamp
-  const isTimeTravelActive = Math.abs(cutoffDate.getTime() - new Date().getTime()) > 10000;
-  const timestampValue = isTimeTravelActive 
-    ? admin.firestore.Timestamp.fromDate(cutoffDate) 
-    : admin.firestore.FieldValue.serverTimestamp();
+  // Use simulated mock date for updatedAt via central getSystemDate clock
+  const systemTimeMs = await getSystemDate();
+  const timestampValue = admin.firestore.Timestamp.fromMillis(systemTimeMs);
 
   for (const context of scoringContexts) {
     const leagueId = context.id;
@@ -593,6 +592,8 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
   };
 
   const batch = db.batch();
+  const systemTimeMs = await getSystemDate();
+  const systemTimestamp = admin.firestore.Timestamp.fromMillis(systemTimeMs);
 
   // A. Create 7 Bot Users
   for (let i = 0; i < 7; i++) {
@@ -602,7 +603,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
       role: "user",
       isBot: true,
       isTestNode: true,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: systemTimestamp
     });
   }
 
@@ -613,7 +614,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
     teamName: "Admin Vipers",
     avatar: "🏒",
     isTestNode: true,
-    joinedAt: admin.firestore.FieldValue.serverTimestamp()
+    joinedAt: systemTimestamp
   });
 
   // C. Create 7 Bot Team documents
@@ -626,7 +627,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
       teamName: `Bot Team ${i + 1}`,
       avatar: "🤖",
       isTestNode: true,
-      joinedAt: admin.firestore.FieldValue.serverTimestamp()
+      joinedAt: systemTimestamp
     });
   }
 
@@ -642,7 +643,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
     userIds: allMembers,
     status: "active_full",
     isTestNode: true,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAt: systemTimestamp,
     rosterSettings: defaultRosterSettings,
     scoringSettings: defaultScoringSettings,
     scheduleSettings: defaultScheduleSettings,
@@ -681,7 +682,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
         awayScore: 0,
         status: "pending",
         isTestNode: true,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: systemTimestamp
       });
 
       // Second round-robin (Weeks 8-14, home and away swapped)
@@ -696,7 +697,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
         awayScore: 0,
         status: "pending",
         isTestNode: true,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: systemTimestamp
       });
     }
     

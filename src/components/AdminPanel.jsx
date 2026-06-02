@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { db, functions } from '../firebase';
-import { collection, getDocs, doc, updateDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { runFullSync } from '../services/pwhlService';
 import DataHub from './DataHub';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
-import { setDoc } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 
 function TimeTravelSettings() {
@@ -85,6 +84,27 @@ export default function AdminPanel() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [simLog, setSimLog] = useState('');
 
+  const [simulationState, setSimulationState] = useState({
+    testModeActive: false,
+    current_simulated_date: '',
+    active_test_league_id: ''
+  });
+  const [jumpDate, setJumpDate] = useState('');
+  const [isUpdatingDate, setIsUpdatingDate] = useState(false);
+
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "admin_settings", "simulation_state"), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setSimulationState(data);
+        if (data.current_simulated_date) {
+          setJumpDate(data.current_simulated_date);
+        }
+      }
+    });
+    return () => unsub();
+  }, []);
+
   useEffect(() => {
     async function fetchUsersAndSeasons() {
       try {
@@ -160,6 +180,27 @@ export default function AdminPanel() {
       console.error("Simulation Initialization Error:", err);
     } finally {
       setIsSimulating(false);
+    }
+  }
+
+  async function handleJumpToDate() {
+    if (!jumpDate) {
+      alert("Please select a date first.");
+      return;
+    }
+    setIsUpdatingDate(true);
+    try {
+      const simStateRef = doc(db, "admin_settings", "simulation_state");
+      await setDoc(simStateRef, {
+        testModeActive: true,
+        current_simulated_date: jumpDate
+      }, { merge: true });
+      alert(`Central system clock warped to: ${jumpDate}`);
+    } catch (err) {
+      alert("Failed to warp central system clock: " + err.message);
+      console.error(err);
+    } finally {
+      setIsUpdatingDate(false);
     }
   }
 
@@ -298,6 +339,68 @@ export default function AdminPanel() {
               {simLog}
             </div>
           )}
+        </div>
+
+        {/* Time Machine Card */}
+        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+            <div>
+              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Time Machine</h2>
+              <p style={{ color: 'var(--text-muted)' }}>Control and warp the application's central clock.</p>
+            </div>
+            <span style={{ fontSize: '2rem' }}>🛸</span>
+          </div>
+
+          <div style={{ 
+            background: 'rgba(0,0,0,0.2)', 
+            padding: '16px', 
+            borderRadius: '12px', 
+            border: '1px solid var(--border-color)', 
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+            marginBottom: '16px'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
+              <span style={{ color: 'var(--text-muted)' }}>Real-World Date:</span>
+              <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString()}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', alignItems: 'center' }}>
+              <span style={{ color: 'var(--text-muted)' }}>Simulated Clock:</span>
+              <span style={{ 
+                fontWeight: '700', 
+                color: simulationState.testModeActive ? 'var(--primary-color)' : 'var(--text-main)',
+                background: simulationState.testModeActive ? 'rgba(108, 92, 231, 0.1)' : 'transparent',
+                padding: simulationState.testModeActive ? '2px 8px' : '0',
+                borderRadius: '4px'
+              }}>
+                {simulationState.testModeActive && simulationState.current_simulated_date
+                  ? new Date(simulationState.current_simulated_date).toLocaleDateString()
+                  : 'Real-Time Clock Active'}
+              </span>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: 'auto' }}>
+            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Set Simulated Date</label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input 
+                type="date" 
+                className="input-field" 
+                style={{ flexGrow: 1 }}
+                value={jumpDate} 
+                onChange={(e) => setJumpDate(e.target.value)}
+              />
+              <button 
+                className="btn-primary" 
+                style={{ padding: '8px 16px', fontSize: '0.85rem', whiteSpace: 'nowrap', cursor: 'pointer' }}
+                onClick={handleJumpToDate}
+                disabled={isUpdatingDate}
+              >
+                {isUpdatingDate ? 'Warping...' : 'Jump to Date'}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
