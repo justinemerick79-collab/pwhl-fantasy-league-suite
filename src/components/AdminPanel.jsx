@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { db } from '../firebase';
+import { db, functions } from '../firebase';
 import { collection, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { runFullSync } from '../services/pwhlService';
 import DataHub from './DataHub';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { setDoc } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 
 function TimeTravelSettings() {
   const { timeTravelState } = useTimeTravel();
@@ -81,6 +82,9 @@ export default function AdminPanel() {
   const [seasons, setSeasons] = useState([]);
   const [syncTargetSeason, setSyncTargetSeason] = useState('all');
 
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simLog, setSimLog] = useState('');
+
   useEffect(() => {
     async function fetchUsersAndSeasons() {
       try {
@@ -129,6 +133,33 @@ export default function AdminPanel() {
       console.error(err);
     } finally {
       setIsSyncing(false);
+    }
+  }
+
+  async function handleStartTestSeason() {
+    setIsSimulating(true);
+    setSimLog('Triggering backend initialization...');
+    try {
+      const initializeTestEnvironment = httpsCallable(functions, 'initializeTestEnvironment');
+      const res = await initializeTestEnvironment();
+      
+      if (res.data?.success) {
+        const newLeagueId = res.data.active_test_league_id;
+        setSimLog(`Success! Test League Created: ${newLeagueId}`);
+        alert(`Simulation Sandbox Successfully Active!\nLeague: ${res.data.leagueName || "Simulation Test League"}\nID: ${newLeagueId}`);
+        
+        // Save the new league ID as the active league and refresh the page to auto-load
+        localStorage.setItem('pwhl_active_league', newLeagueId);
+        window.location.reload();
+      } else {
+        throw new Error(res.data?.error || 'Failed to initialize test environment.');
+      }
+    } catch (err) {
+      setSimLog(`Error: ${err.message}`);
+      alert(`Simulation Mode Initialization Failed:\n${err.message}`);
+      console.error("Simulation Initialization Error:", err);
+    } finally {
+      setIsSimulating(false);
     }
   }
 
@@ -195,6 +226,78 @@ export default function AdminPanel() {
           <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)', marginBottom: '16px' }}>
              <TimeTravelSettings />
           </div>
+        </div>
+
+        {/* Simulation Mode Card */}
+        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+            <div>
+              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Simulation Mode</h2>
+              <p style={{ color: 'var(--text-muted)' }}>Generate a complete safe testing environment.</p>
+            </div>
+            <span style={{ fontSize: '2rem' }}>⚡</span>
+          </div>
+          
+          <div style={{ 
+            background: 'rgba(0,0,0,0.2)', 
+            padding: '20px', 
+            borderRadius: '12px', 
+            border: '1px solid var(--border-color)', 
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '16px',
+            flexGrow: 1,
+            justifyContent: 'center'
+          }}>
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', lineHeight: '1.5', margin: 0 }}>
+              Instantly provisions a sandbox environment containing:
+            </p>
+            <ul style={{ 
+              fontSize: '0.85rem', 
+              color: 'var(--text-main)', 
+              margin: '0 0 8px 0', 
+              paddingLeft: '20px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px'
+            }}>
+              <li>7 Bot Users with automatic teams</li>
+              <li>1 Active 8-Team League (Simulation Test League)</li>
+              <li>28 Weekly H2H Matchups pre-scheduled</li>
+              <li>All test nodes tagged with <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px' }}>isTestNode: true</code></li>
+            </ul>
+
+            <button 
+              className="btn-primary" 
+              style={{ 
+                background: 'linear-gradient(135deg, #10B981, #059669)',
+                boxShadow: '0 4px 14px rgba(16, 185, 129, 0.4)',
+                border: 'none',
+                fontWeight: '700',
+                transition: 'transform 0.2s, box-shadow 0.2s',
+                cursor: 'pointer'
+              }}
+              onClick={handleStartTestSeason}
+              disabled={isSimulating}
+            >
+              {isSimulating ? 'Initializing Environment...' : 'Start Test Season ⚡'}
+            </button>
+          </div>
+
+          {simLog && (
+            <div style={{ 
+              marginTop: '16px', 
+              padding: '12px', 
+              background: 'rgba(16, 185, 129, 0.1)', 
+              color: '#34D399', 
+              borderRadius: '8px', 
+              fontSize: '0.85rem', 
+              textAlign: 'center',
+              border: '1px solid rgba(16, 185, 129, 0.2)'
+            }}>
+              {simLog}
+            </div>
+          )}
         </div>
       </div>
 

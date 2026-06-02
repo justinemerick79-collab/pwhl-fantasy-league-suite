@@ -529,3 +529,187 @@ exports.onGameSummaryWritten = onDocumentWritten("pwhl_game_summaries/{gameId}",
   console.log(`Successfully aggregated and crunched player stats for season ${seasonIdStr} across ${scoringContexts.length} scoring contexts!`);
   return null;
 });
+
+/**
+ * HTTPS Callable Cloud Function to initialize the QA Simulation Sandbox.
+ * Automatically provisions a test sandbox consisting of 7 bot users,
+ * an active 8-team filled league, 8 team sheets, and a 7-week matchup schedule.
+ */
+exports.initializeTestEnvironment = functions.https.onCall(async (data, context) => {
+  // 1. Enforce user authentication
+  if (!context.auth) {
+    throw new functions.https.HttpsError(
+      "unauthenticated",
+      "The function must be called by an authenticated user."
+    );
+  }
+
+  const adminUid = context.auth.uid;
+
+  // 2. Enforce admin privilege check
+  const userRef = db.collection("users").doc(adminUid);
+  const userSnap = await userRef.get();
+  if (!userSnap.exists || userSnap.data().role !== "admin") {
+    throw new functions.https.HttpsError(
+      "permission-denied",
+      "Only authenticated admin accounts can initialize the simulation mode."
+    );
+  }
+
+  console.log(`[Simulation] Admin ${adminUid} started test environment setup...`);
+
+  // Initialize references
+  const leagueRef = db.collection("fantasy_leagues").doc();
+  const leagueId = leagueRef.id;
+
+  // Generate 7 Bot UIDs & Refs
+  const botUids = [];
+  const botRefs = [];
+  for (let i = 1; i <= 7; i++) {
+    const botRef = db.collection("users").doc();
+    botUids.push(botRef.id);
+    botRefs.push(botRef);
+  }
+
+  // Define defaults
+  const defaultRosterSettings = {
+    forwards: { starters: 6, max: 10 },
+    defense: { starters: 4, max: 8 },
+    goalies: { starters: 1, max: 3 },
+    bench: 4
+  };
+  const defaultScoringSettings = {
+    skaters: {
+      goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5
+    },
+    goalies: {
+      wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3
+    }
+  };
+  const defaultScheduleSettings = {
+    matchupDuration: 1,
+    playoffTeams: 4,
+    playoffDuration: 1
+  };
+
+  const batch = db.batch();
+
+  // A. Create 7 Bot Users
+  for (let i = 0; i < 7; i++) {
+    batch.set(botRefs[i], {
+      email: `bot_${i + 1}_${leagueId.slice(0, 4)}@fantasy.com`,
+      displayName: `Bot Team ${i + 1}`,
+      role: "user",
+      isBot: true,
+      isTestNode: true,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  }
+
+  // B. Create Admin Team document
+  const adminTeamRef = leagueRef.collection("teams").doc();
+  batch.set(adminTeamRef, {
+    ownerId: adminUid,
+    teamName: "Admin Vipers",
+    avatar: "🏒",
+    isTestNode: true,
+    joinedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  // C. Create 7 Bot Team documents
+  const botTeamRefs = [];
+  for (let i = 0; i < 7; i++) {
+    const botTeamRef = leagueRef.collection("teams").doc();
+    botTeamRefs.push(botTeamRef);
+    batch.set(botTeamRef, {
+      ownerId: botUids[i],
+      teamName: `Bot Team ${i + 1}`,
+      avatar: "🤖",
+      isTestNode: true,
+      joinedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  }
+
+  // D. Create filled League document (active_full)
+  const allMembers = [adminUid, ...botUids];
+  batch.set(leagueRef, {
+    name: "Simulation Test League",
+    ownerId: adminUid,
+    commissionerId: adminUid,
+    maxTeams: 8,
+    inviteCode: "SIMTEST",
+    members: allMembers,
+    userIds: allMembers,
+    status: "active_full",
+    isTestNode: true,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    rosterSettings: defaultRosterSettings,
+    scoringSettings: defaultScoringSettings,
+    scheduleSettings: defaultScheduleSettings,
+    waiverOrder: [adminTeamRef.id, ...botTeamRefs.map(r => r.id)]
+  });
+
+  // E. Generate mathematically perfect Weekly H2H Matchups (Circle Rotation)
+  const numTeams = 8;
+  const rounds = numTeams - 1; // 7 rounds
+  const teamIds = [adminTeamRef.id, ...botTeamRefs.map(r => r.id)];
+  
+  const teamNamesMap = {
+    [adminTeamRef.id]: "Admin Vipers"
+  };
+  for (let i = 0; i < 7; i++) {
+    teamNamesMap[botTeamRefs[i].id] = `Bot Team ${i + 1}`;
+  }
+
+  const list = [...teamIds];
+
+  for (let round = 0; round < rounds; round++) {
+    const weekNum = round + 1;
+    for (let i = 0; i < numTeams / 2; i++) {
+      const home = list[i];
+      const away = list[numTeams - 1 - i];
+      
+      const matchupRef = leagueRef.collection("matchups").doc(`week_${weekNum}_matchup_${i + 1}`);
+      batch.set(matchupRef, {
+        week: weekNum,
+        homeTeamId: home,
+        awayTeamId: away,
+        homeTeamName: teamNamesMap[home],
+        awayTeamName: teamNamesMap[away],
+        homeScore: 0,
+        awayScore: 0,
+        status: "pending",
+        isTestNode: true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+    
+    // Circle method rotation (keeping list[0] fixed)
+    const last = list[numTeams - 1];
+    for (let j = numTeams - 1; j > 1; j--) {
+      list[j] = list[j - 1];
+    }
+    list[1] = last;
+  }
+
+  // F. Create Global simulation state
+  const simStateRef = db.collection("admin_settings").doc("simulation_state");
+  batch.set(simStateRef, {
+    testModeActive: true,
+    current_simulated_date: null,
+    active_test_league_id: leagueId,
+    isTestNode: true
+  });
+
+  // Execute batch transactions
+  await batch.commit();
+
+  console.log(`[Simulation] Test environment initialized. League: ${leagueId}`);
+
+  return {
+    success: true,
+    active_test_league_id: leagueId,
+    leagueName: "Simulation Test League"
+  };
+});
+
