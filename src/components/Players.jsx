@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase.js';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { submitAddDrop } from '../services/leagueService.js';
 
@@ -33,13 +33,31 @@ export default function Players({ activeLeagueId }) {
 
   // Active database loader states
   const [loading, setLoading] = useState(true);
+  const [loadingLeague, setLoadingLeague] = useState(true);
   const [teamsList, setTeamsList] = useState([]);
   const [myTeam, setMyTeam] = useState(null);
+  const [leagueData, setLeagueData] = useState(null);
   const [transactionLoading, setTransactionLoading] = useState(false);
 
   // Modal active state for Add/Drop trigger
   const [selectedScoutPlayer, setSelectedScoutPlayer] = useState(null);
   const [selectedDropPlayer, setSelectedDropPlayer] = useState('');
+
+  // Fetch league status details
+  useEffect(() => {
+    if (!activeLeagueId) return;
+    setLoadingLeague(true);
+    const docRef = doc(db, 'fantasy_leagues', activeLeagueId);
+    getDoc(docRef).then((snap) => {
+      if (snap.exists()) {
+        setLeagueData(snap.data());
+      }
+      setLoadingLeague(false);
+    }).catch(err => {
+      console.error("Error loading league status:", err);
+      setLoadingLeague(false);
+    });
+  }, [activeLeagueId]);
 
   // Load team data dynamically
   const fetchTeamsAndRosters = async () => {
@@ -68,31 +86,48 @@ export default function Players({ activeLeagueId }) {
   if (!activeLeagueId) {
     return (
       <div className="min-h-[80vh] flex flex-col items-center justify-center px-6 text-center select-none">
-        <div className="w-16 h-16 rounded-full bg-indigo-500/10 border border-indigo-500/25 flex items-center justify-center text-3xl mb-6 shadow-xl animate-pulse">
+        <div className="w-16 h-16 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-3xl mb-6 shadow-sm animate-pulse">
           🔍
         </div>
-        <h2 className="text-xl font-bold text-white tracking-wide">No Active League</h2>
-        <p className="text-xs text-gray-500 mt-2 max-w-sm leading-relaxed">
+        <h2 className="text-xl font-sports font-black text-gray-900 tracking-tight">No Active League</h2>
+        <p className="text-xs text-gray-500 mt-2 max-w-sm font-semibold leading-relaxed">
           Start scouting! Select an active league dashboard first to view the PWHL player database.
         </p>
       </div>
     );
   }
 
+  if (loading || loadingLeague) {
+    return (
+      <div className="min-h-[80vh] flex items-center justify-center">
+        <div className="text-xs font-black tracking-widest text-gray-400 uppercase animate-pulse">
+          Syncing scouts database...
+        </div>
+      </div>
+    );
+  }
+
+  const isPending = leagueData && (
+    leagueData.status === 'pending' || 
+    (leagueData.members && leagueData.members.length < leagueData.maxTeams) || 
+    !leagueData.draftDate
+  );
+
   // Map each player ID to its owner team document inside the league
   const getPlayerOwnerInfo = (playerId) => {
     const owningTeam = teamsList.find(t => (t.players || []).includes(playerId));
-    if (!owningTeam) return { status: "available", label: "FA", color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/15" };
+    if (!owningTeam) return { status: "available", label: "FA", color: "text-emerald-600 bg-emerald-50 border-emerald-100" };
     
     if (owningTeam.ownerId === currentUser.uid) {
-      return { status: "mine", label: "Your Team", color: "text-indigo-400 bg-indigo-500/15 border-indigo-500/20" };
+      return { status: "mine", label: "Your Team", color: "text-indigo-600 bg-indigo-50 border-indigo-100" };
     }
     
-    return { status: "rostered", label: owningTeam.teamName, color: "text-gray-400 bg-white/5 border-white/5" };
+    return { status: "rostered", label: owningTeam.teamName, color: "text-gray-500 bg-gray-50 border-gray-200" };
   };
 
   // Perform Add/Drop Transaction
   const handleScoutingTransaction = async () => {
+    if (isPending) return;
     if (!activeLeagueId || !myTeam || !selectedScoutPlayer) return;
     setTransactionLoading(true);
     try {
@@ -138,128 +173,234 @@ export default function Players({ activeLeagueId }) {
   });
 
   return (
-    <div className="min-h-screen bg-[#0f0f13] text-gray-100 px-4 pt-6 pb-24 select-none">
+    <div className="font-sans select-none antialiased">
       
       {/* ── HEADER ── */}
       <header className="mb-6">
-        <span className="text-[9px] uppercase font-extrabold tracking-widest text-indigo-400 bg-indigo-500/10 px-2.5 py-0.5 rounded-full border border-indigo-500/15">
+        <span className="text-[10px] uppercase font-black tracking-widest text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-full border border-indigo-100 shadow-sm shadow-indigo-100/10">
           Scouting Database
         </span>
-        <h1 className="text-2xl font-black mt-2 tracking-tight bg-gradient-to-r from-white via-gray-200 to-gray-400 bg-clip-text text-transparent">
+        <h1 className="font-sports text-3xl font-black mt-3 tracking-tight text-gray-900">
           PWHL Athletes
         </h1>
-        <p className="text-xs text-gray-500 font-semibold mt-1">Research stats, evaluate availability, and secure free agents.</p>
+        <p className="text-xs text-gray-400 font-semibold tracking-wide mt-0.5">Research stats, evaluate availability, and secure free agents.</p>
       </header>
 
-      {/* ── SEARCH & FILTER CONTROLS ── */}
-      <div className="bg-white/[0.02] border border-white/5 p-4 rounded-3xl mb-6 space-y-3">
-        <input 
-          type="text" 
-          placeholder="Search athlete by name..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-xs text-white focus:outline-none focus:border-indigo-500"
-        />
-        
-        <div className="grid grid-cols-3 gap-2.5">
-          {/* Availability */}
-          <select 
-            value={filterAvailability} 
-            onChange={(e) => setFilterAvailability(e.target.value)}
-            className="bg-black/40 border border-white/10 rounded-xl px-2.5 py-2.5 text-[10px] font-bold text-gray-400 focus:outline-none"
-          >
-            <option value="all" className="text-black">All Players</option>
-            <option value="available" className="text-black">Free Agents</option>
-            <option value="rostered" className="text-black">Rostered Only</option>
-          </select>
-
-          {/* Position */}
-          <select 
-            value={filterPosition} 
-            onChange={(e) => setFilterPosition(e.target.value)}
-            className="bg-black/40 border border-white/10 rounded-xl px-2.5 py-2.5 text-[10px] font-bold text-gray-400 focus:outline-none"
-          >
-            <option value="all" className="text-black">All Roles</option>
-            <option value="skaters" className="text-black">Skaters Only</option>
-            <option value="F" className="text-black">Forwards</option>
-            <option value="D" className="text-black">Defense</option>
-            <option value="G" className="text-black">Goalies</option>
-          </select>
-
-          {/* PWHL Team */}
-          <select 
-            value={filterTeam} 
-            onChange={(e) => setFilterTeam(e.target.value)}
-            className="bg-black/40 border border-white/10 rounded-xl px-2.5 py-2.5 text-[10px] font-bold text-gray-400 focus:outline-none"
-          >
-            <option value="all" className="text-black">All Teams</option>
-            {["BOS", "MIN", "MTL", "NY", "OTT", "TOR"].map(t => (
-              <option key={t} value={t} className="text-black">{t}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {/* ── SCOUTING ROSTER LIST ── */}
-      {loading ? (
-        <div className="py-20 text-center text-gray-500 text-xs font-black tracking-widest animate-pulse">Syncing scouts database...</div>
-      ) : filteredPlayers.length === 0 ? (
-        <div className="text-center py-16 text-xs text-gray-500 italic border border-dashed border-white/5 rounded-2xl">
-          No athletes matching scouting criteria found.
-        </div>
-      ) : (
-        <div className="space-y-3.5">
-          {filteredPlayers.map(athlete => {
-            const owner = getPlayerOwnerInfo(athlete.id);
-            const isFA = owner.status === 'available';
-
-            return (
-              <div 
-                key={athlete.id} 
-                className="bg-white/[0.02] border border-white/5 p-4 rounded-2xl flex justify-between items-center transition-all hover:bg-white/[0.04]"
-              >
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-black text-gray-400 bg-white/5 px-1.5 py-0.5 rounded border border-white/5">{athlete.pos}</span>
-                    <span className="text-[10px] text-gray-400 font-bold">{athlete.team}</span>
-                    <span className="text-xs font-black text-white">{athlete.name}</span>
-                  </div>
-                  <p className="text-[9px] text-gray-500 font-semibold mt-1 uppercase tracking-wider">{athlete.stats}</p>
-                  <p className="text-[10px] text-indigo-400 font-bold mt-0.5">{athlete.points.toFixed(1)} pts</p>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  {/* Status Indicator */}
-                  <span className={`text-[9px] font-black uppercase px-2.5 py-1 rounded-lg border tracking-wider text-center max-w-[90px] truncate ${owner.color}`}>
-                    {owner.label}
-                  </span>
-
-                  {/* Acquire CTA (Only for Free Agents) */}
-                  {isFA && myTeam && (
-                    <button
-                      onClick={() => setSelectedScoutPlayer(athlete)}
-                      className="px-3.5 py-2 bg-gradient-to-r from-indigo-600 to-violet-500 hover:from-indigo-500 hover:to-violet-400 text-[10px] font-black uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform"
-                    >
-                      Acquire
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+      {/* ── CENTRAL ACQUISITIONS LOCKED BANNER (Pre-Draft) ── */}
+      {isPending && (
+        <div className="mb-6 p-4.5 bg-indigo-50 border border-indigo-100 rounded-3xl flex items-center gap-3.5 animate-scale-up">
+          <div className="w-10 h-10 rounded-2xl bg-white border border-indigo-100 flex items-center justify-center text-xl text-indigo-600 shadow-sm animate-pulse">
+            🔒
+          </div>
+          <div>
+            <h4 className="text-xs font-black uppercase tracking-wider text-indigo-900">Acquisitions Locked</h4>
+            <p className="text-[10px] text-indigo-500 font-semibold mt-0.5 leading-normal">Player pool acquisitions are locked until the draft completes.</p>
+          </div>
         </div>
       )}
 
-      {/* ── ACQUIRE TRANSACTION DIALOG ── */}
-      {selectedScoutPlayer && myTeam && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center p-6 z-50">
-          <div className="w-full max-w-sm bg-[#16161c] border border-white/10 rounded-3xl p-6 shadow-2xl relative">
-            <h3 className="text-sm font-black uppercase text-gray-400 tracking-wider">Scouting Waiver Pickup</h3>
+      {/* ── RESPONSIVE DESKTOP SPLIT GRID ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        
+        {/* LEFT COLUMN: FILTERS SIDEBAR (lg:col-span-4 - sticky on desktop!) */}
+        <div className="lg:col-span-4 lg:sticky lg:top-24 space-y-4">
+          <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-1 hidden lg:block">🔍 Search & Filters</h3>
+          <div className="bg-white border border-gray-200 p-5 rounded-[28px] shadow-sm space-y-4">
+            <div>
+              <label className="block text-[9px] uppercase font-black text-gray-400 mb-2">Search Athlete</label>
+              <input 
+                type="text" 
+                placeholder="Type name..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:bg-white focus:border-indigo-500 shadow-inner"
+              />
+            </div>
             
-            <div className="mt-4 p-4 rounded-2xl bg-white/[0.02] border border-white/5">
-              <span className="text-[9px] uppercase font-extrabold tracking-widest text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/15">ACQUIRE</span>
-              <p className="text-sm font-black text-white mt-2">{selectedScoutPlayer.name}</p>
-              <p className="text-[10px] text-gray-500 mt-0.5">{selectedScoutPlayer.pos} • {selectedScoutPlayer.team}</p>
+            <div className="space-y-3.5">
+              {/* Availability */}
+              <div>
+                <label className="block text-[9px] uppercase font-black text-gray-400 mb-2">Availability</label>
+                <select 
+                  value={filterAvailability} 
+                  onChange={(e) => setFilterAvailability(e.target.value)}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[10px] font-black text-gray-500 focus:outline-none focus:border-indigo-500 shadow-sm"
+                >
+                  <option value="all">All Players</option>
+                  <option value="available">Free Agents</option>
+                  <option value="rostered">Rostered Only</option>
+                </select>
+              </div>
+
+              {/* Position */}
+              <div>
+                <label className="block text-[9px] uppercase font-black text-gray-400 mb-2">Role/Position</label>
+                <select 
+                  value={filterPosition} 
+                  onChange={(e) => setFilterPosition(e.target.value)}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[10px] font-black text-gray-500 focus:outline-none focus:border-indigo-500 shadow-sm"
+                >
+                  <option value="all">All Roles</option>
+                  <option value="skaters">Skaters Only</option>
+                  <option value="F">Forwards</option>
+                  <option value="D">Defense</option>
+                  <option value="G">Goalies</option>
+                </select>
+              </div>
+
+              {/* PWHL Team */}
+              <div>
+                <label className="block text-[9px] uppercase font-black text-gray-400 mb-2">PWHL Team</label>
+                <select 
+                  value={filterTeam} 
+                  onChange={(e) => setFilterTeam(e.target.value)}
+                  className="w-full bg-white border border-gray-200 rounded-xl px-3 py-2.5 text-[10px] font-black text-gray-500 focus:outline-none focus:border-indigo-500 shadow-sm"
+                >
+                  <option value="all">All Teams</option>
+                  {["BOS", "MIN", "MTL", "NY", "OTT", "TOR"].map(t => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT COLUMN: SEARCH SCOUTING LIST (lg:col-span-8) */}
+        <div className="lg:col-span-8 space-y-4">
+          <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-1 hidden lg:block">📈 Star Scouting Pool</h3>
+          
+          {filteredPlayers.length === 0 ? (
+            <div className="text-center py-20 text-xs text-gray-400 font-bold italic border border-dashed border-gray-300 rounded-[32px] bg-white/50 shadow-sm">
+              No athletes matching scouting criteria found.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              
+              {/* Mobile View Lists */}
+              <div className="block md:hidden space-y-3">
+                {filteredPlayers.map(athlete => {
+                  const owner = getPlayerOwnerInfo(athlete.id);
+                  const isFA = owner.status === 'available';
+
+                  return (
+                    <div 
+                      key={athlete.id} 
+                      className="bg-white border border-gray-200 p-4.5 rounded-2xl flex justify-between items-center transition-all shadow-sm hover:shadow-md"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[9px] font-black text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded border border-gray-200">{athlete.pos}</span>
+                          <span className="text-[10px] text-gray-400 font-bold">{athlete.team}</span>
+                          <span className="text-xs font-black text-gray-800">{athlete.name}</span>
+                        </div>
+                        <p className="text-[9px] text-gray-400 font-black uppercase mt-1 tracking-wider">{athlete.stats}</p>
+                        <p className="text-[10px] text-indigo-600 font-black mt-0.5">{athlete.points.toFixed(1)} pts</p>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <span className={`text-[9px] font-black uppercase px-2.5 py-1 rounded-lg border tracking-wider text-center max-w-[120px] truncate ${owner.color}`}>
+                          {owner.label}
+                        </span>
+
+                        {isFA && myTeam && !isPending && (
+                          <button
+                            onClick={() => setSelectedScoutPlayer(athlete)}
+                            className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-[10px] font-black uppercase tracking-wider rounded-xl text-white active:scale-95 transition-transform shadow-md shadow-indigo-600/10"
+                          >
+                            Acquire
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Desktop View Sports Cards Grids */}
+              <div className="hidden md:grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {filteredPlayers.map(athlete => {
+                  const owner = getPlayerOwnerInfo(athlete.id);
+                  const isFA = owner.status === 'available';
+
+                  // Choose theme colors based on position
+                  let posColorClass = "border-indigo-100 bg-indigo-50 text-indigo-600";
+                  if (athlete.pos === 'D') {
+                    posColorClass = "border-emerald-100 bg-emerald-50 text-emerald-600";
+                  } else if (athlete.pos === 'G') {
+                    posColorClass = "border-purple-100 bg-purple-50 text-purple-600";
+                  }
+
+                  return (
+                    <div 
+                      key={athlete.id}
+                      className="bg-white border border-gray-200 rounded-[24px] p-4 flex flex-col justify-between shadow-sm relative overflow-hidden transition-all duration-200 hover:shadow-md hover:border-indigo-200 min-h-[160px]"
+                    >
+                      {/* Top Bar: Position and Rating */}
+                      <div className="flex justify-between items-start">
+                        <span className={`text-[9px] font-black uppercase px-2.5 py-1 rounded-lg border tracking-widest shadow-inner ${posColorClass}`}>
+                          {athlete.pos}
+                        </span>
+                        
+                        <div className="text-right">
+                          <span className="font-sports text-lg font-bold text-gray-800 leading-none block">{athlete.rating}</span>
+                          <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest mt-0.5 block">OVR</span>
+                        </div>
+                      </div>
+
+                      {/* Middle: Details */}
+                      <div className="my-3">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] font-black text-gray-500 bg-gray-50 px-1 rounded border border-gray-200">{athlete.team}</span>
+                          <span className="text-xs font-black text-gray-800 truncate block">{athlete.name}</span>
+                        </div>
+                        <span className="text-[9px] text-gray-400 font-bold uppercase tracking-wider block mt-1 truncate">{athlete.stats}</span>
+                      </div>
+
+                      {/* Bottom Bar: Points and Actions */}
+                      <div className="flex justify-between items-center pt-2.5 border-t border-gray-100 gap-2">
+                        <div>
+                          <span className="text-sm font-sports font-bold text-indigo-600 leading-none">{athlete.points.toFixed(1)}</span>
+                          <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest ml-1">pts</span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 max-w-[60%] shrink-0">
+                          <span className={`text-[8.5px] font-black uppercase px-2 py-1 rounded-lg border tracking-wider text-center truncate ${owner.color}`}>
+                            {owner.label === 'Your Team' ? 'Mine' : (owner.label === 'FA' ? 'FA' : owner.label)}
+                          </span>
+
+                          {isFA && myTeam && !isPending && (
+                            <button
+                              onClick={() => setSelectedScoutPlayer(athlete)}
+                              className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-[9px] font-black uppercase tracking-wider rounded-lg text-white active:scale-95 transition-all shadow-md shadow-indigo-600/10"
+                            >
+                              Add
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+            </div>
+          )}
+        </div>
+
+
+      </div>
+
+      {/* ── ACQUIRE TRANSACTION DIALOG ── */}
+      {selectedScoutPlayer && myTeam && !isPending && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+          <div className="w-full max-w-sm bg-white border border-gray-200 rounded-[32px] p-6 shadow-2xl relative animate-scale-up">
+            <h3 className="text-xs font-black uppercase text-gray-400 tracking-wider">Scouting Waiver Pickup</h3>
+            
+            <div className="mt-4 p-4 rounded-2xl bg-gray-50 border border-gray-200">
+              <span className="text-[9px] uppercase font-black tracking-widest text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">ACQUIRE</span>
+              <p className="text-sm font-black text-gray-800 mt-2">{selectedScoutPlayer.name}</p>
+              <p className="text-[10px] text-gray-400 font-bold mt-0.5">{selectedScoutPlayer.pos} • {selectedScoutPlayer.team}</p>
             </div>
 
             <div className="mt-4">
@@ -267,15 +408,15 @@ export default function Players({ activeLeagueId }) {
               <select 
                 value={selectedDropPlayer} 
                 onChange={e => setSelectedDropPlayer(e.target.value)}
-                className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-xs text-white focus:outline-none"
+                className="w-full bg-white border border-gray-200 rounded-2xl px-4 py-3.5 text-xs text-gray-700 focus:outline-none focus:border-indigo-500 shadow-sm"
               >
-                <option value="" className="text-black">No Player (Add Only)</option>
+                <option value="">No Player (Add Only)</option>
                 {(myTeam.players || []).map(pId => {
                   const pDetail = PWHL_SCOUTING_POOL.find(p => p.id === pId) || { name: pId };
-                  return <option key={pId} value={pId} className="text-black">Drop: {pDetail.name}</option>;
+                  return <option key={pId} value={pId}>Drop: {pDetail.name}</option>;
                 })}
               </select>
-              <p className="text-[9px] text-gray-600 mt-2">Note: Dropped athletes will be placed on waivers for 48 hours.</p>
+              <p className="text-[9px] text-gray-400 font-semibold mt-2">Note: Dropped athletes will be placed on waivers for 48 hours.</p>
             </div>
 
             <div className="flex gap-3 mt-6">
@@ -285,14 +426,14 @@ export default function Players({ activeLeagueId }) {
                   setSelectedDropPlayer('');
                 }}
                 disabled={transactionLoading}
-                className="flex-1 py-3.5 bg-white/5 hover:bg-white/10 border border-white/5 rounded-2xl text-[10px] font-black uppercase text-gray-400 tracking-wider active:scale-95 transition-transform"
+                className="flex-1 py-3.5 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-2xl text-[10px] font-black uppercase text-gray-500 tracking-wider active:scale-95 transition-transform"
               >
                 Cancel
               </button>
               <button 
                 onClick={handleScoutingTransaction}
                 disabled={transactionLoading}
-                className="flex-1 py-3.5 bg-gradient-to-r from-indigo-600 to-violet-500 rounded-2xl text-[10px] font-black uppercase text-white tracking-wider active:scale-95 transition-transform shadow-lg"
+                className="flex-1 py-3.5 bg-gradient-to-r from-indigo-600 to-violet-600 text-[10px] font-black uppercase text-white tracking-wider rounded-2xl active:scale-95 transition-transform shadow-md shadow-indigo-600/10"
               >
                 {transactionLoading ? 'Executing...' : 'Confirm'}
               </button>

@@ -42,27 +42,27 @@ export default function AuthModal({ isOpen, onClose }) {
 
   return (
     <div 
-      className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fade-in"
+      className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in"
       onClick={onClose}
     >
       <div 
-        className="w-full max-w-sm bg-[#16161c] border border-white/10 p-6 rounded-3xl shadow-2xl relative select-none animate-scale-up"
+        className="w-full max-w-sm bg-white border border-gray-200 p-6.5 rounded-[32px] shadow-2xl relative select-none animate-scale-up"
         onClick={e => e.stopPropagation()}
       >
         {/* Close Button */}
         <button 
-          className="absolute top-4 right-4 text-gray-400 text-lg hover:text-white transition-colors"
+          className="absolute top-4.5 right-4.5 text-gray-400 text-lg hover:text-gray-700 transition-colors"
           onClick={onClose}
         >
           &times;
         </button>
 
-        <h2 className="text-xl font-black text-center text-white mb-6 tracking-tight">
-          {isLogin ? 'Sign In to Arena' : 'Assemble Account'}
+        <h2 className="font-sports text-2xl font-black text-center text-gray-900 mb-6 tracking-tight">
+          {isLogin ? 'Sign In to Arena' : 'Create Account'}
         </h2>
 
         {error && (
-          <div className="text-xs font-black text-rose-500 bg-rose-500/10 border border-rose-500/15 p-3 rounded-xl mb-4">
+          <div className="text-xs font-black text-rose-600 bg-rose-50 border border-rose-100 p-3 rounded-xl mb-4.5">
             {error}
           </div>
         )}
@@ -72,7 +72,7 @@ export default function AuthModal({ isOpen, onClose }) {
             <input 
               type="email" 
               placeholder="Email Address" 
-              className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
+              className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3.5 text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:bg-white focus:border-indigo-500 transition-colors shadow-sm"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required 
@@ -82,7 +82,7 @@ export default function AuthModal({ isOpen, onClose }) {
             <input 
               type="password" 
               placeholder="Password" 
-              className="w-full bg-black/40 border border-white/10 rounded-2xl px-4 py-3 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition-colors"
+              className="w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3.5 text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:bg-white focus:border-indigo-500 transition-colors shadow-sm"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required 
@@ -92,23 +92,23 @@ export default function AuthModal({ isOpen, onClose }) {
           <button 
             disabled={loading} 
             type="submit" 
-            className="w-full py-4 bg-gradient-to-r from-indigo-600 to-violet-500 text-white text-xs font-black uppercase tracking-wider rounded-2xl shadow-lg active:scale-95 transition-transform disabled:opacity-50 mt-2"
+            className="w-full py-4.5 bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-xs font-black uppercase tracking-wider rounded-2xl shadow-md shadow-indigo-600/10 active:scale-95 transition-transform disabled:opacity-50 mt-2"
           >
             {isLogin ? 'Enter Arena' : 'Sign Up'}
           </button>
         </form>
 
-        <div className="flex items-center text-center my-6 text-[9px] uppercase font-black tracking-widest text-gray-500">
-          <div className="flex-1 border-t border-white/5"></div>
+        <div className="flex items-center text-center my-6 text-[9px] uppercase font-black tracking-widest text-gray-400">
+          <div className="flex-1 border-t border-gray-200"></div>
           <span className="px-3">OR</span>
-          <div className="flex-1 border-t border-white/5"></div>
+          <div className="flex-1 border-t border-gray-200"></div>
         </div>
 
         {/* Premium Google Button */}
         <button 
           disabled={loading} 
           onClick={handleGoogleSignIn} 
-          className="w-full py-3.5 bg-white hover:bg-gray-100 rounded-2xl text-[10px] font-black uppercase text-gray-800 tracking-wider flex items-center justify-center gap-2 active:scale-95 transition-transform shadow-md"
+          className="w-full py-4 bg-white border border-gray-200 hover:bg-gray-50 rounded-2xl text-[10px] font-black uppercase text-gray-700 tracking-wider flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
         >
           <svg className="w-4 h-4" viewBox="0 0 24 24">
             <path
@@ -134,7 +134,7 @@ export default function AuthModal({ isOpen, onClose }) {
         <div className="mt-6 text-center text-xs font-semibold text-gray-500">
           {isLogin ? "Don't have an account? " : "Already have an account? "}
           <button 
-            className="text-indigo-400 font-extrabold hover:underline ml-1"
+            className="text-indigo-600 font-extrabold hover:text-indigo-700 hover:underline ml-1"
             onClick={() => setIsLogin(!isLogin)}
           >
             {isLogin ? 'Sign Up' : 'Sign In'}

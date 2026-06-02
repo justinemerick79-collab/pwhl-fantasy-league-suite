@@ -33,6 +33,13 @@ const PWHL_ATHLETES_POOL = [
   { id: "pwhl_14", name: "Nicole Hensley", pos: "G", team: "MIN", rating: 88 }
 ];
 
+const GENERIC_TEAM_NAMES = [
+  "Boston Fleet", "Minnesota Frost", "Montreal Victoires", "New York Sirens",
+  "Ottawa Charge", "Toronto Sceptres", "Boston Whitecaps", "Minnesota Muskies",
+  "Montreal Maroons", "New York Sound", "Ottawa Alerts", "Toronto Aeros",
+  "Great Lakes Royals", "East Coast Rush", "North Star Pride", "Wave Athletic Club"
+];
+
 export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const { currentUser } = useAuth();
   
@@ -160,7 +167,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
         inviteCode,
         members: [currentUser.uid],
         userIds: [currentUser.uid],
-        status: 'active', // auto-active in test environment
+        status: 'pending', // Initialize as pending until commissioner fills & activates!
         rosterSettings: rosterLimits,
         scoringSettings: defaultScoring,
         scheduleSettings: {
@@ -172,12 +179,15 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
         createdAt: serverTimestamp()
       });
 
-      // Create owner's team document
+      // Issue random generic team name
+      const randomTeamName = GENERIC_TEAM_NAMES[Math.floor(Math.random() * GENERIC_TEAM_NAMES.length)];
+
+      // Create owner's team document with empty rosters initially
       await addDoc(collection(db, `fantasy_leagues/${leagueRef.id}/teams`), {
         ownerId: currentUser.uid,
-        teamName: `${createName.split(" ")[0]} Vipers`,
+        teamName: randomTeamName,
         joinedAt: serverTimestamp(),
-        players: ["pwhl_1", "pwhl_8", "pwhl_13"] // Give commissioner initial mock star players
+        players: [] // Empty roster initially!
       });
 
       alert(`League created! Invite Code: ${inviteCode}`);
@@ -225,11 +235,14 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
         userIds: updatedMembers
       });
 
+      // Issue random generic team name for joining user
+      const randomTeamName = GENERIC_TEAM_NAMES[Math.floor(Math.random() * GENERIC_TEAM_NAMES.length)];
+
       await addDoc(collection(db, `fantasy_leagues/${leagueDoc.id}/teams`), {
         ownerId: currentUser.uid,
-        teamName: `${leagueData.name.split(" ")[0]} Blizzard`,
+        teamName: randomTeamName,
         joinedAt: serverTimestamp(),
-        players: ["pwhl_2", "pwhl_3", "pwhl_9"] // Initial mock players for joining team
+        players: [] // Empty roster initially!
       });
       
       alert(`Joined ${leagueData.name}!`);
