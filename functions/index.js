@@ -730,3 +730,12 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
   };
 });
 
+/**
+ * HTTPS Callable function to retrieve the current simulated system clock time.
+ * Used for testing and verification of the central clock.
+ */
+exports.getSimulatedTime = functions.https.onCall(async (data, context) => {
+  const timeMs = await getSystemDate();
+  return { timeMs };
+});
+
