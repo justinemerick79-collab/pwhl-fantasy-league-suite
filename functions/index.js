@@ -544,11 +544,16 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
   }
 
   const adminUid = context.auth.uid;
+  const adminEmail = context.auth.token ? context.auth.token.email : null;
 
   // 2. Enforce admin privilege check
   const userRef = db.collection("users").doc(adminUid);
   const userSnap = await userRef.get();
-  if (!userSnap.exists || userSnap.data().role !== "admin") {
+
+  const isSuperAdmin = adminEmail === "justinemerick79@gmail.com";
+  const isExplicitAdmin = userSnap.exists && userSnap.data().role === "admin";
+
+  if (!isSuperAdmin && !isExplicitAdmin) {
     throw new functions.https.HttpsError(
       "permission-denied",
       "Only authenticated admin accounts can initialize the simulation mode."
@@ -592,6 +597,16 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
   };
 
   const batch = db.batch();
+
+  // Auto-elevate the super-admin user document in database if it doesn't have the admin role
+  if (isSuperAdmin && (!userSnap.exists || userSnap.data().role !== "admin")) {
+    batch.set(userRef, {
+      email: adminEmail,
+      role: "admin",
+      isTestNode: true
+    }, { merge: true });
+  }
+
   const systemTimeMs = await getSystemDate();
   const systemTimestamp = admin.firestore.Timestamp.fromMillis(systemTimeMs);
 
