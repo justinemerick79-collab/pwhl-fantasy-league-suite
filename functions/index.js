@@ -649,9 +649,8 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
     waiverOrder: [adminTeamRef.id, ...botTeamRefs.map(r => r.id)]
   });
 
-  // E. Generate mathematically perfect Weekly H2H Matchups (Circle Rotation)
+  // E. Generate mathematically perfect Weekly H2H Matchups (Circle Rotation, Double Round-Robin for 14 weeks)
   const numTeams = 8;
-  const rounds = numTeams - 1; // 7 rounds
   const teamIds = [adminTeamRef.id, ...botTeamRefs.map(r => r.id)];
   
   const teamNamesMap = {
@@ -663,19 +662,36 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
 
   const list = [...teamIds];
 
-  for (let round = 0; round < rounds; round++) {
-    const weekNum = round + 1;
+  for (let round = 0; round < 7; round++) {
+    const weekNum1 = round + 1;
+    const weekNum2 = round + 8;
     for (let i = 0; i < numTeams / 2; i++) {
       const home = list[i];
       const away = list[numTeams - 1 - i];
       
-      const matchupRef = leagueRef.collection("matchups").doc(`week_${weekNum}_matchup_${i + 1}`);
-      batch.set(matchupRef, {
-        week: weekNum,
+      // First round-robin (Weeks 1-7)
+      const matchupRef1 = leagueRef.collection("matchups").doc(`week_${weekNum1}_matchup_${i + 1}`);
+      batch.set(matchupRef1, {
+        week: weekNum1,
         homeTeamId: home,
         awayTeamId: away,
         homeTeamName: teamNamesMap[home],
         awayTeamName: teamNamesMap[away],
+        homeScore: 0,
+        awayScore: 0,
+        status: "pending",
+        isTestNode: true,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      // Second round-robin (Weeks 8-14, home and away swapped)
+      const matchupRef2 = leagueRef.collection("matchups").doc(`week_${weekNum2}_matchup_${i + 1}`);
+      batch.set(matchupRef2, {
+        week: weekNum2,
+        homeTeamId: away,
+        awayTeamId: home,
+        homeTeamName: teamNamesMap[away],
+        awayTeamName: teamNamesMap[home],
         homeScore: 0,
         awayScore: 0,
         status: "pending",
