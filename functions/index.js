@@ -754,3 +754,269 @@ exports.getSimulatedTime = functions.https.onCall(async (data, context) => {
   return { timeMs };
 });
 
+/**
+ * Background Auto-Draft Simulator.
+ * Listens to active snake drafts in the local environment.
+ * If the current pick belongs to a bot (isBot: true), it waits 3 seconds,
+ * selects the highest-ranked available player, and executes a transaction to
+ * draft that player and advance the clock/pick turn.
+ */
+const processingDrafts = new Set();
+
+async function handleDraftStateChange(docSnap) {
+  const docRef = docSnap.ref;
+  const draftPath = docRef.path;
+  const draftData = docSnap.data();
+
+  // 1. Only process active drafts
+  if (!draftData || draftData.status !== "active") return;
+
+  const currentPickerId = draftData.current_pick_owner_id || draftData.currentTeamOnClock;
+  if (!currentPickerId) return;
+
+  // Avoid processing the same pick multiple times concurrently
+  const currentPickIndex = draftData.currentPickIndex !== undefined ? draftData.currentPickIndex : (draftData.current_pick_index || 0);
+  const processKey = `${draftPath}_${currentPickIndex}`;
+  if (processingDrafts.has(processKey)) return;
+  processingDrafts.add(processKey);
+
+  try {
+    // 2. Fetch user profile to check if they are a bot
+    const userRef = db.collection("users").doc(currentPickerId);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists || !userSnap.data().isBot) {
+      // It's a human user - pause the draft and wait for manual UI input
+      processingDrafts.delete(processKey);
+      return;
+    }
+
+    console.log(`[Draft Engine] Bot turn detected for bot user: ${currentPickerId} at path: ${draftPath} (Pick index: ${currentPickIndex})`);
+
+    // 3. Wait 3 seconds to simulate thinking
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Get the latest draft state doc to ensure we have fresh data before committing to pick
+    const freshDraftSnap = await docRef.get();
+    const freshDraftData = freshDraftSnap.data();
+    if (!freshDraftData || freshDraftData.status !== "active") {
+      processingDrafts.delete(processKey);
+      return;
+    }
+    const freshPickerId = freshDraftData.current_pick_owner_id || freshDraftData.currentTeamOnClock;
+    if (freshPickerId !== currentPickerId) {
+      processingDrafts.delete(processKey);
+      return;
+    }
+
+    // 4. Resolve parent collection and league ID
+    const pathSegments = draftPath.split("/");
+    const parentCollection = pathSegments[0]; // e.g. "fantasy_leagues" or "leagues"
+    const leagueId = pathSegments[1];
+
+    // 5. Fetch all players and teams outside the transaction (disallowed inside transaction)
+    const playersSnap = await db.collection("pwhl_players").get();
+    let allPlayers = playersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // Fallback scouting pool if collection is empty
+    if (allPlayers.length === 0) {
+      allPlayers = [
+        { id: "pwhl_1", name: "Marie-Philip Poulin", pos: "F", team: "MTL", rating: 94, stats: "2G, 1A, +3", points: 28.5 },
+        { id: "pwhl_2", name: "Natalie Spooner", pos: "F", team: "TOR", rating: 92, stats: "3G, 1A, +2", points: 34.0 },
+        { id: "pwhl_3", name: "Sarah Nurse", pos: "F", team: "TOR", rating: 89, stats: "1G, 1A, +1", points: 19.0 },
+        { id: "pwhl_4", name: "Hilary Knight", pos: "F", team: "BOS", rating: 90, stats: "1G, 0A, -1", points: 14.5 },
+        { id: "pwhl_5", name: "Alex Carpenter", pos: "F", team: "NY", rating: 88, stats: "1G, 2A, +1", points: 21.0 },
+        { id: "pwhl_6", name: "Brianne Jenner", pos: "F", team: "OTT", rating: 87, stats: "0G, 2A, 0", points: 12.0 },
+        { id: "pwhl_7", name: "Kendall Coyne Schofield", pos: "F", team: "MIN", rating: 89, stats: "1G, 1A, 0", points: 15.5 },
+        { id: "pwhl_8", name: "Erin Ambrose", pos: "D", team: "MTL", rating: 91, stats: "0G, 3A, +2", points: 22.0 },
+        { id: "pwhl_9", name: "Renata Fast", pos: "D", team: "TOR", rating: 90, stats: "1G, 0A, +1", points: 18.5 },
+        { id: "pwhl_10", name: "Megan Keller", pos: "D", team: "BOS", rating: 89, stats: "0G, 2A, -1", points: 15.0 },
+        { id: "pwhl_11", name: "Jocelyne Larocque", pos: "D", team: "TOR", rating: 86, stats: "0G, 1A, 0", points: 11.5 },
+        { id: "pwhl_12", name: "Aerin Frankel", pos: "G", team: "BOS", rating: 93, stats: "2W, 58SV, 1.95GAA", points: 42.0 },
+        { id: "pwhl_13", name: "Ann-Renée Desbiens", pos: "G", team: "MTL", rating: 91, stats: "1W, 54SV, 2.45GAA", points: 32.0 },
+        { id: "pwhl_14", name: "Nicole Hensley", pos: "G", team: "MIN", rating: 88, stats: "1W, 52SV, 2.80GAA", points: 27.5 }
+      ];
+    }
+
+    const teamsSnap = await db.collection(parentCollection).doc(leagueId).collection("teams").get();
+    const teams = teamsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const botTeam = teams.find(t => t.ownerId === currentPickerId);
+
+    // 6. Run Firestore transaction to execute the pick
+    await db.runTransaction(async (transaction) => {
+      // Re-read draft state and league within transaction
+      const txDraftSnap = await transaction.get(docRef);
+      if (!txDraftSnap.exists) return;
+      const txDraftData = txDraftSnap.data();
+
+      if (txDraftData.status !== "active") return;
+      const txPickerId = txDraftData.current_pick_owner_id || txDraftData.currentTeamOnClock;
+      if (txPickerId !== currentPickerId) return;
+
+      const txLeagueRef = db.collection(parentCollection).doc(leagueId);
+      const txLeagueSnap = await transaction.get(txLeagueRef);
+      if (!txLeagueSnap.exists) return;
+      const leagueData = txLeagueSnap.data();
+
+      // Find already drafted player IDs from picks and active rosters
+      const draftedIds = new Set();
+      const picks = txDraftData.picks || [];
+      picks.forEach(p => {
+        if (p.playerId) draftedIds.add(p.playerId);
+        if (p.player_id) draftedIds.add(p.player_id);
+      });
+      const activeRosters = txDraftData.activeRosters || txDraftData.active_rosters || {};
+      Object.values(activeRosters).forEach(roster => {
+        if (Array.isArray(roster)) {
+          roster.forEach(id => draftedIds.add(id));
+        }
+      });
+
+      // Filter available players
+      const availablePlayers = allPlayers.filter(p => !draftedIds.has(p.id) && !draftedIds.has(p.player_id || p.id));
+      if (availablePlayers.length === 0) {
+        console.warn(`[Draft Engine] No players available for draft in league ${leagueId}`);
+        return;
+      }
+
+      // Sort by rating (desc), points (desc), and fallback id (asc)
+      availablePlayers.sort((a, b) => {
+        const ratingA = a.rating !== undefined ? Number(a.rating) : 0;
+        const ratingB = b.rating !== undefined ? Number(b.rating) : 0;
+        if (ratingB !== ratingA) return ratingB - ratingA;
+
+        const pointsA = a.points !== undefined ? Number(a.points) : 0;
+        const pointsB = b.points !== undefined ? Number(b.points) : 0;
+        if (pointsB !== pointsA) return pointsB - pointsA;
+
+        return String(a.id).localeCompare(String(b.id));
+      });
+
+      const chosenPlayer = availablePlayers[0];
+      const chosenPlayerId = chosenPlayer.id || chosenPlayer.player_id;
+      const chosenPlayerName = chosenPlayer.name || `${chosenPlayer.first_name || ""} ${chosenPlayer.last_name || ""}`.trim() || chosenPlayerId;
+
+      console.log(`[Draft Engine] Bot ${currentPickerId} picks player: ${chosenPlayerName} (${chosenPlayerId})`);
+
+      // Calculate next pick sequencing details
+      const N = txDraftData.draftOrder ? txDraftData.draftOrder.length : (txDraftData.draft_order ? txDraftData.draft_order.length : 8);
+      const draftOrder = txDraftData.draftOrder || txDraftData.draft_order || [];
+      const txPickIndex = txDraftData.currentPickIndex !== undefined ? txDraftData.currentPickIndex : (txDraftData.current_pick_index || 0);
+      const txRound = txDraftData.currentRound !== undefined ? txDraftData.currentRound : (txDraftData.current_round || 1);
+
+      const nextPickIndex = txPickIndex + 1;
+      
+      const rosterSettings = leagueData.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+      const maxRounds = (rosterSettings.bench ?? 4) + 
+                        (rosterSettings.forwards?.starters ?? 6) + 
+                        (rosterSettings.defense?.starters ?? 4) + 
+                        (rosterSettings.goalies?.starters ?? 1);
+      const totalPicks = maxRounds * N;
+
+      const systemTimeMs = await getSystemDate();
+      const systemTimestamp = admin.firestore.Timestamp.fromMillis(systemTimeMs);
+
+      // Create new pick entry
+      const newPickEntry = {
+        round: txRound,
+        pickNumber: nextPickIndex,
+        userId: currentPickerId,
+        playerId: chosenPlayerId,
+        player_id: chosenPlayerId,
+        timestamp: systemTimestamp
+      };
+
+      const updatedPicks = [...picks, newPickEntry];
+
+      // Update active rosters
+      const txActiveRosters = { ...activeRosters };
+      txActiveRosters[currentPickerId] = [...(txActiveRosters[currentPickerId] || []), chosenPlayerId];
+
+      // Next picker in snake sequencing
+      let nextRound = txRound;
+      let nextTeamOnClock = null;
+      let nextStatus = 'active';
+
+      if (nextPickIndex >= totalPicks) {
+        nextStatus = 'completed';
+      } else {
+        nextRound = Math.floor(nextPickIndex / N) + 1;
+        const pos = nextPickIndex % N;
+        if (nextRound % 2 !== 0) {
+          nextTeamOnClock = draftOrder[pos];
+        } else {
+          nextTeamOnClock = draftOrder[(N - 1) - pos];
+        }
+      }
+
+      const nextDeadline = admin.firestore.Timestamp.fromMillis(systemTimeMs + 60000);
+
+      // Prepare schema updates (supports both camelCase and snake_case schemas)
+      const draftUpdates = {
+        picks: updatedPicks,
+        status: nextStatus
+      };
+
+      if (txDraftData.currentTeamOnClock !== undefined) {
+        draftUpdates.currentTeamOnClock = nextTeamOnClock || currentPickerId;
+        draftUpdates.currentPickIndex = nextPickIndex;
+        draftUpdates.currentRound = nextRound;
+        draftUpdates.pickDeadline = nextDeadline;
+        draftUpdates.activeRosters = txActiveRosters;
+      }
+      if (txDraftData.current_pick_owner_id !== undefined) {
+        draftUpdates.current_pick_owner_id = nextTeamOnClock || currentPickerId;
+        draftUpdates.current_pick_index = nextPickIndex;
+        draftUpdates.current_round = nextRound;
+        draftUpdates.pick_deadline = nextDeadline;
+        draftUpdates.active_rosters = txActiveRosters;
+      }
+
+      transaction.update(docRef, draftUpdates);
+
+      // Assign the player to the team's roster under the subcollection
+      if (botTeam) {
+        const teamDocRef = db.collection(parentCollection).doc(leagueId).collection("teams").doc(botTeam.id);
+        const currentRoster = botTeam.players || [];
+        transaction.update(teamDocRef, {
+          players: [...currentRoster, chosenPlayerId]
+        });
+      }
+
+      // If draft is completed, activate league
+      if (nextStatus === 'completed') {
+        transaction.update(txLeagueRef, { status: 'active' });
+      }
+    });
+
+  } catch (error) {
+    console.error(`[Draft Engine] Error running auto-draft transaction:`, error);
+  } finally {
+    processingDrafts.delete(processKey);
+  }
+}
+
+// 7. Subscribe to collection groups in real-time
+db.collectionGroup("draft").onSnapshot((snapshot) => {
+  snapshot.docChanges().forEach((change) => {
+    if (change.type === "added" || change.type === "modified") {
+      handleDraftStateChange(change.doc).catch(err => {
+        console.error("[Draft Listener Error] draft collection change failed:", err);
+      });
+    }
+  });
+}, (err) => {
+  console.error("[Draft Listener Error] draft collection group subscription failed:", err);
+});
+
+db.collectionGroup("draft_state").onSnapshot((snapshot) => {
+  snapshot.docChanges().forEach((change) => {
+    if (change.type === "added" || change.type === "modified") {
+      handleDraftStateChange(change.doc).catch(err => {
+        console.error("[Draft Listener Error] draft_state collection change failed:", err);
+      });
+    }
+  });
+}, (err) => {
+  console.error("[Draft Listener Error] draft_state collection group subscription failed:", err);
+});
+
