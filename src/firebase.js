@@ -20,11 +20,8 @@ export const db = getFirestore(app);
 export const storage = getStorage(app);
 export const functions = getFunctions(app);
 
-// Connect to Local Emulators when in development or running on localhost
+// Connect to Local Functions Emulator when running on localhost
 if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-  console.log("🔌 Connecting to Firebase Local Emulators...");
-  connectAuthEmulator(auth, "http://127.0.0.1:9099");
-  connectFirestoreEmulator(db, "127.0.0.1", 8080);
-  connectStorageEmulator(storage, "127.0.0.1", 9199);
+  console.log("🔌 Connecting to Local Functions Emulator...");
   connectFunctionsEmulator(functions, "127.0.0.1", 5001);
 }
