@@ -113,8 +113,11 @@ export default function AdminPanel() {
 
   useEffect(() => {
     async function fetchUsersAndSeasons() {
+      console.log("[AdminPanel] fetchUsersAndSeasons: start");
       try {
+        console.log("[AdminPanel] fetchUsersAndSeasons: fetching users...");
         const querySnapshot = await getDocs(collection(db, "users"));
+        console.log("[AdminPanel] fetchUsersAndSeasons: users size =", querySnapshot.size);
         const usersList = querySnapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data()
@@ -122,14 +125,17 @@ export default function AdminPanel() {
         setUsers(usersList);
         
         // Fetch seasons for the sync dropdown
+        console.log("[AdminPanel] fetchUsersAndSeasons: fetching seasons...");
         const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
+        console.log("[AdminPanel] fetchUsersAndSeasons: seasons size =", seasonsSnap.size);
         const seasonList = seasonsSnap.docs.map(d => ({id: d.id, ...d.data()}));
         seasonList.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
         setSeasons(seasonList);
       } catch (err) {
+        console.error("[AdminPanel] fetchUsersAndSeasons error:", err);
         setError('Failed to fetch data. Ensure you have admin privileges.');
-        console.error(err);
       } finally {
+        console.log("[AdminPanel] fetchUsersAndSeasons: finally, setting loading=false");
         setLoading(false);
       }
     }
