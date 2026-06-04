@@ -2,31 +2,16 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../firebase.js';
 import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
-
-// Consolidated Star Athlete Database
-const PWHL_ATHLETES_DB = {
-  pwhl_1: { name: "Marie-Philip Poulin", pos: "F", team: "MTL", rating: 94, stats: "2G, 1A, +3", points: 28.5 },
-  pwhl_2: { name: "Natalie Spooner", pos: "F", team: "TOR", rating: 92, stats: "3G, 1A, +2", points: 34.0 },
-  pwhl_3: { name: "Sarah Nurse", pos: "F", team: "TOR", rating: 89, stats: "1G, 1A, +1", points: 19.0 },
-  pwhl_4: { name: "Hilary Knight", pos: "F", team: "BOS", rating: 90, stats: "1G, 0A, -1", points: 14.5 },
-  pwhl_5: { name: "Alex Carpenter", pos: "F", team: "NY", rating: 88, stats: "1G, 2A, +1", points: 21.0 },
-  pwhl_6: { name: "Brianne Jenner", pos: "F", team: "OTT", rating: 87, stats: "0G, 2A, 0", points: 12.0 },
-  pwhl_7: { name: "Kendall Coyne Schofield", pos: "F", team: "MIN", rating: 89, stats: "1G, 1A, 0", points: 15.5 },
-  pwhl_8: { name: "Erin Ambrose", pos: "D", team: "MTL", rating: 91, stats: "0G, 3A, +2", points: 22.0 },
-  pwhl_9: { name: "Renata Fast", pos: "D", team: "TOR", rating: 90, stats: "1G, 0A, +1", points: 18.5 },
-  pwhl_10: { name: "Megan Keller", pos: "D", team: "BOS", rating: 89, stats: "0G, 2A, -1", points: 15.0 },
-  pwhl_11: { name: "Jocelyne Larocque", pos: "D", team: "TOR", rating: 86, stats: "0G, 1A, 0", points: 11.5 },
-  pwhl_12: { name: "Aerin Frankel", pos: "G", team: "BOS", rating: 93, stats: "2W, 58SV, 1.95GAA", points: 42.0 },
-  pwhl_13: { name: "Ann-Renée Desbiens", pos: "G", team: "MTL", rating: 91, stats: "1W, 54SV, 2.45GAA", points: 32.0 },
-  pwhl_14: { name: "Nicole Hensley", pos: "G", team: "MIN", rating: 88, stats: "1W, 52SV, 2.80GAA", points: 27.5 }
-};
+import { useTimeTravel } from '../contexts/TimeTravelContext';;
 
 export default function Roster({ activeLeagueId }) {
   const { currentUser } = useAuth();
+  const { activeSeasonId, getSimulatedDate } = useTimeTravel();
   const [loading, setLoading] = useState(true);
   const [loadingLeague, setLoadingLeague] = useState(true);
   const [myTeam, setMyTeam] = useState(null);
   const [leagueData, setLeagueData] = useState(null);
+  const [playersMap, setPlayersMap] = useState({});
 
   useEffect(() => {
     if (!activeLeagueId) return;
@@ -67,6 +52,124 @@ export default function Roster({ activeLeagueId }) {
     }
     fetchUserRoster();
   }, [activeLeagueId, currentUser]);
+
+  // Load dynamic players map from Firestore
+  useEffect(() => {
+    if (!activeLeagueId || !leagueData) return;
+    
+    async function loadDynamicPlayers() {
+      try {
+        const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
+        const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        
+        const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
+        
+        const qActive = query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonId, Number(seasonId)]));
+        const snapActive = await getDocs(qActive);
+        
+        let resolvedSeasonId = seasonId;
+        let rawPlayers = snapActive.docs.map(d => d.data());
+        let isFallback = false;
+        
+        if (rawPlayers.length === 0 && seasons.length > 0) {
+          const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
+          const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
+          
+          const prevRegularSeasons = seasons.filter(s => {
+            const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
+            const startsBefore = new Date(s.start_date) < currentStartDate;
+            return isRegular && startsBefore;
+          });
+          
+          if (prevRegularSeasons.length > 0) {
+            prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
+            const prevRegSeason = prevRegularSeasons[0];
+            resolvedSeasonId = prevRegSeason.season_id.toString();
+            isFallback = true;
+            
+            const qPrev = query(collection(db, 'pwhl_players'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
+            const snapPrev = await getDocs(qPrev);
+            rawPlayers = snapPrev.docs.map(d => d.data());
+          }
+        }
+        
+        const teamsQuery = query(collection(db, 'pwhl_teams'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
+        const teamsSnap = await getDocs(teamsQuery);
+        const teamsMap = {};
+        teamsSnap.forEach(d => {
+          const t = d.data();
+          teamsMap[String(t.id)] = t.code || t.name || t.id;
+        });
+        
+        let statsData = { skaters: {}, goalies: {} };
+        if (!isFallback) {
+          const { fetchAggregatedStats } = await import('../services/statsEngine');
+          const simDate = getSimulatedDate();
+          statsData = await fetchAggregatedStats(resolvedSeasonId, simDate);
+        }
+        
+        const statsRef = collection(db, 'pwhl_season_player_stats');
+        const seasonStatsSnap = await getDocs(statsRef);
+        const pointsMap = {};
+        seasonStatsSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.leagueId === activeLeagueId) {
+            pointsMap[data.playerId] = data.fantasyPoints || 0.0;
+          }
+        });
+        
+        const map = {};
+        rawPlayers.forEach(p => {
+          const pId = p.player_id || p.id;
+          if (!pId) return;
+          
+          const isGoalie = p.position === 'G';
+          let gp = 0, g_w = 0, a_otl = 0, pm_ga = 0, sog_sv = 0, blk_so = 0, hits = 0;
+          let statsStr = '';
+          
+          if (!isFallback) {
+            if (isGoalie) {
+              const g = statsData.goalies[pId] || {};
+              gp = g.gamesPlayed || 0;
+              g_w = g.wins || 0;
+              a_otl = g.overtimeLosses || 0;
+              pm_ga = g.goalsAgainst || 0;
+              sog_sv = g.shotsSaved || 0;
+              const gaa = gp > 0 ? (pm_ga / gp).toFixed(2) : '0.00';
+              statsStr = `${g_w}W, ${sog_sv}SV, ${gaa}GAA`;
+            } else {
+              const s = statsData.skaters[pId] || {};
+              gp = s.gamesPlayed || 0;
+              g_w = s.goals || 0;
+              a_otl = s.assists || 0;
+              pm_ga = s.plusMinus || 0;
+              statsStr = `${g_w}G, ${a_otl}A, ${pm_ga > 0 ? `+${pm_ga}` : pm_ga} +/-`;
+            }
+          } else {
+            statsStr = isGoalie ? '0W, 0SV, 0.00GAA' : '0G, 0A, 0 +/-';
+          }
+          
+          const rating = p.rating || (isGoalie ? 85 : (p.position === 'D' ? 82 : 84));
+          
+          map[String(pId)] = {
+            id: String(pId),
+            name: p.name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unknown Player',
+            pos: p.position || 'F',
+            team: teamsMap[p.current_team_id || p.team_id] || p.team_name || 'FA',
+            rating,
+            stats: statsStr,
+            points: pointsMap[pId] || 0.0
+          };
+        });
+        
+        setPlayersMap(map);
+      } catch (err) {
+        console.error("Error loading dynamic players in Roster:", err);
+      }
+    }
+    
+    loadDynamicPlayers();
+  }, [activeLeagueId, activeSeasonId, leagueData]);
 
   if (!activeLeagueId) {
     return (
@@ -139,7 +242,7 @@ export default function Roster({ activeLeagueId }) {
     let matchIdx = -1;
     if (slot.pos !== 'BN') {
       // Find first player ID matching starting role F/D/G
-      matchIdx = unusedIds.findIndex(id => PWHL_ATHLETES_DB[id]?.pos === slot.pos);
+      matchIdx = unusedIds.findIndex(id => playersMap[id]?.pos === slot.pos);
     } else {
       // BN matches any remaining player ID
       matchIdx = 0;
@@ -150,7 +253,7 @@ export default function Roster({ activeLeagueId }) {
       assignedPlayers.push({
         slotLabel: slot.label,
         slotPos: slot.pos,
-        athlete: { id: pId, ...PWHL_ATHLETES_DB[pId] }
+        athlete: playersMap[pId] ? { id: pId, ...playersMap[pId] } : null
       });
       unusedIds.splice(matchIdx, 1);
     } else {

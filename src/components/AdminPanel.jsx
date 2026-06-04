@@ -1,74 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { db, functions } from '../firebase';
 import { collection, getDocs, doc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
-import { runFullSync } from '../services/pwhlService';
+import { runFullSync, autoGenerateMissingWeeks } from '../services/pwhlService';
 import DataHub from './DataHub';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { httpsCallable } from 'firebase/functions';
 
-function TimeTravelSettings() {
-  const { timeTravelState } = useTimeTravel();
-  const [localEnabled, setLocalEnabled] = useState(false);
-  const [localDate, setLocalDate] = useState('2024-09-01');
-  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    if (timeTravelState) {
-      setLocalEnabled(timeTravelState.enabled);
-      setLocalDate(timeTravelState.date || '2024-09-01');
-    }
-  }, [timeTravelState]);
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await setDoc(doc(db, 'app_settings', 'time_travel'), {
-        enabled: localEnabled,
-        date: localDate
-      }, { merge: true });
-    } catch (err) {
-      alert("Failed to save time travel settings: " + err.message);
-      console.error("Time Travel Save Error:", err);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontWeight: '600' }}>Enable Time Travel</span>
-        <label className="switch">
-          <input type="checkbox" checked={localEnabled} onChange={e => setLocalEnabled(e.target.checked)} />
-          <span className="slider round"></span>
-        </label>
-      </div>
-      
-      {localEnabled && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px' }}>
-          <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Simulated Date (Time fixed at 8:00am PST)</label>
-          <input 
-            type="date" 
-            className="input-field" 
-            value={localDate} 
-            min="2024-09-01"
-            onChange={e => setLocalDate(e.target.value)} 
-          />
-        </div>
-      )}
-
-      <button className="btn-secondary" style={{ marginTop: '8px' }} onClick={handleSave} disabled={saving}>
-        {saving ? 'Updating...' : 'Apply Global Time'}
-      </button>
-      
-      {timeTravelState?.enabled && (
-        <div style={{ marginTop: '8px', padding: '8px', background: 'rgba(255,0,0,0.2)', color: '#ff7675', borderRadius: '4px', fontSize: '0.85rem', textAlign: 'center' }}>
-          ⚠️ App is currently simulating {timeTravelState.date}
-        </div>
-      )}
-    </div>
-  );
-}
 
 export default function AdminPanel() {
   const [users, setUsers] = useState([]);
@@ -92,6 +30,45 @@ export default function AdminPanel() {
   const [jumpDate, setJumpDate] = useState('');
   const [isUpdatingDate, setIsUpdatingDate] = useState(false);
 
+  const { activeSeasonId } = useTimeTravel();
+  const [localActiveSeasonId, setLocalActiveSeasonId] = useState('5');
+  const [isApplyingSeason, setIsApplyingSeason] = useState(false);
+
+  // Automatically generate missing calendar weeks for existing seasons on mount
+  useEffect(() => {
+    autoGenerateMissingWeeks().then((count) => {
+      if (count > 0) {
+        console.log(`[Admin] Automatically generated missing calendar weeks for ${count} seasons.`);
+      }
+    }).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    if (activeSeasonId) {
+      setLocalActiveSeasonId(activeSeasonId);
+    }
+  }, [activeSeasonId]);
+
+  const handleApplyActiveSeason = async () => {
+    setIsApplyingSeason(true);
+    try {
+      const selected = seasons.find(s => String(s.season_id) === String(localActiveSeasonId));
+      const sName = selected ? selected.season_name : `Season ${localActiveSeasonId}`;
+      
+      await setDoc(doc(db, 'app_settings', 'active_season'), {
+        active_season_id: localActiveSeasonId,
+        active_season_name: sName
+      }, { merge: true });
+      
+      alert(`App-wide active PWHL season updated to: ${sName}`);
+    } catch (err) {
+      alert("Failed to update active season: " + err.message);
+      console.error("Active Season Save Error:", err);
+    } finally {
+      setIsApplyingSeason(false);
+    }
+  };
+
   useEffect(() => {
     const unsub = onSnapshot(
       doc(db, "admin_settings", "simulation_state"), 
@@ -112,11 +89,21 @@ export default function AdminPanel() {
   }, []);
 
   useEffect(() => {
+    // Helper to race getDocs with a timeout to prevent hanging on cached emulator connections
+    async function getDocsWithTimeout(colRef, timeoutMs = 5000) {
+      return Promise.race([
+        getDocs(colRef),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Connection timed out. This often happens if the browser is using a cached connection to a non-running Firestore emulator.")), timeoutMs)
+        )
+      ]);
+    }
+
     async function fetchUsersAndSeasons() {
       console.log("[AdminPanel] fetchUsersAndSeasons: start");
       try {
         console.log("[AdminPanel] fetchUsersAndSeasons: fetching users...");
-        const querySnapshot = await getDocs(collection(db, "users"));
+        const querySnapshot = await getDocsWithTimeout(collection(db, "users"), 5000);
         console.log("[AdminPanel] fetchUsersAndSeasons: users size =", querySnapshot.size);
         const usersList = querySnapshot.docs.map(doc => ({
           id: doc.id,
@@ -126,14 +113,18 @@ export default function AdminPanel() {
         
         // Fetch seasons for the sync dropdown
         console.log("[AdminPanel] fetchUsersAndSeasons: fetching seasons...");
-        const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
+        const seasonsSnap = await getDocsWithTimeout(collection(db, 'pwhl_seasons'), 5000);
         console.log("[AdminPanel] fetchUsersAndSeasons: seasons size =", seasonsSnap.size);
         const seasonList = seasonsSnap.docs.map(d => ({id: d.id, ...d.data()}));
         seasonList.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
         setSeasons(seasonList);
       } catch (err) {
         console.error("[AdminPanel] fetchUsersAndSeasons error:", err);
-        setError('Failed to fetch data. Ensure you have admin privileges.');
+        if (err.message && err.message.includes("Connection timed out")) {
+          setError('Failed to load Admin Panel: Firestore connection timed out. If you recently started/stopped Firebase emulators, please perform a hard refresh (Cmd+Shift+R or Ctrl+F5) to clear the browser\'s cached connection.');
+        } else {
+          setError('Failed to fetch data. Ensure you have admin privileges. Error: ' + err.message);
+        }
       } finally {
         console.log("[AdminPanel] fetchUsersAndSeasons: finally, setting loading=false");
         setLoading(false);
@@ -266,20 +257,41 @@ export default function AdminPanel() {
           </pre>
         </div>
 
-        {/* Time Travel Mode Card */}
+        {/* Active PWHL Season Selection Card */}
         <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
             <div>
-              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>QA Time Travel</h2>
-              <p style={{ color: 'var(--text-muted)' }}>Simulate the app at a specific date for testing.</p>
+              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Active Season</h2>
+              <p style={{ color: 'var(--text-muted)' }}>Define the active season for the entire fantasy app.</p>
             </div>
-            <span style={{ fontSize: '2rem' }}>🕰️</span>
+            <span style={{ fontSize: '2rem' }}>🗓️</span>
           </div>
           
-          <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)', marginBottom: '16px' }}>
-             <TimeTravelSettings />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: 'auto' }}>
+            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Current Active Season</label>
+            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+              <select 
+                className="input-field" 
+                style={{ flex: 1, background: 'rgba(255,255,255,0.1)' }}
+                value={localActiveSeasonId}
+                onChange={e => setLocalActiveSeasonId(e.target.value)}
+              >
+                {seasons.map(s => (
+                  <option key={s.id} value={s.season_id} style={{ color: '#000' }}>{s.season_name}</option>
+                ))}
+              </select>
+              <button 
+                className="btn-primary" 
+                onClick={handleApplyActiveSeason} 
+                disabled={isApplyingSeason}
+              >
+                {isApplyingSeason ? 'Applying...' : 'Apply Season'}
+              </button>
+            </div>
           </div>
         </div>
+
+
 
         {/* Simulation Mode Card */}
         <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>

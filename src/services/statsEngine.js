@@ -20,9 +20,19 @@ import { collection, getDocs, query, where } from 'firebase/firestore';
  * @returns {Object} { skaters: {}, goalies: {} } dictionaries keyed by player_id
  */
 export async function fetchAggregatedStats(seasonId, cutoffDate) {
+  // Helper to race getDocs with a timeout to prevent hanging on cached emulator connections
+  async function getDocsWithTimeout(colRef, timeoutMs = 5000) {
+    return Promise.race([
+      getDocs(colRef),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Connection timed out. This often happens if the browser is using a cached connection to a non-running Firestore emulator.")), timeoutMs)
+      )
+    ]);
+  }
+
   // 1. Fetch all games for the season to determine which were Final BEFORE the cutoff date
   const gamesQuery = query(collection(db, 'pwhl_games'), where('season_id', 'in', [seasonId, Number(seasonId)]));
-  const gamesSnap = await getDocs(gamesQuery);
+  const gamesSnap = await getDocsWithTimeout(gamesQuery, 5000);
 
   const pastGameIds = new Set();
   gamesSnap.forEach(docSnap => {
@@ -45,7 +55,7 @@ export async function fetchAggregatedStats(seasonId, cutoffDate) {
 
   // 2. Fetch game summaries for this season
   const summariesQuery = query(collection(db, 'pwhl_game_summaries'), where('season_id', 'in', [seasonId, Number(seasonId)]));
-  const summariesSnap = await getDocs(summariesQuery);
+  const summariesSnap = await getDocsWithTimeout(summariesQuery, 5000);
 
   const skaters = {}; // keyed by player_id string
   const goalies = {}; // keyed by player_id string
@@ -167,22 +177,55 @@ export async function fetchAggregatedStats(seasonId, cutoffDate) {
     // ── STEP 3: Process Goalies from top-level goalies object
     const processGoalies = (goalieList) => {
       if (!Array.isArray(goalieList)) return;
+      
+      const goalieMap = {};
       goalieList.forEach(goalie => {
         const id = goalie.player_id;
         if (!id) return;
-        const g = getGoalie(id);
-        g.gamesPlayed += 1;
-        g.shotsSaved += parseInt(goalie.saves || 0);
-        g.goalsAgainst += parseInt(goalie.goals_against || 0);
-        g.wins += parseInt(goalie.win || 0);
-        g.losses += parseInt(goalie.loss || 0);
-        g.overtimeLosses += parseInt(goalie.ot_loss || 0);
-        g.shutouts += parseInt(goalie.shutout || 0);
+        const idStr = String(id);
+        
+        let secs = parseInt(goalie.seconds || goalie.secs || 0);
+        if (!secs && goalie.secs_mmss && goalie.secs_mmss.includes(':')) {
+          const [m, s] = goalie.secs_mmss.split(':').map(Number);
+          secs = m * 60 + s;
+        }
 
-        // TOI in seconds
-        const secs = parseInt(goalie.seconds || goalie.secs || 0);
-        g.timeOnIce += secs;
+        if (!goalieMap[idStr]) {
+          goalieMap[idStr] = {
+            saves: parseInt(goalie.saves || 0),
+            goalsAgainst: parseInt(goalie.goals_against || 0),
+            wins: parseInt(goalie.win || 0),
+            losses: parseInt(goalie.loss || 0),
+            overtimeLosses: parseInt(goalie.ot_loss || 0),
+            shutouts: parseInt(goalie.shutout || 0),
+            timeOnIce: secs
+          };
+        } else {
+          const existing = goalieMap[idStr];
+          existing.saves += parseInt(goalie.saves || 0);
+          existing.goalsAgainst += parseInt(goalie.goals_against || 0);
+          existing.wins = Math.max(existing.wins, parseInt(goalie.win || 0));
+          existing.losses = Math.max(existing.losses, parseInt(goalie.loss || 0));
+          existing.overtimeLosses = Math.max(existing.overtimeLosses, parseInt(goalie.ot_loss || 0));
+          existing.shutouts = Math.max(existing.shutouts, parseInt(goalie.shutout || 0));
+          existing.timeOnIce += secs;
+        }
       });
+
+      for (const [id, stats] of Object.entries(goalieMap)) {
+        const g = getGoalie(id);
+        // A goalie is considered to have played in the game if they played at least 1 second or recorded a save/allowed a goal
+        if (stats.timeOnIce > 0 || stats.saves > 0 || stats.goalsAgainst > 0) {
+          g.gamesPlayed += 1;
+          g.shotsSaved += stats.saves;
+          g.goalsAgainst += stats.goalsAgainst;
+          g.wins += stats.wins;
+          g.losses += stats.losses;
+          g.overtimeLosses += stats.overtimeLosses;
+          g.shutouts += stats.shutouts;
+          g.timeOnIce += stats.timeOnIce;
+        }
+      }
     };
 
     // Goalies live under summary.goalies.home[] and summary.goalies.visitor[]

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../firebase.js';
 import { doc, getDoc, updateDoc, collection, getDocs, deleteDoc } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
+import { randomizeDraftOrder } from '../services/leagueService.js';
 
 export default function League({ activeLeagueId, initialTab, setActiveLeagueId }) {
   const { currentUser } = useAuth();
@@ -41,6 +42,30 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
   const [draftDate, setDraftDate] = useState('');
   const [activating, setActivating] = useState(false);
   const [activateError, setActivateError] = useState('');
+  const [randomizing, setRandomizing] = useState(false);
+
+  // Roster Configuration states
+  const [forwardsStarters, setForwardsStarters] = useState(6);
+  const [forwardsMax, setForwardsMax] = useState(10);
+  const [defenseStarters, setDefenseStarters] = useState(4);
+  const [defenseMax, setDefenseMax] = useState(8);
+  const [goaliesStarters, setGoaliesStarters] = useState(1);
+  const [goaliesMax, setGoaliesMax] = useState(3);
+  const [benchSize, setBenchSize] = useState(4);
+
+  const handleRandomizeOrder = async () => {
+    setRandomizing(true);
+    try {
+      await randomizeDraftOrder(activeLeagueId);
+      alert("Draft order randomized successfully!");
+      await fetchLeagueDetails();
+    } catch (err) {
+      console.error(err);
+      alert("Failed to randomize draft order: " + err.message);
+    } finally {
+      setRandomizing(false);
+    }
+  };
 
   const fetchLeagueDetails = async () => {
     if (!activeLeagueId) return;
@@ -54,6 +79,16 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
         if (data.scheduleSettings) {
           setMatchupWeeksInput(data.scheduleSettings.matchupDuration || 1);
           setPlayoffTeamsInput(data.scheduleSettings.playoffTeams || 4);
+        }
+        if (data.rosterSettings) {
+          const r = data.rosterSettings;
+          setForwardsStarters(r.forwards?.starters ?? 6);
+          setForwardsMax(r.forwards?.max ?? 10);
+          setDefenseStarters(r.defense?.starters ?? 4);
+          setDefenseMax(r.defense?.max ?? 8);
+          setGoaliesStarters(r.goalies?.starters ?? 1);
+          setGoaliesMax(r.goalies?.max ?? 3);
+          setBenchSize(r.bench ?? 4);
         }
         if (data.scoringSettings) {
           const s = data.scoringSettings.skaters || {};
@@ -150,6 +185,21 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
           matchupDuration: parseInt(matchupWeeksInput),
           playoffTeams: parseInt(playoffTeamsInput),
           playoffDuration: 1
+        },
+        rosterSettings: {
+          forwards: {
+            starters: parseInt(forwardsStarters),
+            max: parseInt(forwardsMax)
+          },
+          defense: {
+            starters: parseInt(defenseStarters),
+            max: parseInt(defenseMax)
+          },
+          goalies: {
+            starters: parseInt(goaliesStarters),
+            max: parseInt(goaliesMax)
+          },
+          bench: parseInt(benchSize)
         },
         scoringSettings: {
           skaters: {
@@ -347,8 +397,12 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
                                 </span>
                               )}
                             </td>
-                            <td className="px-6 py-4 text-center font-semibold text-gray-400">0-0</td>
-                            <td className="px-6 py-4 text-right font-black text-indigo-600">0.0</td>
+                            <td className="px-6 py-4 text-center font-semibold text-gray-400">
+                              {team.wins || 0}-{team.losses || 0}-{team.ties || 0}
+                            </td>
+                            <td className="px-6 py-4 text-right font-black text-indigo-600">
+                              {team.points !== undefined ? Number(team.points).toFixed(1) : '0.0'}
+                            </td>
                           </tr>
                         ))
                     )}
@@ -547,6 +601,97 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
                   </div>
                 </div>
 
+                {/* Roster Size Configuration */}
+                <div className="border-t border-gray-100 pt-5">
+                  <h4 className="text-[10px] font-black uppercase text-emerald-600 bg-emerald-50 border border-emerald-100 px-3 py-1.5 rounded-full inline-block mb-4 tracking-widest shadow-sm">📋 Roster Sheet Size</h4>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div>
+                      <label className="block text-[8px] uppercase font-black text-gray-400 mb-1">Forwards Starters</label>
+                      <input 
+                        type="number"
+                        min="1"
+                        max="15"
+                        disabled={isDraftScheduled}
+                        value={forwardsStarters}
+                        onChange={e => setForwardsStarters(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-700 disabled:opacity-60 focus:bg-white focus:border-indigo-500 shadow-inner focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[8px] uppercase font-black text-gray-400 mb-1">Forwards Max</label>
+                      <input 
+                        type="number"
+                        min="1"
+                        max="20"
+                        disabled={isDraftScheduled}
+                        value={forwardsMax}
+                        onChange={e => setForwardsMax(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-700 disabled:opacity-60 focus:bg-white focus:border-indigo-500 shadow-inner focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[8px] uppercase font-black text-gray-400 mb-1">Defense Starters</label>
+                      <input 
+                        type="number"
+                        min="1"
+                        max="10"
+                        disabled={isDraftScheduled}
+                        value={defenseStarters}
+                        onChange={e => setDefenseStarters(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-700 disabled:opacity-60 focus:bg-white focus:border-indigo-500 shadow-inner focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[8px] uppercase font-black text-gray-400 mb-1">Defense Max</label>
+                      <input 
+                        type="number"
+                        min="1"
+                        max="15"
+                        disabled={isDraftScheduled}
+                        value={defenseMax}
+                        onChange={e => setDefenseMax(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-700 disabled:opacity-60 focus:bg-white focus:border-indigo-500 shadow-inner focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[8px] uppercase font-black text-gray-400 mb-1">Goalie Starters</label>
+                      <input 
+                        type="number"
+                        min="1"
+                        max="5"
+                        disabled={isDraftScheduled}
+                        value={goaliesStarters}
+                        onChange={e => setGoaliesStarters(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-700 disabled:opacity-60 focus:bg-white focus:border-indigo-500 shadow-inner focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[8px] uppercase font-black text-gray-400 mb-1">Goalies Max</label>
+                      <input 
+                        type="number"
+                        min="1"
+                        max="10"
+                        disabled={isDraftScheduled}
+                        value={goaliesMax}
+                        onChange={e => setGoaliesMax(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-700 disabled:opacity-60 focus:bg-white focus:border-indigo-500 shadow-inner focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[8px] uppercase font-black text-gray-400 mb-1">Bench Size</label>
+                      <input 
+                        type="number"
+                        min="0"
+                        max="15"
+                        disabled={isDraftScheduled}
+                        value={benchSize}
+                        onChange={e => setBenchSize(e.target.value)}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-bold text-gray-700 disabled:opacity-60 focus:bg-white focus:border-indigo-500 shadow-inner focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 {/* Skater Scoring Settings Grid */}
                 <div className="border-t border-gray-100 pt-5">
                   <h4 className="text-[10px] font-black uppercase text-indigo-600 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-full inline-block mb-4 tracking-widest shadow-sm">⛸️ Skater Scoring Rules</h4>
@@ -665,6 +810,56 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
                   )}
                 </div>
               )}
+
+              {/* Draft Order Management */}
+              <div className="bg-white border border-gray-200 p-6 rounded-[32px] shadow-sm space-y-4 mt-6">
+                <h4 className="text-sm font-black text-gray-900 uppercase tracking-tight flex items-center justify-between">
+                  <span>Draft Selection Sequence</span>
+                  {isDraftScheduled ? (
+                    <span className="text-[9px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full border border-indigo-100 uppercase tracking-widest font-black">
+                      🔒 Locked
+                    </span>
+                  ) : (
+                    <span className="text-[9px] bg-amber-50 text-amber-600 px-2 py-0.5 rounded-full border border-amber-100 uppercase tracking-widest font-black">
+                      🔓 Unlocked
+                    </span>
+                  )}
+                </h4>
+                <p className="text-[11px] text-gray-400 font-semibold leading-normal">
+                  Teams are slotted into the draft order as they join. The commissioner can randomize the order until the draft is scheduled.
+                </p>
+
+                <div className="space-y-2">
+                  {(leagueData.draftOrder || leagueData.members || []).map((uid, idx) => {
+                    const team = teams.find(t => t.ownerId === uid);
+                    return (
+                      <div key={uid} className="flex items-center justify-between bg-gray-50 border border-gray-150 p-3 rounded-2xl">
+                        <div className="flex items-center gap-3 text-left">
+                          <span className="w-6 h-6 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-[10px] font-black text-indigo-600">
+                            {idx + 1}
+                          </span>
+                          <span className="text-xs font-black text-gray-800">
+                            {team ? team.teamName : `Owner (${uid.slice(0, 6)})`}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-wider">
+                          {uid === leagueData.ownerId ? '👑 LM' : 'Member'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {!isDraftScheduled && (
+                  <button
+                    onClick={handleRandomizeOrder}
+                    disabled={randomizing}
+                    className="w-full py-3.5 bg-indigo-50 hover:bg-indigo-100/70 border border-indigo-200 text-indigo-600 rounded-2xl text-[10px] font-black uppercase tracking-wider active:scale-95 transition-all shadow-sm flex items-center justify-center gap-2"
+                  >
+                    🔀 {randomizing ? 'Shuffling...' : 'Randomize Draft Order'}
+                  </button>
+                )}
+              </div>
 
               {/* Locked Draft Banner */}
               {!isPending && (

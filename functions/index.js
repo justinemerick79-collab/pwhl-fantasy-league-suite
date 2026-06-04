@@ -139,38 +139,6 @@ exports.syncDailyData = functions.pubsub
  * Helper to fetch the simulated time travel cutoff date
  */
 async function getCutoffDate() {
-  try {
-    const envRef = db.collection("admin_settings").doc("environment");
-    const envSnap = await envRef.get();
-    
-    if (envSnap.exists) {
-      const envData = envSnap.data();
-      if (envData.time_travel_mode === true) {
-        const rawDate = envData.simulated_date || envData.current_system_date;
-        if (rawDate) {
-          console.log(`[Time Travel] Active in admin_settings/environment. Cutoff: ${rawDate}`);
-          return new Date(rawDate);
-        }
-      }
-    }
-  } catch (err) {
-    console.error("Error reading admin_settings/environment:", err);
-  }
-  
-  try {
-    const ttRef = db.collection("app_settings").doc("time_travel");
-    const ttSnap = await ttRef.get();
-    if (ttSnap.exists) {
-      const ttData = ttSnap.data();
-      if (ttData.enabled && ttData.date) {
-        console.log(`[Time Travel] Active in app_settings/time_travel. Cutoff: ${ttData.date}`);
-        return new Date(`${ttData.date}T08:00:00-08:00`);
-      }
-    }
-  } catch (err) {
-    console.error("Error reading app_settings/time_travel:", err);
-  }
-  
   return new Date(await getSystemDate());
 }
 
@@ -322,21 +290,55 @@ async function crunchStatsAndFantasyPoints(seasonIdStr, cutoffDate) {
       // Goalies
       const processGoaliesList = (goalieList) => {
         if (!Array.isArray(goalieList)) return;
+        
+        const goalieMap = {};
         goalieList.forEach(goalie => {
           const id = goalie.player_id;
           if (!id) return;
-          const g = getGoalieObj(id);
-          g.gamesPlayed += 1;
-          g.shotsSaved += parseInt(goalie.saves || 0);
-          g.goalsAgainst += parseInt(goalie.goals_against || 0);
-          g.wins += parseInt(goalie.win || 0);
-          g.losses += parseInt(goalie.loss || 0);
-          g.overtimeLosses += parseInt(goalie.ot_loss || 0);
-          g.shutouts += parseInt(goalie.shutout || 0);
+          const idStr = String(id);
+          
+          let secs = parseInt(goalie.seconds || goalie.secs || 0);
+          if (!secs && goalie.secs_mmss && goalie.secs_mmss.includes(':')) {
+            const [m, s] = goalie.secs_mmss.split(':').map(Number);
+            secs = m * 60 + s;
+          }
 
-          const secs = parseInt(goalie.seconds || goalie.secs || 0);
-          g.timeOnIce += secs;
+          if (!goalieMap[idStr]) {
+            goalieMap[idStr] = {
+              saves: parseInt(goalie.saves || 0),
+              goalsAgainst: parseInt(goalie.goals_against || 0),
+              wins: parseInt(goalie.win || 0),
+              losses: parseInt(goalie.loss || 0),
+              overtimeLosses: parseInt(goalie.ot_loss || 0),
+              shutouts: parseInt(goalie.shutout || 0),
+              timeOnIce: secs
+            };
+          } else {
+            const existing = goalieMap[idStr];
+            existing.saves += parseInt(goalie.saves || 0);
+            existing.goalsAgainst += parseInt(goalie.goals_against || 0);
+            existing.wins = Math.max(existing.wins, parseInt(goalie.win || 0));
+            existing.losses = Math.max(existing.losses, parseInt(goalie.loss || 0));
+            existing.overtimeLosses = Math.max(existing.overtimeLosses, parseInt(goalie.ot_loss || 0));
+            existing.shutouts = Math.max(existing.shutouts, parseInt(goalie.shutout || 0));
+            existing.timeOnIce += secs;
+          }
         });
+
+        for (const [id, stats] of Object.entries(goalieMap)) {
+          const g = getGoalieObj(id);
+          // A goalie is considered to have played in the game if they played at least 1 second or recorded a save/allowed a goal
+          if (stats.timeOnIce > 0 || stats.saves > 0 || stats.goalsAgainst > 0) {
+            g.gamesPlayed += 1;
+            g.shotsSaved += stats.saves;
+            g.goalsAgainst += stats.goalsAgainst;
+            g.wins += stats.wins;
+            g.losses += stats.losses;
+            g.overtimeLosses += stats.overtimeLosses;
+            g.shutouts += stats.shutouts;
+            g.timeOnIce += stats.timeOnIce;
+          }
+        }
       };
 
       if (summary.goalies && typeof summary.goalies === "object") {
@@ -649,7 +651,35 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
       });
     }
 
-    // D. Create filled League document (active_full)
+    // D. Read active season ID and its weeks array
+    let activeSeasonId = "5";
+    try {
+      const activeSeasonSnap = await db.collection("app_settings").doc("active_season").get();
+      if (activeSeasonSnap.exists && activeSeasonSnap.data().active_season_id) {
+        activeSeasonId = String(activeSeasonSnap.data().active_season_id);
+      }
+    } catch (err) {
+      console.error("Error reading active season setting:", err);
+    }
+
+    let weeks = [];
+    try {
+      const seasonSnap = await db.collection("pwhl_seasons").doc(activeSeasonId).get();
+      if (seasonSnap.exists && seasonSnap.data().weeks) {
+        weeks = seasonSnap.data().weeks;
+      }
+    } catch (err) {
+      console.error("Error reading season weeks:", err);
+    }
+
+    const activeWeeks = weeks.filter(w => !w.isOffWeek);
+    const getActiveWeekNum = (roundIndex) => {
+      if (activeWeeks.length === 0) return roundIndex + 1;
+      const idx = roundIndex % activeWeeks.length;
+      return activeWeeks[idx].week;
+    };
+
+    // E. Create filled League document (active_full)
     const allMembers = [adminUid, ...botUids];
     batch.set(leagueRef, {
       name: "Simulation Test League",
@@ -661,6 +691,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
       userIds: allMembers,
       status: "active_full",
       isTestNode: true,
+      season_id: activeSeasonId,
       createdAt: systemTimestamp,
       rosterSettings: defaultRosterSettings,
       scoringSettings: defaultScoringSettings,
@@ -668,7 +699,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
       waiverOrder: [adminTeamRef.id, ...botTeamRefs.map(r => r.id)]
     });
 
-    // E. Generate mathematically perfect Weekly H2H Matchups (Circle Rotation, Double Round-Robin for 14 weeks)
+    // F. Generate mathematically perfect Weekly H2H Matchups (Circle Rotation, Double Round-Robin for 14 weeks)
     const numTeams = 8;
     const teamIds = [adminTeamRef.id, ...botTeamRefs.map(r => r.id)];
     
@@ -682,8 +713,8 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
     const list = [...teamIds];
 
     for (let round = 0; round < 7; round++) {
-      const weekNum1 = round + 1;
-      const weekNum2 = round + 8;
+      const weekNum1 = getActiveWeekNum(round);
+      const weekNum2 = getActiveWeekNum(round + 7);
       for (let i = 0; i < numTeams / 2; i++) {
         const home = list[i];
         const away = list[numTeams - 1 - i];
@@ -760,6 +791,126 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
       msg,
       error.stack
     );
+  }
+});
+
+/**
+ * HTTPS Callable Cloud Function to deactivate QA Simulation Sandbox.
+ * Automatically cleans up the simulation sandbox by deleting all bot users,
+ * the simulation league, all teams, matchups, waivers, claims, and trades under it,
+ * and resets simulation state and time travel settings.
+ */
+exports.deactivateSimulation = functions.https.onCall(async (data, context) => {
+  try {
+    // 1. Enforce user authentication
+    if (!context.auth) {
+      throw new functions.https.HttpsError(
+        "unauthenticated",
+        "The function must be called by an authenticated user."
+      );
+    }
+
+    const adminUid = context.auth.uid;
+    const adminEmail = context.auth.token ? context.auth.token.email : null;
+
+    // 2. Enforce admin privilege check
+    const userRef = db.collection("users").doc(adminUid);
+    const userSnap = await userRef.get();
+
+    const isSuperAdmin = adminEmail === "justinemerick79@gmail.com";
+    const isExplicitAdmin = userSnap.exists && userSnap.data().role === "admin";
+
+    if (!isSuperAdmin && !isExplicitAdmin) {
+      throw new functions.https.HttpsError(
+        "permission-denied",
+        "Only authenticated admin accounts can deactivate the simulation mode."
+      );
+    }
+
+    console.log(`[Simulation] Admin ${adminUid} started deactivating simulation...`);
+
+    // 3. Get the active test league ID from simulation state
+    const simStateRef = db.collection("admin_settings").doc("simulation_state");
+    const simStateSnap = await simStateRef.get();
+    let testLeagueId = "";
+    if (simStateSnap.exists) {
+      testLeagueId = simStateSnap.data().active_test_league_id || "";
+    }
+
+    const batch = db.batch();
+
+    // 4. Delete the test league and all its subcollections
+    if (testLeagueId) {
+      console.log(`[Simulation] Cleaning up test league: ${testLeagueId}`);
+      const leagueRef = db.collection("fantasy_leagues").doc(testLeagueId);
+
+      // Fetch and delete teams subcollection
+      const teamsSnap = await leagueRef.collection("teams").get();
+      teamsSnap.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // Fetch and delete matchups subcollection
+      const matchupsSnap = await leagueRef.collection("matchups").get();
+      matchupsSnap.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // Fetch and delete waivers subcollection if any
+      const waiversSnap = await leagueRef.collection("waivers").get();
+      waiversSnap.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // Fetch and delete waiver_claims subcollection if any
+      const claimsSnap = await leagueRef.collection("waiver_claims").get();
+      claimsSnap.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // Fetch and delete trades subcollection if any
+      const tradesSnap = await leagueRef.collection("trades").get();
+      tradesSnap.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // Delete the main league document
+      batch.delete(leagueRef);
+    }
+
+    // 5. Delete all bot users (isBot == true)
+    const botsSnap = await db.collection("users").where("isBot", "==", true).get();
+    console.log(`[Simulation] Found ${botsSnap.size} bot users to delete`);
+    botsSnap.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+
+    // 6. Reset simulation state
+    batch.set(simStateRef, {
+      testModeActive: false,
+      current_simulated_date: null,
+      active_test_league_id: "",
+      isTestNode: false
+    });
+
+    // 7. Delete app_settings/time_travel
+    const timeTravelRef = db.collection("app_settings").doc("time_travel");
+    batch.delete(timeTravelRef);
+
+    // Commit all deletions
+    await batch.commit();
+
+    console.log("[Simulation] Simulation sandbox deactivated successfully.");
+
+    return {
+      success: true
+    };
+  } catch (error) {
+    console.error("CRITICAL ERROR IN deactivateSimulation:", error);
+    if (error instanceof functions.https.HttpsError) {
+      throw error;
+    }
+    throw new functions.https.HttpsError("unknown", error.message || error.toString());
   }
 });
 
@@ -889,10 +1040,38 @@ async function handleDraftStateChange(docSnap) {
         }
       });
 
-      // Filter available players
-      const availablePlayers = allPlayers.filter(p => !draftedIds.has(p.id) && !draftedIds.has(p.player_id || p.id));
+      // Filter available players respecting roster position limits
+      const botRosterIds = activeRosters[currentPickerId] || [];
+      let fCount = 0;
+      let dCount = 0;
+      let gCount = 0;
+
+      botRosterIds.forEach(pId => {
+        const pInfo = allPlayers.find(p => String(p.id) === String(pId) || String(p.player_id) === String(pId));
+        const pos = pInfo?.position || pInfo?.pos || 'F';
+        if (pos === 'F' || pos === 'Forward') fCount++;
+        else if (pos === 'D' || pos === 'Defense' || pos === 'Defenseman') dCount++;
+        else if (pos === 'G' || pos === 'Goalie') gCount++;
+      });
+
+      const rosterSettings = leagueData.rosterSettings || { bench: 4, forwards: { starters: 6, max: 10 }, defense: { starters: 4, max: 8 }, goalies: { starters: 1, max: 3 } };
+      const forwardsLimit = rosterSettings.forwards?.max ?? 10;
+      const defenseLimit = rosterSettings.defense?.max ?? 8;
+      const goaliesLimit = rosterSettings.goalies?.max ?? 3;
+
+      const availablePlayers = allPlayers.filter(p => {
+        if (draftedIds.has(p.id) || draftedIds.has(p.player_id || p.id)) return false;
+
+        const pos = p.position || p.pos || 'F';
+        if ((pos === 'F' || pos === 'Forward') && fCount >= forwardsLimit) return false;
+        if ((pos === 'D' || pos === 'Defense' || pos === 'Defenseman') && dCount >= defenseLimit) return false;
+        if ((pos === 'G' || pos === 'Goalie') && gCount >= goaliesLimit) return false;
+
+        return true;
+      });
+
       if (availablePlayers.length === 0) {
-        console.warn(`[Draft Engine] No players available for draft in league ${leagueId}`);
+        console.warn(`[Draft Engine] No players available matching roster limits for draft in league ${leagueId}`);
         return;
       }
 
@@ -1109,17 +1288,316 @@ exports.onSimulationStateWritten = onDocumentWritten("admin_settings/simulation_
     const scoringRules = leagueData.scoringSettings || defaultScoring;
 
     let currentWeek = leagueData.currentWeek || 1;
-    let weekEndTime = baseTime + currentWeek * weekMs;
+
+    const seasonId = leagueData.season_id ? String(leagueData.season_id) : '5';
+    let weeks = [];
+    try {
+      const seasonSnap = await db.collection("pwhl_seasons").doc(seasonId).get();
+      if (seasonSnap.exists && seasonSnap.data().weeks) {
+        weeks = seasonSnap.data().weeks;
+      }
+    } catch (err) {
+      console.error(`Error loading weeks for season ${seasonId}:`, err);
+    }
+
+    const getWeekBounds = (weekNum) => {
+      const wk = weeks.find(w => w.week === weekNum);
+      if (wk) {
+        return {
+          start: new Date(wk.start),
+          end: new Date(wk.end),
+          isOffWeek: !!wk.isOffWeek
+        };
+      }
+      const ws = baseTime + (weekNum - 1) * weekMs;
+      const we = baseTime + weekNum * weekMs;
+      return {
+        start: new Date(ws),
+        end: new Date(we),
+        isOffWeek: false
+      };
+    };
+
+    let bounds = getWeekBounds(currentWeek);
 
     // A. Finalize past weeks sequentially
-    while (newDate.getTime() >= weekEndTime) {
+    while (newDate.getTime() >= bounds.end.getTime()) {
       const w = currentWeek;
-      const weekStart = baseTime + (w - 1) * weekMs;
-      const weekEnd = baseTime + w * weekMs;
 
-      console.log(`[Game Loop] Finalizing Week ${w} (from ${new Date(weekStart).toISOString()} to ${new Date(weekEnd).toISOString()}) for league ${leagueId}`);
+      if (bounds.isOffWeek) {
+        console.log(`[Game Loop] Week ${w} is an Off Week for league ${leagueId}. Skipping H2H finalization.`);
+      } else {
+        console.log(`[Game Loop] Finalizing Week ${w} (from ${bounds.start.toISOString()} to ${bounds.end.toISOString()}) for league ${leagueId}`);
 
-      // Query game ids played in week w
+        // Query game ids played in week w
+        const weeklyGamesSnap = await db.collection("pwhl_games").get();
+        const weeklyGameIds = [];
+        weeklyGamesSnap.forEach(gDoc => {
+          const game = gDoc.data();
+          const gDateStr = game.date_played || game.date;
+          if (!gDateStr) return;
+          const gDate = new Date(gDateStr);
+          if (gDate >= bounds.start && gDate < bounds.end && (game.status === "4" || game.status === "3")) {
+            weeklyGameIds.push(gDoc.id.toString());
+          }
+        });
+
+        const weeklySkaters = {};
+        const weeklyGoalies = {};
+        const getWskater = (id) => {
+          if (!weeklySkaters[id]) weeklySkaters[id] = { goals: 0, assists: 0, plusMinus: 0, powerPlayPoints: 0, shortHandedPoints: 0, shotsOnGoal: 0, hits: 0, blockedShots: 0 };
+          return weeklySkaters[id];
+        };
+        const getWgoalie = (id) => {
+          if (!weeklyGoalies[id]) weeklyGoalies[id] = { wins: 0, overtimeLosses: 0, goalsAgainst: 0, shotsSaved: 0, shutouts: 0 };
+          return weeklyGoalies[id];
+        };
+
+        if (weeklyGameIds.length > 0) {
+          const summariesSnap = await db.collection("pwhl_game_summaries").get();
+          summariesSnap.forEach(sDoc => {
+            if (!weeklyGameIds.includes(sDoc.id)) return;
+            const summary = sDoc.data();
+            const scoringPlays = Array.isArray(summary.goals) ? summary.goals : [];
+            const assistCounts = {};
+            const goalCounts = {};
+
+            scoringPlays.forEach(goal => {
+              const isPP = goal.power_play === "1" || goal.power_play === 1;
+              const isSH = goal.short_handed === "1" || goal.short_handed === 1;
+              if (goal.goal_scorer?.player_id) {
+                if (!goalCounts[goal.goal_scorer.player_id]) goalCounts[goal.goal_scorer.player_id] = { ppGoals: 0, shGoals: 0 };
+                const g = goalCounts[goal.goal_scorer.player_id];
+                if (isPP) g.ppGoals++;
+                if (isSH) g.shGoals++;
+              }
+              [goal.assist1_player, goal.assist2_player].forEach(a => {
+                if (!a?.player_id) return;
+                if (!assistCounts[a.player_id]) assistCounts[a.player_id] = { assists: 0, ppAssists: 0, shAssists: 0 };
+                const obj = assistCounts[a.player_id];
+                obj.assists++;
+                if (isPP) obj.ppAssists++;
+                if (isSH) obj.shAssists++;
+              });
+            });
+
+            // Skaters
+            const homeSkaters = summary.home_team_lineup?.players || [];
+            const visitorSkaters = summary.visitor_team_lineup?.players || [];
+            [...homeSkaters, ...visitorSkaters].forEach(player => {
+              const id = player.player_id;
+              if (!id) return;
+              const s = getWskater(id);
+              s.goals += parseInt(player.goals || 0);
+              s.pim += parseInt(player.pim || 0);
+              s.shotsOnGoal += parseInt(player.shots_on || player.shots || 0);
+              s.blockedShots += parseInt(player.shots_blocked_by_player || player.shots_blocked || 0);
+              s.hits += parseInt(player.hits || 0);
+              const pm = player.plusminus;
+              if (pm !== undefined && pm !== null && pm !== "") {
+                s.plusMinus += parseInt(pm, 10) || 0;
+              }
+              const assistObj = assistCounts[id];
+              if (assistObj) {
+                s.assists += assistObj.assists;
+                s.powerPlayPoints += (assistObj.ppAssists || 0);
+                s.shortHandedPoints += (assistObj.shAssists || 0);
+              }
+              const goalObj = goalCounts[id];
+              if (goalObj) {
+                s.powerPlayPoints += (goalObj.ppGoals || 0);
+                s.shortHandedPoints += (goalObj.shGoals || 0);
+              }
+            });
+
+            // Goalies
+            const homeGoalies = summary.goalies?.home || [];
+            const visitorGoalies = summary.goalies?.visitor || [];
+            
+            const gameGoaliesMap = {};
+            [...homeGoalies, ...visitorGoalies].forEach(goalie => {
+              const id = goalie.player_id;
+              if (!id) return;
+              const idStr = String(id);
+              if (!gameGoaliesMap[idStr]) {
+                gameGoaliesMap[idStr] = {
+                  saves: parseInt(goalie.saves || 0),
+                  goalsAgainst: parseInt(goalie.goals_against || 0),
+                  wins: parseInt(goalie.win || 0),
+                  overtimeLosses: parseInt(goalie.ot_loss || 0),
+                  shutouts: parseInt(goalie.shutout || 0)
+                };
+              } else {
+                const existing = gameGoaliesMap[idStr];
+                existing.saves += parseInt(goalie.saves || 0);
+                existing.goalsAgainst += parseInt(goalie.goals_against || 0);
+                existing.wins = Math.max(existing.wins, parseInt(goalie.win || 0));
+                existing.overtimeLosses = Math.max(existing.overtimeLosses, parseInt(goalie.ot_loss || 0));
+                existing.shutouts = Math.max(existing.shutouts, parseInt(goalie.shutout || 0));
+              }
+            });
+
+            for (const [id, stats] of Object.entries(gameGoaliesMap)) {
+              const g = getWgoalie(id);
+              g.shotsSaved += stats.saves;
+              g.goalsAgainst += stats.goalsAgainst;
+              g.wins += stats.wins;
+              g.overtimeLosses += stats.overtimeLosses;
+              g.shutouts += stats.shutouts;
+            }
+          });
+        }
+
+        // Fetch all teams for this league
+        const teamsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("teams").get();
+        const teams = teamsSnap.docs.map(tDoc => ({ id: tDoc.id, ...tDoc.data() }));
+
+        const calculateStartingRosterWeekScore = (teamPlayers) => {
+          const unusedIds = [...teamPlayers];
+          const layoutSlots = [
+            { pos: "F" }, { pos: "F" }, { pos: "F" }, { pos: "F" }, { pos: "F" }, { pos: "F" },
+            { pos: "D" }, { pos: "D" }, { pos: "D" }, { pos: "D" },
+            { pos: "G" }
+          ];
+          const starters = [];
+          layoutSlots.forEach(slot => {
+            const matchIdx = unusedIds.findIndex(id => {
+              const mockPos = id.startsWith("pwhl_") ? (id.startsWith("pwhl_12") || id.startsWith("pwhl_13") || id.startsWith("pwhl_14") ? "G" : (id.startsWith("pwhl_8") || id.startsWith("pwhl_9") || id.startsWith("pwhl_10") || id.startsWith("pwhl_11") ? "D" : "F")) : null;
+              const pos = playersPosMap[id] || mockPos || "F";
+              return pos === slot.pos;
+            });
+            if (matchIdx !== -1) {
+              starters.push(unusedIds[matchIdx]);
+              unusedIds.splice(matchIdx, 1);
+            }
+          });
+
+          let totalPoints = 0;
+          starters.forEach(pId => {
+            const skaterStats = weeklySkaters[pId];
+            const goalieStats = weeklyGoalies[pId];
+            const mockPos = pId.startsWith("pwhl_") ? (pId.startsWith("pwhl_12") || pId.startsWith("pwhl_13") || pId.startsWith("pwhl_14") ? "G" : (pId.startsWith("pwhl_8") || pId.startsWith("pwhl_9") || pId.startsWith("pwhl_10") || pId.startsWith("pwhl_11") ? "D" : "F")) : null;
+            const pos = playersPosMap[pId] || mockPos || "F";
+
+            let points = 0;
+            if (pos === "G" && goalieStats) {
+              const matrix = scoringRules.goalies || defaultScoring.goalies;
+              points += (goalieStats.wins || 0) * (matrix.wins || 0);
+              points += (goalieStats.overtimeLosses || 0) * (matrix.otl || 0);
+              points += (goalieStats.goalsAgainst || 0) * (matrix.ga || 0);
+              points += (goalieStats.shotsSaved || 0) * (matrix.saves || 0);
+              points += (goalieStats.shutouts || 0) * (matrix.shutouts || 0);
+            } else if (skaterStats) {
+              const matrix = scoringRules.skaters || defaultScoring.skaters;
+              points += (skaterStats.goals || 0) * (matrix.goals || 0);
+              points += (skaterStats.assists || 0) * (matrix.assists || 0);
+              points += (skaterStats.plusMinus || 0) * (matrix.plusMinus || 0);
+              points += (skaterStats.powerPlayPoints || 0) * (matrix.ppp || 0);
+              points += (skaterStats.shortHandedPoints || 0) * (matrix.shp || 0);
+              points += (skaterStats.shotsOnGoal || 0) * (matrix.sog || 0);
+              points += (skaterStats.hits || 0) * (matrix.hits || 0);
+              points += (skaterStats.blockedShots || 0) * (matrix.blocks || 0);
+              if (pos === "D" || pos === "Defense") {
+                points += ((skaterStats.goals || 0) + (skaterStats.assists || 0)) * (matrix.defensePoints || 0);
+              }
+            }
+            totalPoints += points;
+          });
+
+          return Math.round(totalPoints * 100) / 100;
+        };
+
+        const matchupsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("matchups").where("week", "==", w).get();
+        const teamRecordsUpdates = {};
+
+        const getRecordObj = (id) => {
+          if (!teamRecordsUpdates[id]) {
+            const t = teams.find(team => team.id === id) || {};
+            teamRecordsUpdates[id] = {
+              wins: t.wins || 0,
+              losses: t.losses || 0,
+              ties: t.ties || 0,
+              points: t.points || 0
+            };
+          }
+          return teamRecordsUpdates[id];
+        };
+
+        const txBatch = db.batch();
+
+        for (const mDoc of matchupsSnap.docs) {
+          const matchup = mDoc.data();
+          const homeTeam = teams.find(t => t.id === matchup.homeTeamId) || { players: [] };
+          const awayTeam = teams.find(t => t.id === matchup.awayTeamId) || { players: [] };
+
+          const homeScore = calculateStartingRosterWeekScore(homeTeam.players || []);
+          const awayScore = calculateStartingRosterWeekScore(awayTeam.players || []);
+
+          let homeWin = false, awayWin = false, tie = false;
+          if (homeScore > awayScore) {
+            homeWin = true;
+          } else if (awayScore > homeScore) {
+            awayWin = true;
+          } else {
+            tie = true;
+          }
+
+          const rHome = getRecordObj(matchup.homeTeamId);
+          const rAway = getRecordObj(matchup.awayTeamId);
+
+          rHome.points += homeScore;
+          rAway.points += awayScore;
+
+          if (homeWin) {
+            rHome.wins++;
+            rAway.losses++;
+          } else if (awayWin) {
+            rAway.wins++;
+            rHome.losses++;
+          } else {
+            rHome.ties++;
+            rAway.ties++;
+          }
+
+          txBatch.update(mDoc.ref, {
+            homeScore: homeScore,
+            awayScore: awayScore,
+            status: "completed",
+            winnerId: homeWin ? matchup.homeTeamId : (awayWin ? matchup.awayTeamId : "TIE"),
+            updatedAt: Timestamp.fromMillis(Date.now())
+          });
+        }
+
+        for (const [tId, rec] of Object.entries(teamRecordsUpdates)) {
+          const teamRef = db.collection("fantasy_leagues").doc(leagueId).collection("teams").doc(tId);
+          txBatch.update(teamRef, {
+            wins: rec.wins,
+            losses: rec.losses,
+            ties: rec.ties,
+            points: Math.round(rec.points * 100) / 100
+          });
+        }
+
+        await txBatch.commit();
+      }
+
+      currentWeek++;
+      await db.collection("fantasy_leagues").doc(leagueId).update({
+        currentWeek: currentWeek
+      });
+
+      bounds = getWeekBounds(currentWeek);
+    }
+
+    // B. Calculate active week score up to cutoff
+    const w = currentWeek;
+    const liveBounds = getWeekBounds(w);
+
+    if (liveBounds.isOffWeek) {
+      console.log(`[Game Loop] Current Week ${w} is an Off Week for league ${leagueId}. No live scores to update.`);
+    } else {
+      console.log(`[Game Loop] Calculating live scores for Week ${w} up to cutoff ${newDate.toISOString()}`);
+
       const weeklyGamesSnap = await db.collection("pwhl_games").get();
       const weeklyGameIds = [];
       weeklyGamesSnap.forEach(gDoc => {
@@ -1127,7 +1605,7 @@ exports.onSimulationStateWritten = onDocumentWritten("admin_settings/simulation_
         const gDateStr = game.date_played || game.date;
         if (!gDateStr) return;
         const gDate = new Date(gDateStr);
-        if (gDate >= new Date(weekStart) && gDate < new Date(weekEnd) && (game.status === "4" || game.status === "3")) {
+        if (gDate >= liveBounds.start && gDate <= newDate && (game.status === "4" || game.status === "3")) {
           weeklyGameIds.push(gDoc.id.toString());
         }
       });
@@ -1203,20 +1681,41 @@ exports.onSimulationStateWritten = onDocumentWritten("admin_settings/simulation_
           // Goalies
           const homeGoalies = summary.goalies?.home || [];
           const visitorGoalies = summary.goalies?.visitor || [];
+          
+          const gameGoaliesMap = {};
           [...homeGoalies, ...visitorGoalies].forEach(goalie => {
             const id = goalie.player_id;
             if (!id) return;
-            const g = getWgoalie(id);
-            g.shotsSaved += parseInt(goalie.saves || 0);
-            g.goalsAgainst += parseInt(goalie.goals_against || 0);
-            g.wins += parseInt(goalie.win || 0);
-            g.overtimeLosses += parseInt(goalie.ot_loss || 0);
-            g.shutouts += parseInt(goalie.shutout || 0);
+            const idStr = String(id);
+            if (!gameGoaliesMap[idStr]) {
+              gameGoaliesMap[idStr] = {
+                saves: parseInt(goalie.saves || 0),
+                goalsAgainst: parseInt(goalie.goals_against || 0),
+                wins: parseInt(goalie.win || 0),
+                overtimeLosses: parseInt(goalie.ot_loss || 0),
+                shutouts: parseInt(goalie.shutout || 0)
+              };
+            } else {
+              const existing = gameGoaliesMap[idStr];
+              existing.saves += parseInt(goalie.saves || 0);
+              existing.goalsAgainst += parseInt(goalie.goals_against || 0);
+              existing.wins = Math.max(existing.wins, parseInt(goalie.win || 0));
+              existing.overtimeLosses = Math.max(existing.overtimeLosses, parseInt(goalie.ot_loss || 0));
+              existing.shutouts = Math.max(existing.shutouts, parseInt(goalie.shutout || 0));
+            }
           });
+
+          for (const [id, stats] of Object.entries(gameGoaliesMap)) {
+            const g = getWgoalie(id);
+            g.shotsSaved += stats.saves;
+            g.goalsAgainst += stats.goalsAgainst;
+            g.wins += stats.wins;
+            g.overtimeLosses += stats.overtimeLosses;
+            g.shutouts += stats.shutouts;
+          }
         });
       }
 
-      // Fetch all teams for this league
       const teamsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("teams").get();
       const teams = teamsSnap.docs.map(tDoc => ({ id: tDoc.id, ...tDoc.data() }));
 
@@ -1276,22 +1775,7 @@ exports.onSimulationStateWritten = onDocumentWritten("admin_settings/simulation_
       };
 
       const matchupsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("matchups").where("week", "==", w).get();
-      const teamRecordsUpdates = {};
-
-      const getRecordObj = (id) => {
-        if (!teamRecordsUpdates[id]) {
-          const t = teams.find(team => team.id === id) || {};
-          teamRecordsUpdates[id] = {
-            wins: t.wins || 0,
-            losses: t.losses || 0,
-            ties: t.ties || 0,
-            points: t.points || 0
-          };
-        }
-        return teamRecordsUpdates[id];
-      };
-
-      const txBatch = db.batch();
+      const liveBatch = db.batch();
 
       for (const mDoc of matchupsSnap.docs) {
         const matchup = mDoc.data();
@@ -1301,238 +1785,13 @@ exports.onSimulationStateWritten = onDocumentWritten("admin_settings/simulation_
         const homeScore = calculateStartingRosterWeekScore(homeTeam.players || []);
         const awayScore = calculateStartingRosterWeekScore(awayTeam.players || []);
 
-        let homeWin = false, awayWin = false, tie = false;
-        if (homeScore > awayScore) {
-          homeWin = true;
-        } else if (awayScore > homeScore) {
-          awayWin = true;
-        } else {
-          tie = true;
-        }
-
-        const rHome = getRecordObj(matchup.homeTeamId);
-        const rAway = getRecordObj(matchup.awayTeamId);
-
-        rHome.points += homeScore;
-        rAway.points += awayScore;
-
-        if (homeWin) {
-          rHome.wins++;
-          rAway.losses++;
-        } else if (awayWin) {
-          rAway.wins++;
-          rHome.losses++;
-        } else {
-          rHome.ties++;
-          rAway.ties++;
-        }
-
-        txBatch.update(mDoc.ref, {
+        liveBatch.update(mDoc.ref, {
           homeScore: homeScore,
-          awayScore: awayScore,
-          status: "completed",
-          winnerId: homeWin ? matchup.homeTeamId : (awayWin ? matchup.awayTeamId : "TIE"),
-          updatedAt: Timestamp.fromMillis(Date.now())
+          awayScore: awayScore
         });
       }
-
-      for (const [tId, rec] of Object.entries(teamRecordsUpdates)) {
-        const teamRef = db.collection("fantasy_leagues").doc(leagueId).collection("teams").doc(tId);
-        txBatch.update(teamRef, {
-          wins: rec.wins,
-          losses: rec.losses,
-          ties: rec.ties,
-          points: Math.round(rec.points * 100) / 100
-        });
-      }
-
-      await txBatch.commit();
-
-      currentWeek++;
-      await db.collection("fantasy_leagues").doc(leagueId).update({
-        currentWeek: currentWeek
-      });
-
-      weekEndTime = baseTime + currentWeek * weekMs;
+      await liveBatch.commit();
     }
-
-    // B. Calculate active week score up to cutoff
-    const w = currentWeek;
-    const weekStart = baseTime + (w - 1) * weekMs;
-    
-    console.log(`[Game Loop] Calculating live scores for Week ${w} up to cutoff ${newDate.toISOString()}`);
-
-    const weeklyGamesSnap = await db.collection("pwhl_games").get();
-    const weeklyGameIds = [];
-    weeklyGamesSnap.forEach(gDoc => {
-      const game = gDoc.data();
-      const gDateStr = game.date_played || game.date;
-      if (!gDateStr) return;
-      const gDate = new Date(gDateStr);
-      if (gDate >= new Date(weekStart) && gDate <= newDate && (game.status === "4" || game.status === "3")) {
-        weeklyGameIds.push(gDoc.id.toString());
-      }
-    });
-
-    const weeklySkaters = {};
-    const weeklyGoalies = {};
-    const getWskater = (id) => {
-      if (!weeklySkaters[id]) weeklySkaters[id] = { goals: 0, assists: 0, plusMinus: 0, powerPlayPoints: 0, shortHandedPoints: 0, shotsOnGoal: 0, hits: 0, blockedShots: 0 };
-      return weeklySkaters[id];
-    };
-    const getWgoalie = (id) => {
-      if (!weeklyGoalies[id]) weeklyGoalies[id] = { wins: 0, overtimeLosses: 0, goalsAgainst: 0, shotsSaved: 0, shutouts: 0 };
-      return weeklyGoalies[id];
-    };
-
-    if (weeklyGameIds.length > 0) {
-      const summariesSnap = await db.collection("pwhl_game_summaries").get();
-      summariesSnap.forEach(sDoc => {
-        if (!weeklyGameIds.includes(sDoc.id)) return;
-        const summary = sDoc.data();
-        const scoringPlays = Array.isArray(summary.goals) ? summary.goals : [];
-        const assistCounts = {};
-        const goalCounts = {};
-
-        scoringPlays.forEach(goal => {
-          const isPP = goal.power_play === "1" || goal.power_play === 1;
-          const isSH = goal.short_handed === "1" || goal.short_handed === 1;
-          if (goal.goal_scorer?.player_id) {
-            if (!goalCounts[goal.goal_scorer.player_id]) goalCounts[goal.goal_scorer.player_id] = { ppGoals: 0, shGoals: 0 };
-            const g = goalCounts[goal.goal_scorer.player_id];
-            if (isPP) g.ppGoals++;
-            if (isSH) g.shGoals++;
-          }
-          [goal.assist1_player, goal.assist2_player].forEach(a => {
-            if (!a?.player_id) return;
-            if (!assistCounts[a.player_id]) assistCounts[a.player_id] = { assists: 0, ppAssists: 0, shAssists: 0 };
-            const obj = assistCounts[a.player_id];
-            obj.assists++;
-            if (isPP) obj.ppAssists++;
-            if (isSH) obj.shAssists++;
-          });
-        });
-
-        // Skaters
-        const homeSkaters = summary.home_team_lineup?.players || [];
-        const visitorSkaters = summary.visitor_team_lineup?.players || [];
-        [...homeSkaters, ...visitorSkaters].forEach(player => {
-          const id = player.player_id;
-          if (!id) return;
-          const s = getWskater(id);
-          s.goals += parseInt(player.goals || 0);
-          s.pim += parseInt(player.pim || 0);
-          s.shotsOnGoal += parseInt(player.shots_on || player.shots || 0);
-          s.blockedShots += parseInt(player.shots_blocked_by_player || player.shots_blocked || 0);
-          s.hits += parseInt(player.hits || 0);
-          const pm = player.plusminus;
-          if (pm !== undefined && pm !== null && pm !== "") {
-            s.plusMinus += parseInt(pm, 10) || 0;
-          }
-          const assistObj = assistCounts[id];
-          if (assistObj) {
-            s.assists += assistObj.assists;
-            s.powerPlayPoints += (assistObj.ppAssists || 0);
-            s.shortHandedPoints += (assistObj.shAssists || 0);
-          }
-          const goalObj = goalCounts[id];
-          if (goalObj) {
-            s.powerPlayPoints += (goalObj.ppGoals || 0);
-            s.shortHandedPoints += (goalObj.shGoals || 0);
-          }
-        });
-
-        // Goalies
-        const homeGoalies = summary.goalies?.home || [];
-        const visitorGoalies = summary.goalies?.visitor || [];
-        [...homeGoalies, ...visitorGoalies].forEach(goalie => {
-          const id = goalie.player_id;
-          if (!id) return;
-          const g = getWgoalie(id);
-          g.shotsSaved += parseInt(goalie.saves || 0);
-          g.goalsAgainst += parseInt(goalie.goals_against || 0);
-          g.wins += parseInt(goalie.win || 0);
-          g.overtimeLosses += parseInt(goalie.ot_loss || 0);
-          g.shutouts += parseInt(goalie.shutout || 0);
-        });
-      });
-    }
-
-    const teamsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("teams").get();
-    const teams = teamsSnap.docs.map(tDoc => ({ id: tDoc.id, ...tDoc.data() }));
-
-    const calculateStartingRosterWeekScore = (teamPlayers) => {
-      const unusedIds = [...teamPlayers];
-      const layoutSlots = [
-        { pos: "F" }, { pos: "F" }, { pos: "F" }, { pos: "F" }, { pos: "F" }, { pos: "F" },
-        { pos: "D" }, { pos: "D" }, { pos: "D" }, { pos: "D" },
-        { pos: "G" }
-      ];
-      const starters = [];
-      layoutSlots.forEach(slot => {
-        const matchIdx = unusedIds.findIndex(id => {
-          const mockPos = id.startsWith("pwhl_") ? (id.startsWith("pwhl_12") || id.startsWith("pwhl_13") || id.startsWith("pwhl_14") ? "G" : (id.startsWith("pwhl_8") || id.startsWith("pwhl_9") || id.startsWith("pwhl_10") || id.startsWith("pwhl_11") ? "D" : "F")) : null;
-          const pos = playersPosMap[id] || mockPos || "F";
-          return pos === slot.pos;
-        });
-        if (matchIdx !== -1) {
-          starters.push(unusedIds[matchIdx]);
-          unusedIds.splice(matchIdx, 1);
-        }
-      });
-
-      let totalPoints = 0;
-      starters.forEach(pId => {
-        const skaterStats = weeklySkaters[pId];
-        const goalieStats = weeklyGoalies[pId];
-        const mockPos = pId.startsWith("pwhl_") ? (pId.startsWith("pwhl_12") || pId.startsWith("pwhl_13") || pId.startsWith("pwhl_14") ? "G" : (pId.startsWith("pwhl_8") || pId.startsWith("pwhl_9") || pId.startsWith("pwhl_10") || pId.startsWith("pwhl_11") ? "D" : "F")) : null;
-        const pos = playersPosMap[pId] || mockPos || "F";
-
-        let points = 0;
-        if (pos === "G" && goalieStats) {
-          const matrix = scoringRules.goalies || defaultScoring.goalies;
-          points += (goalieStats.wins || 0) * (matrix.wins || 0);
-          points += (goalieStats.overtimeLosses || 0) * (matrix.otl || 0);
-          points += (goalieStats.goalsAgainst || 0) * (matrix.ga || 0);
-          points += (goalieStats.shotsSaved || 0) * (matrix.saves || 0);
-          points += (goalieStats.shutouts || 0) * (matrix.shutouts || 0);
-        } else if (skaterStats) {
-          const matrix = scoringRules.skaters || defaultScoring.skaters;
-          points += (skaterStats.goals || 0) * (matrix.goals || 0);
-          points += (skaterStats.assists || 0) * (matrix.assists || 0);
-          points += (skaterStats.plusMinus || 0) * (matrix.plusMinus || 0);
-          points += (skaterStats.powerPlayPoints || 0) * (matrix.ppp || 0);
-          points += (skaterStats.shortHandedPoints || 0) * (matrix.shp || 0);
-          points += (skaterStats.shotsOnGoal || 0) * (matrix.sog || 0);
-          points += (skaterStats.hits || 0) * (matrix.hits || 0);
-          points += (skaterStats.blockedShots || 0) * (matrix.blocks || 0);
-          if (pos === "D" || pos === "Defense") {
-            points += ((skaterStats.goals || 0) + (skaterStats.assists || 0)) * (matrix.defensePoints || 0);
-          }
-        }
-        totalPoints += points;
-      });
-
-      return Math.round(totalPoints * 100) / 100;
-    };
-
-    const matchupsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("matchups").where("week", "==", w).get();
-    const liveBatch = db.batch();
-
-    for (const mDoc of matchupsSnap.docs) {
-      const matchup = mDoc.data();
-      const homeTeam = teams.find(t => t.id === matchup.homeTeamId) || { players: [] };
-      const awayTeam = teams.find(t => t.id === matchup.awayTeamId) || { players: [] };
-
-      const homeScore = calculateStartingRosterWeekScore(homeTeam.players || []);
-      const awayScore = calculateStartingRosterWeekScore(awayTeam.players || []);
-
-      liveBatch.update(mDoc.ref, {
-        homeScore: homeScore,
-        awayScore: awayScore
-      });
-    }
-    await liveBatch.commit();
   }
 
   return null;

@@ -7,9 +7,12 @@ import Matchup from './components/Matchup';
 import Roster from './components/Roster';
 import Players from './components/Players';
 import League from './components/League';
+import DraftRoom from './components/DraftRoom';
 import { useAuth } from './contexts/AuthContext';
-import { db } from './firebase.js';
-import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
+import { useTimeTravel } from './contexts/TimeTravelContext';
+import { db, functions } from './firebase.js';
+import { collection, query, where, getDocs, doc, getDoc, updateDoc } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 
 function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -35,6 +38,114 @@ function App() {
 
   const { currentUser, isAdmin, logout } = useAuth();
 
+  const { simulationState, activeSeasonName } = useTimeTravel();
+  const [isDayAdvancing, setIsDayAdvancing] = useState(false);
+  const [isTeardownLoading, setIsTeardownLoading] = useState(false);
+
+  const handleAdvanceDay = async () => {
+    setIsDayAdvancing(true);
+    try {
+      const getNextDateStr = (currentDateStr) => {
+        let baseDate;
+        if (currentDateStr) {
+          const [year, month, day] = currentDateStr.split('-').map(Number);
+          baseDate = new Date(year, month - 1, day);
+        } else {
+          baseDate = new Date();
+        }
+        baseDate.setDate(baseDate.getDate() + 1);
+        const y = baseDate.getFullYear();
+        const m = String(baseDate.getMonth() + 1).padStart(2, '0');
+        const d = String(baseDate.getDate()).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+      };
+
+      const nextDate = getNextDateStr(simulationState?.current_simulated_date);
+      const simStateRef = doc(db, "admin_settings", "simulation_state");
+      await updateDoc(simStateRef, {
+        current_simulated_date: nextDate
+      });
+      console.log("Advanced simulation date to:", nextDate);
+    } catch (err) {
+      console.error("Failed to advance simulated date:", err);
+      alert("Failed to advance simulated date: " + err.message);
+    } finally {
+      setIsDayAdvancing(false);
+    }
+  };
+
+  const handleDeactivateSimulation = async () => {
+    if (!window.confirm("Are you sure you want to deactivate simulation mode? This will delete all generated bot users, remove the simulation league, and reset the simulated date.")) {
+      return;
+    }
+    setIsTeardownLoading(true);
+    try {
+      const deactivateSimulationFn = httpsCallable(functions, 'deactivateSimulation');
+      const res = await deactivateSimulationFn();
+      if (res.data?.success) {
+        alert("Simulation deactivated successfully! Cleaned up sandbox environment.");
+        localStorage.removeItem('pwhl_active_league');
+        window.location.reload();
+      } else {
+        throw new Error(res.data?.error || "Unknown error during teardown.");
+      }
+    } catch (err) {
+      console.error("Simulation teardown failed:", err);
+      alert("Simulation Deactivation Failed:\n" + err.message);
+    } finally {
+      setIsTeardownLoading(false);
+    }
+  };
+
+  // Helper to race a promise with a timeout to prevent hanging on cached emulator connections
+  const withTimeout = (promise, timeoutMs = 5000) => {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Firebase connection timed out. If you recently started/stopped Firebase emulators, please perform a hard refresh (Cmd+Shift+R or Ctrl+F5) to clear the browser's cached connections.")), timeoutMs)
+      )
+    ]);
+  };
+
+  // Helper to sync the state to the URL path
+  const updateUrl = (adminView, tab, leagueId) => {
+    let path = '/';
+    if (adminView) {
+      path = '/admin-console';
+    } else if (leagueId) {
+      path = `/${tab}`;
+    }
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path);
+    }
+  };
+
+  // Helper to parse the current URL path and update the component state
+  const parsePathAndSetState = (path) => {
+    if (!currentUser) return;
+    
+    if (path === '/admin-console') {
+      if (isAdmin) {
+        setIsAdminView(true);
+      } else {
+        setIsAdminView(false);
+        updateUrl(false, currentTab, activeLeagueId);
+      }
+    } else {
+      setIsAdminView(false);
+      const tabName = path.slice(1); // strip leading slash
+      const validTabs = ['matchup', 'roster', 'players', 'standings', 'settings', 'manager'];
+      if (validTabs.includes(tabName)) {
+        setCurrentTab(tabName);
+      } else {
+        // Fallback/Default path
+        if (activeLeagueId) {
+          setCurrentTab('matchup');
+        }
+      }
+    }
+  };
+
   // Load user leagues list
   const fetchUserLeagues = async () => {
     if (!currentUser) {
@@ -44,7 +155,7 @@ function App() {
     setLoadingLeagues(true);
     try {
       const q = query(collection(db, 'fantasy_leagues'), where('members', 'array-contains', currentUser.uid));
-      const snap = await getDocs(q);
+      const snap = await withTimeout(getDocs(q), 5000);
       const leagues = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       setMyLeagues(leagues);
       
@@ -68,10 +179,40 @@ function App() {
       }
     } catch (err) {
       console.error("Error loading leagues:", err);
+      if (err.message && err.message.includes("timed out")) {
+        alert(err.message);
+      }
     } finally {
       setLoadingLeagues(false);
     }
   };
+
+  // Sync state to URL changes
+  useEffect(() => {
+    if (!currentUser) {
+      if (window.location.pathname !== '/') {
+        window.history.replaceState(null, '', '/');
+      }
+      return;
+    }
+    updateUrl(isAdminView, currentTab, activeLeagueId);
+  }, [isAdminView, currentTab, activeLeagueId, currentUser]);
+
+  // Handle URL path parsing on initial load and when dependencies change
+  useEffect(() => {
+    if (currentUser) {
+      parsePathAndSetState(window.location.pathname);
+    }
+  }, [currentUser, activeLeagueId, isAdmin]);
+
+  // Listen for browser back/forward buttons (popstate)
+  useEffect(() => {
+    const handlePopState = () => {
+      parsePathAndSetState(window.location.pathname);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [activeLeagueId, isAdmin, currentTab]);
 
   useEffect(() => {
     fetchUserLeagues();
@@ -83,12 +224,15 @@ function App() {
       localStorage.setItem('pwhl_active_league', id);
       setActiveLeagueName(name);
       try {
-        const lSnap = await getDoc(doc(db, 'fantasy_leagues', id));
+        const lSnap = await withTimeout(getDoc(doc(db, 'fantasy_leagues', id)), 5000);
         if (lSnap.exists()) {
           setActiveLeagueData(lSnap.data());
         }
       } catch (e) {
         console.error(e);
+        if (e.message && e.message.includes("timed out")) {
+          alert(e.message);
+        }
       }
     } else {
       localStorage.removeItem('pwhl_active_league');
@@ -104,16 +248,72 @@ function App() {
     setIsAccountMenuOpen(false);
   };
 
+  // Handler for clicking the brand/home link
+  const handleNavHome = () => {
+    setIsAdminView(false);
+    if (activeLeagueId) {
+      setCurrentTab('matchup');
+      updateUrl(false, 'matchup', activeLeagueId);
+    } else {
+      updateUrl(false, 'matchup', null);
+    }
+  };
+
   const isCommissioner = activeLeagueData && currentUser && currentUser.uid === activeLeagueData.ownerId;
 
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#111827] font-sans selection:bg-indigo-500/20">
       
+      {simulationState?.testModeActive && (
+        <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white border-b border-indigo-900/40 px-4 py-2.5 flex flex-col md:flex-row justify-between items-center gap-3 z-50 shadow-md">
+          {/* Left section: status + season */}
+          <div className="flex items-center gap-3 flex-wrap justify-center md:justify-start">
+            <span className="flex items-center gap-1.5 bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 px-2.5 py-1 rounded-full text-[10px] font-black tracking-wider uppercase animate-pulse">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+              Simulation Active
+            </span>
+            <span className="text-xs font-bold text-slate-300">
+              Season: <strong className="text-white font-extrabold">{activeSeasonName}</strong>
+            </span>
+          </div>
+
+          {/* Middle section: date display */}
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+            <span className="text-base">📅</span>
+            <span>
+              {simulationState.current_simulated_date ? (
+                <>Simulated Date: <strong className="text-amber-400 font-extrabold">{new Date(simulationState.current_simulated_date + 'T08:00:00-08:00').toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
+              ) : (
+                <>Real Date: <strong className="text-emerald-400 font-extrabold">{new Date().toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
+              )}
+            </span>
+          </div>
+
+          {/* Right section: actions */}
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={handleAdvanceDay}
+              disabled={isDayAdvancing || isTeardownLoading}
+              className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-indigo-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+            >
+              {isDayAdvancing ? 'Advancing...' : 'Simulate Next Day ⚡'}
+            </button>
+            <button
+              onClick={handleDeactivateSimulation}
+              disabled={isDayAdvancing || isTeardownLoading}
+              className="bg-slate-800 hover:bg-rose-950/80 border border-slate-700 hover:border-rose-800/40 text-slate-300 hover:text-rose-200 disabled:bg-slate-900 disabled:text-slate-600 text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+            >
+              {isTeardownLoading ? 'Deactivating...' : 'Deactivate Mode 🚪'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── 1. STICKY GLOBAL NAVIGATION BAR ── */}
       <nav className="sticky top-0 z-40 bg-white/80 border-b border-gray-200 backdrop-blur-md px-4 py-3.5 flex justify-between items-center select-none shadow-sm shadow-gray-100">
         <div className="flex items-center gap-3">
           <div 
-            onClick={() => handleSetActiveLeague(null, '')}
+            onClick={handleNavHome}
             className="font-sports text-xl font-bold tracking-tight bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent cursor-pointer hover:opacity-90 transition-opacity"
           >
             PWHL Fantasy
@@ -221,7 +421,7 @@ function App() {
       </nav>
 
       {/* ── SUB-HEADER NAVIGATION BAR (TOP WEB TABS) ── */}
-      {currentUser && activeLeagueId && !isAdminView && (
+      {currentUser && activeLeagueId && !isAdminView && currentTab !== 'draft_room' && (
         <div className="bg-white border-b border-gray-200 px-4 flex overflow-x-auto scrollbar-none select-none shadow-sm shadow-gray-100/50 justify-center">
           <div className="flex gap-2 max-w-sm sm:max-w-none">
             {[
@@ -358,6 +558,7 @@ function App() {
           {currentTab === 'standings' && <League activeLeagueId={activeLeagueId} initialTab="standings" setActiveLeagueId={handleSetActiveLeague} />}
           {currentTab === 'settings' && <League activeLeagueId={activeLeagueId} initialTab="schedule" setActiveLeagueId={handleSetActiveLeague} />}
           {currentTab === 'manager' && isCommissioner && <League activeLeagueId={activeLeagueId} initialTab="manager" setActiveLeagueId={handleSetActiveLeague} />}
+          {currentTab === 'draft_room' && <DraftRoom activeLeagueId={activeLeagueId} setCurrentTab={setCurrentTab} />}
 
           {/* Bottom nav bar removed for web-first top navigation styling */}
         </main>

@@ -13,25 +13,8 @@ import {
   addDoc
 } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
+import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { submitAddDrop } from '../services/leagueService.js';
-
-// Pre-defined PWHL Athlete Pool for Marketplace Mock
-const PWHL_ATHLETES_POOL = [
-  { id: "pwhl_1", name: "Marie-Philip Poulin", pos: "F", team: "MTL", rating: 94 },
-  { id: "pwhl_2", name: "Natalie Spooner", pos: "F", team: "TOR", rating: 92 },
-  { id: "pwhl_3", name: "Sarah Nurse", pos: "F", team: "TOR", rating: 89 },
-  { id: "pwhl_4", name: "Hilary Knight", pos: "F", team: "BOS", rating: 90 },
-  { id: "pwhl_5", name: "Alex Carpenter", pos: "F", team: "NY", rating: 88 },
-  { id: "pwhl_6", name: "Brianne Jenner", pos: "F", team: "OTT", rating: 87 },
-  { id: "pwhl_7", name: "Kendall Coyne Schofield", pos: "F", team: "MIN", rating: 89 },
-  { id: "pwhl_8", name: "Erin Ambrose", pos: "D", team: "MTL", rating: 91 },
-  { id: "pwhl_9", name: "Renata Fast", pos: "D", team: "TOR", rating: 90 },
-  { id: "pwhl_10", name: "Megan Keller", pos: "D", team: "BOS", rating: 89 },
-  { id: "pwhl_11", name: "Jocelyne Larocque", pos: "D", team: "TOR", rating: 86 },
-  { id: "pwhl_12", name: "Aerin Frankel", pos: "G", team: "BOS", rating: 93 },
-  { id: "pwhl_13", name: "Ann-Renée Desbiens", pos: "G", team: "MTL", rating: 91 },
-  { id: "pwhl_14", name: "Nicole Hensley", pos: "G", team: "MIN", rating: 88 }
-];
 
 const GENERIC_TEAM_NAMES = [
   "Boston Fleet", "Minnesota Frost", "Montreal Victoires", "New York Sirens",
@@ -82,6 +65,75 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const [transactionLoading, setTransactionLoading] = useState(false);
   const [marketSearch, setMarketSearch] = useState('');
   const [marketFilter, setMarketFilter] = useState('ALL');
+
+  const { activeSeasonId } = useTimeTravel();
+  const [playersPool, setPlayersPool] = useState([]);
+
+  // Load dynamic players pool from Firestore
+  useEffect(() => {
+    if (!activeLeagueId) return;
+    
+    async function loadMarketPlayers() {
+      try {
+        const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
+        const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        
+        const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
+        
+        const qActive = query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonId, Number(seasonId)]));
+        const snapActive = await getDocs(qActive);
+        
+        let resolvedSeasonId = seasonId;
+        let rawPlayers = snapActive.docs.map(d => d.data());
+        
+        if (rawPlayers.length === 0 && seasons.length > 0) {
+          const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
+          const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
+          const prevRegularSeasons = seasons.filter(s => {
+            const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
+            const startsBefore = new Date(s.start_date) < currentStartDate;
+            return isRegular && startsBefore;
+          });
+          
+          if (prevRegularSeasons.length > 0) {
+            prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
+            const prevRegSeason = prevRegularSeasons[0];
+            resolvedSeasonId = prevRegSeason.season_id.toString();
+            
+            const qPrev = query(collection(db, 'pwhl_players'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
+            const snapPrev = await getDocs(qPrev);
+            rawPlayers = snapPrev.docs.map(d => d.data());
+          }
+        }
+        
+        const teamsQuery = query(collection(db, 'pwhl_teams'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
+        const teamsSnap = await getDocs(teamsQuery);
+        const teamsMap = {};
+        teamsSnap.forEach(d => {
+          const t = d.data();
+          teamsMap[String(t.id)] = t.code || t.name || t.id;
+        });
+        
+        const pool = rawPlayers.map(p => {
+          const pId = p.player_id || p.id;
+          const rating = p.rating || (p.position === 'G' ? 85 : (p.position === 'D' ? 82 : 84));
+          return {
+            id: String(pId),
+            name: p.name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unknown Player',
+            pos: p.position || 'F',
+            team: teamsMap[p.current_team_id || p.team_id] || p.team_name || 'FA',
+            rating
+          };
+        });
+        
+        setPlayersPool(pool);
+      } catch (err) {
+        console.error("Error loading market players in LeagueHub:", err);
+      }
+    }
+    
+    loadMarketPlayers();
+  }, [activeLeagueId, activeSeasonId]);
 
   // Load user leagues list
   useEffect(() => {
@@ -298,7 +350,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
     (team.players || []).forEach(pId => allOwnedPlayerIds.add(pId));
   });
 
-  const freeAgents = PWHL_ATHLETES_POOL.filter(p => !allOwnedPlayerIds.has(p.id))
+  const freeAgents = playersPool.filter(p => !allOwnedPlayerIds.has(p.id))
     .filter(p => p.name.toLowerCase().includes(marketSearch.toLowerCase()))
     .filter(p => marketFilter === 'ALL' || p.pos === marketFilter);
 
@@ -673,7 +725,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
               >
                 <option value="" className="text-black">No Player (Add Only)</option>
                 {(myTeam.players || []).map(pId => {
-                  const pDetail = PWHL_ATHLETES_POOL.find(p => p.id === pId) || { name: pId };
+                  const pDetail = playersPool.find(p => p.id === pId) || { name: pId };
                   return <option key={pId} value={pId} className="text-black">Drop: {pDetail.name}</option>;
                 })}
               </select>

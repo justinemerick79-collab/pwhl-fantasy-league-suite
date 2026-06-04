@@ -79,6 +79,10 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isAdmin();
     }
+    match /pwhl_season_player_stats/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isAdmin();
+    }
     // PWHL Game Summaries
     match /pwhl_game_summaries/{document=**} {
       allow read: if isAuthenticated();

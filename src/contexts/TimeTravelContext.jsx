@@ -9,40 +9,60 @@ export function useTimeTravel() {
 }
 
 export function TimeTravelProvider({ children }) {
-  const [timeTravelState, setTimeTravelState] = useState({
-    enabled: false,
-    date: '2024-09-01' // Default starting point
+  const [simulationState, setSimulationState] = useState({
+    testModeActive: false,
+    current_simulated_date: null,
+    active_test_league_id: ''
   });
-  const [loading, setLoading] = useState(true);
+  const [activeSeasonId, setActiveSeasonId] = useState('5');
+  const [activeSeasonName, setActiveSeasonName] = useState('2024-25 Regular Season');
 
   useEffect(() => {
-    // Listen to global app_settings/time_travel document
-    const docRef = doc(db, 'app_settings', 'time_travel');
+    // Listen to global app_settings/active_season document
+    const docRef = doc(db, 'app_settings', 'active_season');
     const unsubscribe = onSnapshot(docRef, (snap) => {
       if (snap.exists()) {
-        setTimeTravelState(snap.data());
+        const data = snap.data();
+        setActiveSeasonId(data.active_season_id ? String(data.active_season_id) : '5');
+        setActiveSeasonName(data.active_season_name || '2024-25 Regular Season');
       } else {
-        setDoc(docRef, { enabled: false, date: '2024-09-01' }, { merge: true }).catch(console.error);
+        setDoc(docRef, { active_season_id: '5', active_season_name: '2024-25 Regular Season' }, { merge: true }).catch(console.error);
       }
-      setLoading(false);
     }, (error) => {
-      console.error("TimeTravelContext onSnapshot error:", error);
-      setLoading(false);
+      console.error("TimeTravelContext active_season onSnapshot error:", error);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    // Listen to global admin_settings/simulation_state document
+    const docRef = doc(db, 'admin_settings', 'simulation_state');
+    const unsubscribe = onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        setSimulationState(snap.data());
+      }
+    }, (error) => {
+      console.warn("TimeTravelContext simulation_state onSnapshot error:", error);
     });
 
     return () => unsubscribe();
   }, []);
 
   const getSimulatedDate = () => {
-    if (timeTravelState.enabled && timeTravelState.date) {
-      return new Date(`${timeTravelState.date}T08:00:00-08:00`);
+    if (simulationState.testModeActive) {
+      if (simulationState.current_simulated_date) {
+        return new Date(`${simulationState.current_simulated_date}T08:00:00-08:00`);
+      }
     }
     return new Date();
   };
 
   const value = {
-    timeTravelState,
-    getSimulatedDate
+    simulationState,
+    getSimulatedDate,
+    activeSeasonId,
+    activeSeasonName
   };
 
   return (

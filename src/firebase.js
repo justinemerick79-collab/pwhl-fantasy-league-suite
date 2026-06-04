@@ -15,6 +15,18 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
+// 1. Delete local Firestore IndexedDB database natively before initializing the Firestore instance
+if (typeof window !== 'undefined' && window.indexedDB) {
+  try {
+    // Delete both potential default names
+    window.indexedDB.deleteDatabase("firestore/[DEFAULT]/pwhl-fantasy-mobile-26/main");
+    window.indexedDB.deleteDatabase("firestore/[DEFAULT]/pwhl-fantasy-mobile-26/offline");
+    console.log("🧹 Cleaned native local Firestore IndexedDB databases.");
+  } catch (e) {
+    console.warn("Failed to delete local IndexedDB:", e);
+  }
+}
+
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);

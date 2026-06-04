@@ -87,6 +87,7 @@ export async function createLeague(name, maxTeams, userId, teamName) {
       inviteCode: inviteCode,
       members: [userId],
       userIds: [userId], // backward compatibility mapping
+      draftOrder: [userId],
       status: 'pending', // default pending status until draft is set and league is full
       createdAt: serverTimestamp(),
       rosterSettings: defaultRosterSettings,
@@ -154,9 +155,12 @@ export async function joinLeague(inviteCode, userId, teamName) {
     const isFull = updatedMembers.length === leagueData.maxTeams;
     const newStatus = leagueData.status === 'pending' ? 'pending' : (isFull ? 'active_full' : 'active_not_full');
 
+    const updatedDraftOrder = [...(leagueData.draftOrder || currentMembers), userId];
+
     transaction.update(leagueRef, {
       members: updatedMembers,
       userIds: updatedMembers, // maintain backwards compatibility
+      draftOrder: updatedDraftOrder,
       status: newStatus
     });
 
@@ -217,6 +221,36 @@ export async function reassignTeamOwner(leagueId, teamId, oldOwnerId, newOwnerId
 
     transaction.update(teamRef, {
       ownerId: newOwnerId
+    });
+  });
+}
+
+/**
+ * Randomizes the draft order for the league.
+ * Can only be done if the draft is not scheduled yet.
+ * 
+ * @param {string} leagueId 
+ */
+export async function randomizeDraftOrder(leagueId) {
+  const leagueRef = doc(db, "fantasy_leagues", leagueId);
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(leagueRef);
+    if (!snap.exists()) {
+      throw new Error("League does not exist.");
+    }
+    const data = snap.data();
+    if (data.draftDate) {
+      throw new Error("Draft order is locked because the draft is already scheduled.");
+    }
+    
+    const order = [...(data.draftOrder || data.members || [])];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    
+    transaction.update(leagueRef, {
+      draftOrder: order
     });
   });
 }
@@ -318,6 +352,49 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
 
     const N = draftData.draftOrder.length;
     const rosterSettings = leagueSnap.data().rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+
+    // Resolve player position
+    const playerRef = doc(db, "pwhl_players", playerId);
+    const playerSnap = await transaction.get(playerRef);
+    let playerPos = 'F';
+    if (playerSnap.exists()) {
+      playerPos = playerSnap.data().position || 'F';
+    } else {
+      const numId = parseInt(String(playerId).replace(/^\D+/g, ''), 10);
+      if (!isNaN(numId)) {
+        if (numId >= 12 && numId <= 14) playerPos = "G";
+        else if (numId >= 8 && numId <= 11) playerPos = "D";
+      }
+    }
+
+    // Verify roster position maximums limits
+    const currentRosterIds = draftData.activeRosters[draftData.currentTeamOnClock] || [];
+    let posCount = 0;
+    for (const pId of currentRosterIds) {
+      const pRef = doc(db, "pwhl_players", pId);
+      const pSnap = await transaction.get(pRef);
+      let pPos = 'F';
+      if (pSnap.exists()) {
+        pPos = pSnap.data().position || 'F';
+      } else {
+        const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
+        if (!isNaN(numId)) {
+          if (numId >= 12 && numId <= 14) pPos = "G";
+          else if (numId >= 8 && numId <= 11) pPos = "D";
+        }
+      }
+      if (pPos === playerPos) {
+        posCount++;
+      }
+    }
+
+    const posLimit = playerPos === 'F' ? (rosterSettings.forwards?.max ?? 10) :
+                     playerPos === 'D' ? (rosterSettings.defense?.max ?? 8) :
+                     (rosterSettings.goalies?.max ?? 3);
+
+    if (posCount >= posLimit) {
+      throw new Error(`Roster limit exceeded for position ${playerPos}. Maximum allowed is ${posLimit}.`);
+    }
     const maxRounds = (rosterSettings.bench ?? 4) + 
                        (rosterSettings.forwards?.starters ?? 6) + 
                        (rosterSettings.defense?.starters ?? 4) + 
@@ -402,30 +479,15 @@ export async function getSimulatedSystemDate() {
     return testDateOverride;
   }
   try {
-    const envSnap = await getDoc(doc(db, "admin_settings", "environment"));
-    if (envSnap.exists()) {
-      const envData = envSnap.data();
-      if (envData.time_travel_mode === true) {
-        const rawDate = envData.simulated_date || envData.current_system_date;
-        if (rawDate) {
-          return new Date(rawDate);
-        }
+    const simSnap = await getDoc(doc(db, "admin_settings", "simulation_state"));
+    if (simSnap.exists()) {
+      const simData = simSnap.data();
+      if (simData.testModeActive === true && simData.current_simulated_date) {
+        return new Date(`${simData.current_simulated_date}T08:00:00-08:00`);
       }
     }
   } catch (err) {
-    console.error("Error reading admin_settings/environment:", err);
-  }
-
-  try {
-    const ttSnap = await getDoc(doc(db, "app_settings", "time_travel"));
-    if (ttSnap.exists()) {
-      const ttData = ttSnap.data();
-      if (ttData.enabled && ttData.date) {
-        return new Date(`${ttData.date}T08:00:00-08:00`);
-      }
-    }
-  } catch (err) {
-    console.error("Error reading app_settings/time_travel:", err);
+    console.error("Error reading admin_settings/simulation_state:", err);
   }
 
   return new Date();

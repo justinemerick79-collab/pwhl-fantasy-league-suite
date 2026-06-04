@@ -241,6 +241,7 @@ export default function DataHub() {
   
   const [activeTab, setActiveTab] = useState('players');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   
   const [teams, setTeams] = useState([]);
   const [players, setPlayers] = useState([]);
@@ -256,20 +257,35 @@ export default function DataHub() {
   const [teamFilter, setTeamFilter] = useState('all');
   const [posFilter, setPosFilter] = useState('all');
 
+  // Helper to race getDocs with a timeout to prevent hanging on cached emulator connections
+  async function getDocsWithTimeout(colRef, timeoutMs = 5000) {
+    return Promise.race([
+      getDocs(colRef),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Connection timed out. This often happens if the browser is using a cached connection to a non-running Firestore emulator.")), timeoutMs)
+      )
+    ]);
+  }
+
   // Fetch Seasons
   useEffect(() => {
     async function fetchSeasons() {
-      const snap = await getDocs(collection(db, 'pwhl_seasons'));
-      const seasonList = snap.docs.map(d => ({id: d.id, ...d.data()}));
-      seasonList.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
-      setSeasons(seasonList);
-      
-      if (seasonList.length > 0 && !selectedSeason) {
-        // Default to 2025-26 season if possible
-        const defaultS = seasonList.find(s => s.season_name?.includes('2025-26')) || seasonList[0];
-        const sId = defaultS.season_id;
-        setSelectedSeason(sId);
-        localStorage.setItem('pwhl_active_season', sId);
+      try {
+        const snap = await getDocsWithTimeout(collection(db, 'pwhl_seasons'), 5000);
+        const seasonList = snap.docs.map(d => ({id: d.id, ...d.data()}));
+        seasonList.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
+        setSeasons(seasonList);
+        
+        if (seasonList.length > 0 && !selectedSeason) {
+          // Default to 2025-26 season if possible
+          const defaultS = seasonList.find(s => s.season_name?.includes('2025-26')) || seasonList[0];
+          const sId = defaultS.season_id;
+          setSelectedSeason(sId);
+          localStorage.setItem('pwhl_active_season', sId);
+        }
+      } catch (err) {
+        console.error("Error fetching seasons in DataHub:", err);
+        setError('Failed to fetch seasons: ' + err.message);
       }
     }
     fetchSeasons();
@@ -288,32 +304,33 @@ export default function DataHub() {
     
     async function fetchData() {
       setLoading(true);
+      setError('');
       try {
         const seasonIdStr = String(selectedSeason);
         const seasonIdNum = Number(selectedSeason);
 
         // Fetch Teams
         const teamQ = query(collection(db, 'pwhl_teams'), where('season_id', 'in', [seasonIdStr, seasonIdNum]));
-        const teamSnap = await getDocs(teamQ);
+        const teamSnap = await getDocsWithTimeout(teamQ, 5000);
         const teamList = teamSnap.docs.map(d => ({id: d.id, ...d.data()}));
         setTeams(teamList);
 
         // Fetch Players
         const playerQ = query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonIdStr, seasonIdNum]));
-        const playerSnap = await getDocs(playerQ);
+        const playerSnap = await getDocsWithTimeout(playerQ, 5000);
         const playerList = playerSnap.docs.map(d => ({id: d.id, ...d.data()}));
         setPlayers(playerList);
 
         // Fetch Games
         const gameQ = query(collection(db, 'pwhl_games'), where('season_id', 'in', [seasonIdStr, seasonIdNum]));
-        const gameSnap = await getDocs(gameQ);
+        const gameSnap = await getDocsWithTimeout(gameQ, 5000);
         const gameList = gameSnap.docs.map(d => ({id: d.id, ...d.data()}));
         gameList.sort((a, b) => new Date(a.date_played) - new Date(b.date_played));
         setGames(gameList);
 
         // Fetch Stats
         const statQ = query(collection(db, 'pwhl_player_stats'), where('season_id', 'in', [seasonIdStr, seasonIdNum]));
-        const statSnap = await getDocs(statQ);
+        const statSnap = await getDocsWithTimeout(statQ, 5000);
         const statList = statSnap.docs.map(d => ({id: d.id, ...d.data()}));
         statList.sort((a, b) => parseInt(b.points) - parseInt(a.points)); 
         setStats(statList);
@@ -326,7 +343,8 @@ export default function DataHub() {
         setPlayerStats(aggStats);
         
       } catch (err) {
-        console.error("Error fetching data:", err);
+        console.error("Error fetching data in DataHub:", err);
+        setError('Failed to fetch stats/teams data: ' + err.message);
       } finally {
         setLoading(false);
       }
@@ -517,6 +535,15 @@ export default function DataHub() {
       </tbody>
     </table>
   );
+
+  if (error) {
+    return (
+      <div style={{ marginTop: '48px', padding: '24px', background: 'rgba(255, 0, 0, 0.1)', border: '1px solid rgba(255, 0, 0, 0.2)', borderRadius: '8px', color: '#ff7675' }}>
+        <h3 style={{ margin: '0 0 8px 0' }}>Error Loading Data Hub</h3>
+        <p style={{ margin: 0, fontSize: '0.9rem' }}>{error}</p>
+      </div>
+    );
+  }
 
   if (seasons.length === 0) return <div>No season data found. Run Sync from Admin Panel.</div>;
 

@@ -32,10 +32,41 @@ async function fetchFromApi(params) {
   return JSON.parse(jsonString);
 }
 
+const UPCOMING_SEASONS = [
+  {
+    season_id: "10",
+    season_name: "2026-27 Preseason",
+    shortname: "2026-27 Preseason",
+    start_date: "2026-06-01",
+    end_date: "2026-11-19",
+    playoff: "0",
+    career: "0"
+  },
+  {
+    season_id: "11",
+    season_name: "2026-27 Regular Season",
+    shortname: "2026-27 Reg",
+    start_date: "2026-11-20",
+    end_date: "2027-04-26",
+    playoff: "0",
+    career: "1"
+  },
+  {
+    season_id: "12",
+    season_name: "2027 Playoffs",
+    shortname: "2027 Playoffs",
+    start_date: "2027-04-27",
+    end_date: "2027-05-27",
+    playoff: "1",
+    career: "1"
+  }
+];
+
 // 1. Sync Seasons
 export async function syncSeasons() {
   const data = await fetchFromApi({ feed: 'modulekit', view: 'seasons' });
-  const seasons = data?.SiteKit?.Seasons || [];
+  const apiSeasons = data?.SiteKit?.Seasons || [];
+  const seasons = [...apiSeasons, ...UPCOMING_SEASONS];
   
   const batch = writeBatch(db);
   seasons.forEach(season => {
@@ -81,8 +112,52 @@ export async function syncRoster(seasonId, teamId) {
   return players;
 }
 
+export function generateWeeksList(seasonStart, seasonEnd, games) {
+  const startDate = new Date(seasonStart);
+  const endDate = new Date(seasonEnd);
+  
+  // Find Monday of the week containing seasonStart
+  const startDay = startDate.getDay(); // 0 is Sunday, 1 is Monday, etc.
+  const diffToMonday = startDay === 0 ? -6 : 1 - startDay;
+  const firstMonday = new Date(startDate);
+  firstMonday.setDate(startDate.getDate() + diffToMonday);
+  firstMonday.setHours(0, 0, 0, 0);
+  
+  const weeks = [];
+  let currentMonday = new Date(firstMonday);
+  let weekIndex = 1;
+  
+  while (currentMonday <= endDate) {
+    const nextSunday = new Date(currentMonday);
+    nextSunday.setDate(currentMonday.getDate() + 6);
+    nextSunday.setHours(23, 59, 59, 999);
+    
+    // Check if there are games in this week range
+    const gamesInWeek = games.filter(g => {
+      const gDateStr = g.date_played || g.date;
+      if (!gDateStr) return false;
+      const gDate = new Date(gDateStr);
+      return gDate >= currentMonday && gDate <= nextSunday;
+    });
+    
+    weeks.push({
+      week: weekIndex,
+      start: currentMonday.toISOString(),
+      end: nextSunday.toISOString(),
+      gameCount: gamesInWeek.length,
+      isOffWeek: gamesInWeek.length === 0,
+      games: gamesInWeek.map(g => (g.game_id || g.id).toString())
+    });
+    
+    // Move to next Monday
+    currentMonday.setDate(currentMonday.getDate() + 7);
+    weekIndex++;
+  }
+  return weeks;
+}
+
 // 4. Sync Schedule
-export async function syncSchedule(seasonId) {
+export async function syncSchedule(seasonId, seasonDoc) {
   const data = await fetchFromApi({ feed: 'modulekit', view: 'schedule', season_id: seasonId });
   const games = data?.SiteKit?.Schedule || [];
 
@@ -92,7 +167,7 @@ export async function syncSchedule(seasonId) {
   for (const game of games) {
     if (!game.game_id) continue;
     const ref = doc(db, 'pwhl_games', game.game_id.toString());
-    currentBatch.set(ref, game, { merge: true });
+    currentBatch.set(ref, { ...game, season_id: seasonId }, { merge: true });
     count++;
 
     if (count === 490) { 
@@ -104,6 +179,12 @@ export async function syncSchedule(seasonId) {
 
   if (count > 0) {
     await currentBatch.commit();
+  }
+  
+  if (seasonDoc) {
+    const weeks = generateWeeksList(seasonDoc.start_date, seasonDoc.end_date, games);
+    const seasonRef = doc(db, 'pwhl_seasons', seasonId.toString());
+    await writeBatch(db).set(seasonRef, { weeks }, { merge: true }).commit();
   }
   
   return games;
@@ -222,7 +303,7 @@ export async function runFullSync(logCallback, targetSeasonId = 'all') {
         }
         
         await sleep(500);
-        const games = await syncSchedule(sId);
+        const games = await syncSchedule(sId, season);
         
         await sleep(500);
         await syncGameSummaries(sId, games, logCallback);
@@ -240,6 +321,36 @@ export async function runFullSync(logCallback, targetSeasonId = 'all') {
     return "Success";
   } catch (err) {
     if(logCallback) logCallback(`Critical Error: ${err.message}`);
+    throw err;
+  }
+}
+
+export async function autoGenerateMissingWeeks() {
+  try {
+    const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
+    let count = 0;
+    for (const sDoc of seasonsSnap.docs) {
+      const s = sDoc.data();
+      if (!s.weeks || s.weeks.length === 0) {
+        console.log(`Generating missing weeks for season ${s.season_id}...`);
+        const q = query(
+          collection(db, 'pwhl_games'), 
+          where('season_id', 'in', [s.season_id.toString(), Number(s.season_id)])
+        );
+        const gSnap = await getDocs(q);
+        const games = gSnap.docs.map(d => d.data());
+        
+        const weeks = generateWeeksList(s.start_date, s.end_date, games);
+        const seasonRef = doc(db, 'pwhl_seasons', sDoc.id);
+        const batch = writeBatch(db);
+        batch.set(seasonRef, { weeks }, { merge: true });
+        await batch.commit();
+        count++;
+      }
+    }
+    return count;
+  } catch (err) {
+    console.error("Failed to generate missing weeks:", err);
     throw err;
   }
 }
