@@ -1082,6 +1082,37 @@ export default function Players({ activeLeagueId }) {
                 </div>
               </div>
 
+              {/* Draft Info Section */}
+              {selectedCardPlayer.draftInfo && (
+                <div className="p-5 border-b border-gray-100 text-left bg-indigo-50/20">
+                  <h4 className="text-[9px] font-black uppercase tracking-wider text-indigo-600 mb-3 flex items-center gap-1.5">
+                    🎓 PWHL Draft Information
+                  </h4>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                    <div>
+                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Draft Year</span>
+                      <span className="text-xs font-black text-gray-700">{selectedCardPlayer.draftInfo.year || 'N/A'}</span>
+                    </div>
+                    <div>
+                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Selection</span>
+                      <span className="text-xs font-black text-gray-700">
+                        Round {selectedCardPlayer.draftInfo.round || 'N/A'}, Pick {selectedCardPlayer.draftInfo.pick || 'N/A'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Drafted By</span>
+                      <span className="text-xs font-black text-gray-700">{selectedCardPlayer.draftInfo.draftedBy || 'N/A'}</span>
+                    </div>
+                    <div>
+                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Former Team</span>
+                      <span className="text-xs font-black text-gray-700 truncate block" title={selectedCardPlayer.draftInfo.formerTeam || 'N/A'}>
+                        {selectedCardPlayer.draftInfo.formerTeam || 'N/A'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Season Stats Dashboard */}
               <div className="p-5 border-b border-gray-100 text-left">
                 <h4 className="text-[9px] font-black uppercase tracking-wider text-gray-400 mb-3">Season Summary</h4>
