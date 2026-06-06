@@ -11,6 +11,7 @@ import {
   getDoc,
   setDoc
 } from 'firebase/firestore';
+import { normalizePosition } from './pwhlService';
 
 /**
  * Generates a random 6-character invite code.
@@ -293,6 +294,7 @@ export async function initializeDraft(leagueId, draftOrder) {
       pickDeadline: pickDeadline,
       picks: [],
       activeRosters: activeRosters,
+      autoDraftUsers: {},
       createdAt: serverTimestamp()
     });
 
@@ -312,10 +314,18 @@ export async function initializeDraft(leagueId, draftOrder) {
  * @param {string} userId - The user making the pick (or currently on the clock)
  * @param {string} playerId - The player ID being drafted
  * @param {boolean} isAutoPick - Set true to trigger timeout auto-assignment
+ * @param {boolean} timedOut - Set true if the pick was forced due to time expiration, putting the user on auto-draft
  */
-export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = false) {
+export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = false, timedOut = false) {
   const leagueRef = doc(db, "fantasy_leagues", leagueId);
   const draftStateRef = doc(db, `fantasy_leagues/${leagueId}/draft`, "state");
+
+  // Pre-fetch team references to update rosters during the transaction
+  const teamsSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/teams`));
+  const teamRefsByOwner = {};
+  teamsSnap.forEach(d => {
+    teamRefsByOwner[d.data().ownerId] = doc(db, `fantasy_leagues/${leagueId}/teams`, d.id);
+  });
 
   await runTransaction(db, async (transaction) => {
     const leagueSnap = await transaction.get(leagueRef);
@@ -358,7 +368,7 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
     const playerSnap = await transaction.get(playerRef);
     let playerPos = 'F';
     if (playerSnap.exists()) {
-      playerPos = playerSnap.data().position || 'F';
+      playerPos = normalizePosition(playerSnap.data().position);
     } else {
       const numId = parseInt(String(playerId).replace(/^\D+/g, ''), 10);
       if (!isNaN(numId)) {
@@ -375,7 +385,7 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
       const pSnap = await transaction.get(pRef);
       let pPos = 'F';
       if (pSnap.exists()) {
-        pPos = pSnap.data().position || 'F';
+        pPos = normalizePosition(pSnap.data().position);
       } else {
         const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
         if (!isNaN(numId)) {
@@ -420,6 +430,33 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
     const activeRosters = { ...draftData.activeRosters };
     activeRosters[pickerUserId] = [...(activeRosters[pickerUserId] || []), playerId];
 
+    // Sync the drafted player immediately to the user's team document
+    const pickerTeamRef = teamRefsByOwner[pickerUserId];
+    if (pickerTeamRef) {
+      const teamSnap = await transaction.get(pickerTeamRef);
+      if (teamSnap.exists()) {
+        const teamData = teamSnap.data();
+        const activePlayers = teamData.activePlayers || [];
+        const benchPlayers = teamData.benchPlayers || [];
+
+        const startersLimit = playerPos === 'F' ? (rosterSettings.forwards?.starters ?? 6) :
+                              playerPos === 'D' ? (rosterSettings.defense?.starters ?? 4) :
+                              (rosterSettings.goalies?.starters ?? 1);
+
+        if (posCount >= startersLimit) {
+          benchPlayers.push(playerId);
+        } else {
+          activePlayers.push(playerId);
+        }
+
+        transaction.update(pickerTeamRef, {
+          players: activeRosters[pickerUserId],
+          activePlayers,
+          benchPlayers
+        });
+      }
+    }
+
     // Advance Draft Turn Index & Snake Calculations
     const nextPickIndex = draftData.currentPickIndex + 1;
     let nextRound = draftData.currentRound;
@@ -443,6 +480,11 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
 
     const nextDeadline = Timestamp.fromMillis(Date.now() + 60000);
 
+    const autoDraftUsers = { ...(draftData.autoDraftUsers || {}) };
+    if (timedOut) {
+      autoDraftUsers[pickerUserId] = true;
+    }
+
     transaction.update(draftStateRef, {
       status: nextStatus,
       currentRound: nextRound,
@@ -450,7 +492,8 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
       currentTeamOnClock: nextTeamOnClock || pickerUserId,
       pickDeadline: nextDeadline,
       picks: updatedPicks,
-      activeRosters: activeRosters
+      activeRosters: activeRosters,
+      autoDraftUsers: autoDraftUsers
     });
 
     if (nextStatus === 'completed') {
@@ -458,6 +501,29 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
         status: 'active' // Draft is complete, league is now active!
       });
     }
+  });
+}
+
+/**
+ * Toggles the auto-draft status for a user in the draft.
+ * 
+ * @param {string} leagueId 
+ * @param {string} userId 
+ * @param {boolean} isAutoDraft 
+ */
+export async function toggleAutoDraftStatus(leagueId, userId, isAutoDraft) {
+  const draftStateRef = doc(db, `fantasy_leagues/${leagueId}/draft`, "state");
+  await runTransaction(db, async (transaction) => {
+    const draftSnap = await transaction.get(draftStateRef);
+    if (!draftSnap.exists()) return;
+    
+    const draftData = draftSnap.data();
+    const autoDraftUsers = { ...(draftData.autoDraftUsers || {}) };
+    autoDraftUsers[userId] = isAutoDraft;
+    
+    transaction.update(draftStateRef, {
+      autoDraftUsers: autoDraftUsers
+    });
   });
 }
 
@@ -874,4 +940,73 @@ export async function processAcceptedTrades(leagueId) {
       console.log(`Trade ${trade.tradeId} processed successfully! Rosters updated.`);
     });
   }
+}
+
+/**
+ * securely moves a player between the active and bench arrays.
+ */
+export async function moveRosterPlayer(leagueId, teamId, playerId, target, rosterSettings) {
+  const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, teamId);
+
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(teamRef);
+    if (!snap.exists()) {
+      throw new Error("Team not found.");
+    }
+    const data = snap.data();
+    let activePlayers = data.activePlayers || [];
+    let benchPlayers = data.benchPlayers || [];
+    
+    // Remove from both to avoid duplicates
+    activePlayers = activePlayers.filter(id => id !== playerId);
+    benchPlayers = benchPlayers.filter(id => id !== playerId);
+
+    if (target === 'active') {
+      // Validate positional limit before moving to active
+      const playerRef = doc(db, "pwhl_players", playerId);
+      const playerSnap = await transaction.get(playerRef);
+      let playerPos = 'F';
+      if (playerSnap.exists()) {
+        playerPos = normalizePosition(playerSnap.data().position);
+      } else {
+        const numId = parseInt(String(playerId).replace(/^\D+/g, ''), 10);
+        if (!isNaN(numId)) {
+          if (numId >= 12 && numId <= 14) playerPos = "G";
+          else if (numId >= 8 && numId <= 11) playerPos = "D";
+        }
+      }
+
+      let activeCount = 0;
+      for (const pId of activePlayers) {
+        const pRef = doc(db, "pwhl_players", pId);
+        const pSnap = await transaction.get(pRef);
+        let pPos = 'F';
+        if (pSnap.exists()) {
+          pPos = normalizePosition(pSnap.data().position);
+        } else {
+          const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
+          if (!isNaN(numId)) {
+            if (numId >= 12 && numId <= 14) pPos = "G";
+            else if (numId >= 8 && numId <= 11) pPos = "D";
+          }
+        }
+        if (pPos === playerPos) {
+          activeCount++;
+        }
+      }
+
+      const limit = playerPos === 'F' ? (rosterSettings.forwards?.starters ?? 6) :
+                    playerPos === 'D' ? (rosterSettings.defense?.starters ?? 4) :
+                    (rosterSettings.goalies?.starters ?? 1);
+
+      if (activeCount >= limit) {
+        throw new Error(`Cannot add player to active roster. Active limit reached for position ${playerPos}.`);
+      }
+      activePlayers.push(playerId);
+    } else {
+      benchPlayers.push(playerId);
+    }
+
+    transaction.update(teamRef, { activePlayers, benchPlayers });
+  });
 }

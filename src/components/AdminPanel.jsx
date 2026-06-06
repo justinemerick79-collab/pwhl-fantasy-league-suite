@@ -34,6 +34,10 @@ export default function AdminPanel() {
   const [localActiveSeasonId, setLocalActiveSeasonId] = useState('5');
   const [isApplyingSeason, setIsApplyingSeason] = useState(false);
 
+  const [projectionsSeasonId, setProjectionsSeasonId] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [projectionsLog, setProjectionsLog] = useState('');
+
   // Automatically generate missing calendar weeks for existing seasons on mount
   useEffect(() => {
     autoGenerateMissingWeeks().then((count) => {
@@ -48,6 +52,12 @@ export default function AdminPanel() {
       setLocalActiveSeasonId(activeSeasonId);
     }
   }, [activeSeasonId]);
+
+  useEffect(() => {
+    if (seasons.length > 0 && !projectionsSeasonId) {
+      setProjectionsSeasonId(String(seasons[0].season_id));
+    }
+  }, [seasons, projectionsSeasonId]);
 
   const handleApplyActiveSeason = async () => {
     setIsApplyingSeason(true);
@@ -206,6 +216,34 @@ export default function AdminPanel() {
       setIsUpdatingDate(false);
     }
   }
+
+  const handleGenerateProjections = async () => {
+    if (!projectionsSeasonId) {
+      alert("Please select a season first.");
+      return;
+    }
+    setIsProcessing(true);
+    setProjectionsLog('Calling projections engine on the cloud...');
+    try {
+      const generateSeasonProjectionsFunc = httpsCallable(functions, 'generateSeasonProjections');
+      const res = await generateSeasonProjectionsFunc({ seasonId: projectionsSeasonId });
+      
+      if (res.data?.success) {
+        const { processedCount, baselines } = res.data;
+        const successMsg = `Successfully processed ${processedCount} players!\nBaselines - F: ${baselines.forward}, D: ${baselines.defense}, G: ${baselines.goalie}`;
+        setProjectionsLog(successMsg);
+        alert(`Projections Generated Successfully!\n\n${successMsg}`);
+      } else {
+        throw new Error(res.data?.error || 'Failed to generate projections.');
+      }
+    } catch (err) {
+      setProjectionsLog(`Error: ${err.message}`);
+      alert(`Projections Generation Failed: ${err.message}`);
+      console.error("Projections Generation Error:", err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
 
   if (loading) return <div style={{ padding: '60px 40px', color: 'var(--text-main)' }}>Loading Admin Panel...</div>;
 
@@ -425,6 +463,56 @@ export default function AdminPanel() {
               </button>
             </div>
           </div>
+        </div>
+
+        {/* Pre-Season Projections Engine Card */}
+        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+            <div>
+              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Pre-Season Projections</h2>
+              <p style={{ color: 'var(--text-muted)' }}>Compute player projections, positional baselines, and VORP ranks.</p>
+            </div>
+            <span style={{ fontSize: '2rem' }}>🔮</span>
+          </div>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: 'auto' }}>
+            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Target Season</label>
+            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+              <select 
+                className="input-field" 
+                style={{ flex: 1, background: 'rgba(255,255,255,0.1)' }}
+                value={projectionsSeasonId}
+                onChange={e => setProjectionsSeasonId(e.target.value)}
+              >
+                {seasons.map(s => (
+                  <option key={s.id} value={s.season_id} style={{ color: '#000' }}>{s.season_name}</option>
+                ))}
+              </select>
+              <button 
+                className="btn-primary" 
+                style={{ whiteSpace: 'nowrap', cursor: 'pointer' }}
+                onClick={handleGenerateProjections} 
+                disabled={isProcessing}
+              >
+                {isProcessing ? 'Computing Math...' : 'Generate Projections'}
+              </button>
+            </div>
+          </div>
+
+          {projectionsLog && (
+            <div style={{ 
+              marginTop: '16px', 
+              padding: '12px', 
+              background: projectionsLog.startsWith('Error') ? 'rgba(239, 68, 68, 0.1)' : 'rgba(108, 92, 231, 0.1)', 
+              color: projectionsLog.startsWith('Error') ? '#F87171' : 'var(--primary-color)', 
+              borderRadius: '8px', 
+              fontSize: '0.85rem', 
+              textAlign: 'center',
+              border: projectionsLog.startsWith('Error') ? '1px solid rgba(239, 68, 68, 0.2)' : '1px solid rgba(108, 92, 231, 0.2)'
+            }}>
+              {projectionsLog}
+            </div>
+          )}
         </div>
       </div>
 

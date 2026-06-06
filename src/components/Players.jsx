@@ -3,8 +3,10 @@ import { db } from '../firebase.js';
 import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
+import PlayerCardModal from './PlayerCardModal';
 import { fetchAggregatedStats } from '../services/statsEngine';
 import { submitAddDrop } from '../services/leagueService.js';
+import { normalizePosition } from '../services/pwhlService.js';
 
 export default function Players({ activeLeagueId }) {
   const { currentUser } = useAuth();
@@ -46,6 +48,10 @@ export default function Players({ activeLeagueId }) {
 
   // Fallback player universe flag
   const [isFallbackUniverse, setIsFallbackUniverse] = useState(false);
+
+  const [statViewMode, setStatViewMode] = useState('projections');
+  const [projectionsList, setProjectionsList] = useState([]);
+  const [lastSeasonStats, setLastSeasonStats] = useState([]);
 
   // Fetch league status details
   useEffect(() => {
@@ -138,7 +144,7 @@ export default function Players({ activeLeagueId }) {
           first_name: p.first_name || '',
           last_name: p.last_name || '',
           name: p.name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unknown Player',
-          pos: p.position || 'F',
+          pos: normalizePosition(p.position),
           team_id: p.current_team_id || p.team_id || '',
           jersey_number: p.tp_jersey_number || p.jersey_number || '',
           player_image: p.player_image || '',
@@ -171,6 +177,62 @@ export default function Players({ activeLeagueId }) {
         aggStats = await fetchAggregatedStats(resolvedSeasonId, simDate);
       }
       setStatsData(aggStats);
+
+      // 8. Fetch upcoming season projections
+      let projList = [];
+      try {
+        const projectionsSnap = await getDocs(collection(db, `pwhl_projections/${seasonId}/player_projections`));
+        projList = projectionsSnap.docs.map(d => d.data());
+      } catch (err) {
+        console.error("Error loading projections in scouting:", err);
+      }
+      setProjectionsList(projList);
+
+      // 9. Fetch last season stats
+      let prevStats = [];
+      try {
+        const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
+        const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
+        const prevRegularSeasons = seasons.filter(s => {
+          const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
+          const startsBefore = new Date(s.start_date) < currentStartDate;
+          return isRegular && startsBefore;
+        });
+        prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
+        const prevRegSeason = prevRegularSeasons[0];
+        if (prevRegSeason) {
+          const prevSeasonId = String(prevRegSeason.season_id);
+          const prevStatsSnap = await getDocs(
+            query(collection(db, 'pwhl_player_stats'), where('season_id', '==', prevSeasonId))
+          );
+          prevStats = prevStatsSnap.docs.map(d => {
+            const data = d.data();
+            const pId = String(data.player_id);
+            return {
+              playerId: pId,
+              stats: {
+                gamesPlayed: Number(data.games_played || 0),
+                goals: Number(data.goals || 0),
+                assists: Number(data.assists || 0),
+                plusMinus: Number(data.plus_minus || 0),
+                powerPlayPoints: Number(data.power_play_points || 0),
+                shortHandedPoints: Number(data.short_handed_points || 0),
+                shotsOnGoal: Number(data.shots || data.shots_on || 0),
+                blockedShots: Number(data.shots_blocked_by_player || 0),
+                hits: Number(data.hits || 0),
+                wins: Number(data.wins || 0),
+                overtimeLosses: Number(data.ot_loss || data.overtime_losses || 0),
+                goalsAgainst: Number(data.goals_against || 0),
+                shotsSaved: Number(data.saves || 0),
+                shutouts: Number(data.shutouts || 0),
+              }
+            };
+          });
+        }
+      } catch (err) {
+        console.error("Error loading last season stats in scouting:", err);
+      }
+      setLastSeasonStats(prevStats);
     } catch (err) {
       console.error("Error loading scouting database:", err);
     } finally {
@@ -181,6 +243,37 @@ export default function Players({ activeLeagueId }) {
   useEffect(() => {
     fetchScoutingData();
   }, [activeLeagueId, currentUser, transactionLoading, timeTravelState?.enabled, timeTravelState?.date]);
+
+  useEffect(() => {
+    if (statViewMode === 'projections') {
+      setSortColumn('overallRank');
+      setSortDirection('asc');
+    } else {
+      setSortColumn('points');
+      setSortDirection('desc');
+    }
+  }, [statViewMode]);
+
+  let isPreseason = true;
+  if (leagueData && leagueData.status !== 'pending' && leagueData.status !== 'drafting') {
+    const validGames = gamesList.filter(g => g.date_played || g.date);
+    validGames.sort((a, b) => new Date(a.date_played || a.date) - new Date(b.date_played || b.date));
+    if (validGames.length > 0) {
+      const simDate = getSimulatedDate();
+      const firstGameDate = new Date(validGames[0].date_played || validGames[0].date);
+      if (firstGameDate <= simDate) {
+        isPreseason = false;
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!isPreseason && statViewMode !== 'currentSeason') {
+      setStatViewMode('currentSeason');
+    } else if (isPreseason && statViewMode === 'currentSeason') {
+      setStatViewMode('projections');
+    }
+  }, [isPreseason, statViewMode]);
 
   if (!activeLeagueId) {
     return (
@@ -249,8 +342,8 @@ export default function Players({ activeLeagueId }) {
   };
 
   // Compute fantasy points client-side
-  const calculatePoints = (player) => {
-    if (isFallbackUniverse) return 0.0;
+  const calculatePointsForMode = (player, statsObj) => {
+    if (statViewMode === 'currentSeason' && isFallbackUniverse) return 0.0;
     
     const defaultScoring = {
       skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
@@ -259,30 +352,28 @@ export default function Players({ activeLeagueId }) {
     const scoring = leagueData?.scoringSettings || defaultScoring;
     
     if (player.pos === 'G') {
-      const g = statsData.goalies[player.id] || { wins: 0, overtimeLosses: 0, goalsAgainst: 0, shotsSaved: 0, shutouts: 0 };
       const matrix = scoring.goalies || defaultScoring.goalies;
       let pts = 0;
-      pts += (g.wins || 0) * (matrix.wins || 0);
-      pts += (g.overtimeLosses || 0) * (matrix.otl || 0);
-      pts += (g.goalsAgainst || 0) * (matrix.ga || 0);
-      pts += (g.shotsSaved || 0) * (matrix.saves || 0);
-      pts += (g.shutouts || 0) * (matrix.shutouts || 0);
+      pts += (statsObj.wins || 0) * (matrix.wins || 0);
+      pts += (statsObj.overtimeLosses || statsObj.otl || 0) * (matrix.otl || 0);
+      pts += (statsObj.goalsAgainst || statsObj.ga || 0) * (matrix.ga || 0);
+      pts += (statsObj.shotsSaved || statsObj.saves || 0) * (matrix.saves || 0);
+      pts += (statsObj.shutouts || 0) * (matrix.shutouts || 0);
       return Math.round(pts * 100) / 100;
     } else {
-      const s = statsData.skaters[player.id] || { goals: 0, assists: 0, plusMinus: 0, powerPlayPoints: 0, shortHandedPoints: 0, shotsOnGoal: 0, hits: 0, blockedShots: 0 };
       const matrix = scoring.skaters || defaultScoring.skaters;
       let pts = 0;
-      pts += (s.goals || 0) * (matrix.goals || 0);
-      pts += (s.assists || 0) * (matrix.assists || 0);
-      pts += (s.plusMinus || 0) * (matrix.plusMinus || 0);
-      pts += (s.powerPlayPoints || 0) * (matrix.ppp || 0);
-      pts += (s.shortHandedPoints || 0) * (matrix.shp || 0);
-      pts += (s.shotsOnGoal || 0) * (matrix.sog || 0);
-      pts += (s.hits || 0) * (matrix.hits || 0);
-      pts += (s.blockedShots || 0) * (matrix.blocks || 0);
+      pts += (statsObj.goals || 0) * (matrix.goals || 0);
+      pts += (statsObj.assists || 0) * (matrix.assists || 0);
+      pts += (statsObj.plusMinus || 0) * (matrix.plusMinus || 0);
+      pts += (statsObj.powerPlayPoints || statsObj.ppp || 0) * (matrix.ppp || 0);
+      pts += (statsObj.shortHandedPoints || statsObj.shp || 0) * (matrix.shp || 0);
+      pts += (statsObj.shotsOnGoal || statsObj.shots || 0) * (matrix.sog || 0);
+      pts += (statsObj.hits || 0) * (matrix.hits || 0);
+      pts += (statsObj.blockedShots || statsObj.blocks || 0) * (matrix.blocks || 0);
       
       if (player.pos === 'D' || player.pos === 'Defense') {
-        pts += ((s.goals || 0) + (s.assists || 0)) * (matrix.defensePoints || 0);
+        pts += ((statsObj.goals || 0) + (statsObj.assists || 0)) * (matrix.defensePoints || 0);
       }
       return Math.round(pts * 100) / 100;
     }
@@ -291,30 +382,48 @@ export default function Players({ activeLeagueId }) {
   // Compile full processed stats & mapping for sorting/filtering
   const processedPlayers = playersList.map(player => {
     const owner = getPlayerOwnerInfo(player.id);
-    const points = calculatePoints(player);
+    const proj = projectionsList.find(p => String(p.playerId) === String(player.id));
+    const lastSeason = lastSeasonStats.find(p => String(p.playerId) === String(player.id));
+
+    let activeStats = {};
+    let overallRank = 999;
+
+    if (statViewMode === 'projections') {
+      activeStats = proj?.projected_season_stats || {};
+      overallRank = proj?.overallRank !== undefined ? Number(proj.overallRank) : 999;
+    } else if (statViewMode === 'lastSeason') {
+      activeStats = lastSeason?.stats || {};
+    } else {
+      // currentSeason
+      if (player.pos === 'G') {
+        activeStats = statsData.goalies[player.id] || {};
+      } else {
+        activeStats = statsData.skaters[player.id] || {};
+      }
+    }
+
+    const points = calculatePointsForMode(player, activeStats);
     const teamInfo = pwhlTeams[player.team_id] || { code: player.team_name || player.team_id || 'FA', logo: '' };
     const teamCode = teamInfo.code;
     const teamLogo = teamInfo.logo;
 
     let gp = 0, g_w = 0, a_otl = 0, pm_ga = 0, sog_sv = 0, blk_so = 0, hits = 0;
     if (player.pos === 'G') {
-      const g = statsData.goalies[player.id] || {};
-      gp = g.gamesPlayed || 0;
-      g_w = g.wins || 0;
-      a_otl = g.overtimeLosses || 0;
-      pm_ga = g.goalsAgainst || 0;
-      sog_sv = g.shotsSaved || 0;
-      blk_so = g.shutouts || 0;
+      gp = activeStats.gamesPlayed || 0;
+      g_w = activeStats.wins || 0;
+      a_otl = activeStats.overtimeLosses || activeStats.otl || 0;
+      pm_ga = activeStats.goalsAgainst || activeStats.ga || 0;
+      sog_sv = activeStats.shotsSaved || activeStats.saves || 0;
+      blk_so = activeStats.shutouts || 0;
       hits = '-';
     } else {
-      const s = statsData.skaters[player.id] || {};
-      gp = s.gamesPlayed || 0;
-      g_w = s.goals || 0;
-      a_otl = s.assists || 0;
-      pm_ga = s.plusMinus || 0;
-      sog_sv = s.shotsOnGoal || 0;
-      blk_so = s.blockedShots || 0;
-      hits = s.hits || 0;
+      gp = activeStats.gamesPlayed || 0;
+      g_w = activeStats.goals || 0;
+      a_otl = activeStats.assists || 0;
+      pm_ga = activeStats.plusMinus || 0;
+      sog_sv = activeStats.shotsOnGoal || activeStats.shots || 0;
+      blk_so = activeStats.blockedShots || activeStats.blocks || 0;
+      hits = activeStats.hits || 0;
     }
 
     return {
@@ -329,7 +438,8 @@ export default function Players({ activeLeagueId }) {
       pm_ga,
       sog_sv,
       blk_so,
-      hits
+      hits,
+      overallRank
     };
   });
 
@@ -655,6 +765,30 @@ export default function Players({ activeLeagueId }) {
         </div>
       )}
 
+      {/* ── STATS VIEW MODE TOGGLE ── */}
+      {isPreseason ? (
+        <div className="flex bg-gray-100 p-1 rounded-2xl w-fit mb-6">
+          <button 
+            onClick={() => setStatViewMode('projections')}
+            className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-xl transition-all active:scale-95 ${statViewMode === 'projections' ? 'bg-white text-indigo-600 shadow-sm border border-gray-200/20' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            Projections
+          </button>
+          <button 
+            onClick={() => setStatViewMode('lastSeason')}
+            className={`px-4 py-2 text-[10px] font-black uppercase tracking-wider rounded-xl transition-all active:scale-95 ${statViewMode === 'lastSeason' ? 'bg-white text-indigo-600 shadow-sm border border-gray-200/20' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            Last Season
+          </button>
+        </div>
+      ) : (
+        <div className="flex bg-indigo-50 p-1.5 rounded-2xl w-fit mb-6 border border-indigo-100">
+          <span className="px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-indigo-600">
+            Current Season Stats
+          </span>
+        </div>
+      )}
+
       {/* ── ROW OF FILTERS (HORIZONTAL LOBBY CONTROL BAR) ── */}
       <div className="bg-white border border-gray-200 p-5 rounded-[24px] shadow-sm flex flex-wrap items-end gap-4 mb-6">
         {/* Search */}
@@ -829,16 +963,23 @@ export default function Players({ activeLeagueId }) {
                             </div>
                           )}
                           <div>
-                            <div className="flex items-center gap-1.5">
-                              {player.jersey_number && (
-                                <span className="text-[9px] font-extrabold text-gray-400">#{player.jersey_number}</span>
+                            <div className="flex flex-col">
+                              <div className="flex items-center gap-1.5">
+                                {player.jersey_number && (
+                                  <span className="text-[9px] font-extrabold text-gray-400">#{player.jersey_number}</span>
+                                )}
+                                <span 
+                                  onClick={() => setSelectedCardPlayer(player)}
+                                  className="text-xs font-black text-gray-800 hover:text-indigo-600 cursor-pointer transition-colors hover:underline"
+                                >
+                                  {player.name}
+                                </span>
+                              </div>
+                              {statViewMode === 'projections' && player.overallRank && player.overallRank !== 999 && (
+                                <span className="text-[8px] font-black text-indigo-500 uppercase tracking-wide mt-0.5">
+                                  VORP Rank #{player.overallRank}
+                                </span>
                               )}
-                              <span 
-                                onClick={() => setSelectedCardPlayer(player)}
-                                className="text-xs font-black text-gray-800 hover:text-indigo-600 cursor-pointer transition-colors hover:underline"
-                              >
-                                {player.name}
-                              </span>
                             </div>
                           </div>
                         </div>
@@ -977,275 +1118,12 @@ export default function Players({ activeLeagueId }) {
       )}
 
       {/* ── PLAYER PLAY CARD MODAL ── */}
-      {selectedCardPlayer && (
-        <div 
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 pt-24 pb-8 z-50 animate-fade-in"
-          onClick={() => setSelectedCardPlayer(null)}
-        >
-          <div 
-            className="w-full max-w-xl max-h-[78vh] bg-white border border-gray-200 rounded-[32px] overflow-hidden shadow-2xl relative flex flex-col animate-scale-up"
-            onClick={e => e.stopPropagation()}
-          >
-            {/* Header / Profile section with team branding */}
-            <div className={`relative p-6 text-white bg-gradient-to-br ${teamBranding.gradient} border-b ${teamBranding.borderColor} overflow-hidden shrink-0`}>
-              
-              {/* Semi-transparent team watermark */}
-              {selectedCardPlayer.teamLogo && (
-                <img 
-                  src={selectedCardPlayer.teamLogo} 
-                  alt={`${selectedCardPlayer.teamCode} Logo`} 
-                  className="absolute right-2 top-2 w-28 h-28 opacity-15 pointer-events-none select-none object-contain"
-                />
-              )}
-
-              {/* Close Button */}
-              <button 
-                onClick={() => setSelectedCardPlayer(null)}
-                className="absolute right-4 top-4 text-white/70 hover:text-white text-xl font-bold bg-white/10 hover:bg-white/20 rounded-full w-8 h-8 flex items-center justify-center transition-colors z-20"
-              >
-                &times;
-              </button>
-
-              {/* Jersey Number Watermark */}
-              {selectedCardPlayer.jersey_number && (
-                <span className="absolute left-4 top-4 text-5xl font-black text-white/10 leading-none">
-                  #{selectedCardPlayer.jersey_number}
-                </span>
-              )}
-
-              {/* Profile Details Layout */}
-              <div className="flex items-center gap-5 mt-4 relative z-10">
-                {selectedCardPlayer.player_image ? (
-                  <img 
-                    src={selectedCardPlayer.player_image} 
-                    alt={selectedCardPlayer.name} 
-                    className={`w-20 h-20 rounded-3xl border-2 border-white/50 object-cover shadow-lg ${teamBranding.glowColor}`} 
-                  />
-                ) : (
-                  <div className="w-20 h-20 rounded-3xl bg-white/10 border-2 border-white/30 flex items-center justify-center text-4xl shadow-lg">
-                    🏒
-                  </div>
-                )}
-                <div>
-                  <h3 className="font-sports text-2xl font-black tracking-tight">{selectedCardPlayer.name}</h3>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="text-[10px] font-black bg-white/20 px-2 py-0.5 rounded border border-white/10 uppercase tracking-wider">
-                      {selectedCardPlayer.teamCode}
-                    </span>
-                    <span className="text-[10px] font-black bg-white/20 px-2 py-0.5 rounded border border-white/10 uppercase tracking-wider">
-                      {selectedCardPlayer.pos}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Scrollable Content Container */}
-            <div className="overflow-y-auto flex-1 text-left">
-              {/* Demographics details */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-5 bg-gray-50/50 border-b border-gray-100 text-left">
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Jersey</span>
-                  <span className="text-xs font-black text-gray-700">#{selectedCardPlayer.jersey_number || 'N/A'}</span>
-                </div>
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Position</span>
-                  <span className="text-xs font-black text-gray-700">{selectedCardPlayer.pos === 'G' ? 'Goalie' : (selectedCardPlayer.pos === 'D' ? 'Defense' : 'Forward')}</span>
-                </div>
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Shoots</span>
-                  <span className="text-xs font-black text-gray-700">{selectedCardPlayer.shoots || 'N/A'}</span>
-                </div>
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Hometown</span>
-                  <span className="text-xs font-black text-gray-700 truncate block" title={selectedCardPlayer.hometown || selectedCardPlayer.homeplace || 'N/A'}>
-                    {selectedCardPlayer.hometown || selectedCardPlayer.homeplace || 'N/A'}
-                  </span>
-                </div>
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Height</span>
-                  <span className="text-xs font-black text-gray-700">{selectedCardPlayer.height || selectedCardPlayer.h || 'N/A'}</span>
-                </div>
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Weight</span>
-                  <span className="text-xs font-black text-gray-700">{selectedCardPlayer.weight || selectedCardPlayer.w || 'N/A'}</span>
-                </div>
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Birthdate</span>
-                  <span className="text-xs font-black text-gray-700">{selectedCardPlayer.birthdate || selectedCardPlayer.rawbirthdate || 'N/A'}</span>
-                </div>
-                <div>
-                  <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Status</span>
-                  <span className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-lg border inline-block tracking-wider ${selectedCardPlayer.owner.color}`}>
-                    {selectedCardPlayer.owner.label}
-                  </span>
-                </div>
-              </div>
-
-              {/* Draft Info Section */}
-              {selectedCardPlayer.draftInfo && (
-                <div className="p-5 border-b border-gray-100 text-left bg-indigo-50/20">
-                  <h4 className="text-[9px] font-black uppercase tracking-wider text-indigo-600 mb-3 flex items-center gap-1.5">
-                    🎓 PWHL Draft Information
-                  </h4>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                    <div>
-                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Draft Year</span>
-                      <span className="text-xs font-black text-gray-700">{selectedCardPlayer.draftInfo.year || 'N/A'}</span>
-                    </div>
-                    <div>
-                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Selection</span>
-                      <span className="text-xs font-black text-gray-700">
-                        Round {selectedCardPlayer.draftInfo.round || 'N/A'}, Pick {selectedCardPlayer.draftInfo.pick || 'N/A'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Drafted By</span>
-                      <span className="text-xs font-black text-gray-700">{selectedCardPlayer.draftInfo.draftedBy || 'N/A'}</span>
-                    </div>
-                    <div>
-                      <span className="block text-[8px] uppercase font-black text-gray-400 tracking-wider">Former Team</span>
-                      <span className="text-xs font-black text-gray-700 truncate block" title={selectedCardPlayer.draftInfo.formerTeam || 'N/A'}>
-                        {selectedCardPlayer.draftInfo.formerTeam || 'N/A'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Season Stats Dashboard */}
-              <div className="p-5 border-b border-gray-100 text-left">
-                <h4 className="text-[9px] font-black uppercase tracking-wider text-gray-400 mb-3">Season Summary</h4>
-                <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
-                  {selectedCardPlayer.pos === 'G' ? (
-                    <>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">GP</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.gp}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">Wins</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.g_w}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">OTL</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.a_otl}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">GA</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.pm_ga}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">Saves</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.sog_sv}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">Shutouts</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.blk_so}</span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">GP</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.gp}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">Goals</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.g_w}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">Assists</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.a_otl}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">+/-</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.pm_ga > 0 ? `+${selectedCardPlayer.pm_ga}` : selectedCardPlayer.pm_ga}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">SOG</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.sog_sv}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">Blocks</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.blk_so}</span>
-                      </div>
-                      <div className="bg-gray-50/70 p-2.5 rounded-xl border border-gray-100 text-center">
-                        <span className="block text-[8px] uppercase font-black text-gray-400">Hits</span>
-                        <span className="text-xs font-black text-gray-700">{selectedCardPlayer.hits}</span>
-                      </div>
-                    </>
-                  )}
-                  
-                  <div className="bg-indigo-50/70 p-2.5 rounded-xl border border-indigo-100/50 text-center col-span-2 sm:col-span-2 flex flex-col justify-center">
-                    <span className="block text-[7.5px] uppercase font-black text-indigo-500 tracking-wider">Fantasy Points</span>
-                    <span className="text-sm font-sports font-black text-indigo-600 leading-none mt-1">
-                      {selectedCardPlayer.points.toFixed(1)} <span className="text-[7.5px] font-black uppercase text-indigo-400">fpts</span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Recent game history */}
-              <div className="p-5 text-left">
-                <h4 className="text-[9px] font-black uppercase tracking-wider text-gray-400 mb-3">Recent Game History (Last 5 Games)</h4>
-                {gameHistory.length === 0 ? (
-                  <div className="text-center py-6 text-[10px] text-gray-400 font-bold italic border border-dashed border-gray-200 rounded-xl bg-gray-50/30">
-                    No recent games played.
-                  </div>
-                ) : (
-                  <div className="overflow-hidden rounded-xl border border-gray-100">
-                    <table className="w-full text-left border-collapse text-[10.5px]">
-                      <thead>
-                        <tr className="bg-gray-50 border-b border-gray-100">
-                          <th className="px-3.5 py-2 text-[8px] font-black uppercase text-gray-400">Date</th>
-                          <th className="px-3.5 py-2 text-[8px] font-black uppercase text-gray-400">Matchup</th>
-                          <th className="px-3.5 py-2 text-[8px] font-black uppercase text-gray-400">Result</th>
-                          <th className="px-3.5 py-2 text-[8px] font-black uppercase text-gray-400">Game Stats</th>
-                          <th className="px-3.5 py-2 text-[8px] font-black uppercase text-gray-400 text-center">FPTS</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {gameHistory.map((game, idx) => (
-                          <tr key={idx} className="hover:bg-gray-50/50 transition-colors">
-                            <td className="px-3.5 py-2 font-bold text-gray-400">{game.date}</td>
-                            <td className="px-3.5 py-2 font-bold text-gray-700">{game.matchupLabel}</td>
-                            <td className="px-3.5 py-2">
-                              <span className={`font-black uppercase text-[9px] ${game.result.startsWith('W') ? 'text-emerald-600' : 'text-gray-500'}`}>
-                                {game.result}
-                              </span>
-                            </td>
-                            <td className="px-3.5 py-2 text-gray-500 font-medium">
-                              {selectedCardPlayer.pos === 'G' ? (
-                                `Wins: ${game.stats.wins}, OTL: ${game.stats.otl}, Saves: ${game.stats.saves}, GA: ${game.stats.ga}`
-                              ) : (
-                                `${game.stats.goals}G, ${game.stats.assists}A, ${game.stats.plusminus > 0 ? `+${game.stats.plusminus}` : game.stats.plusminus} +/-, ${game.stats.shots}S, ${game.stats.blocks}B, ${game.stats.hits}H`
-                              )}
-                            </td>
-                            <td className="px-3.5 py-2 font-black text-indigo-600 text-center bg-indigo-50/10">
-                              {game.points.toFixed(1)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Modal Bottom Actions */}
-            <div className="bg-gray-50 px-6 py-4.5 flex justify-end gap-3 border-t border-gray-100 shrink-0">
-              <button 
-                onClick={() => setSelectedCardPlayer(null)}
-                className="px-5 py-2.5 bg-white hover:bg-gray-50 border border-gray-200 rounded-xl text-[9px] font-black uppercase text-gray-500 tracking-wider transition-colors active:scale-95"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <PlayerCardModal 
+        player={selectedCardPlayer} 
+        gameHistory={gameHistory} 
+        teamBranding={teamBranding} 
+        onClose={() => setSelectedCardPlayer(null)} 
+      />
 
     </div>
   );

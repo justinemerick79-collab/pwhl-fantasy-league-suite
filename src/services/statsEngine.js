@@ -17,9 +17,10 @@ import { collection, getDocs, query, where } from 'firebase/firestore';
  *
  * @param {string} seasonId - The PWHL season ID
  * @param {Date} cutoffDate - The simulated date (e.g. from getSimulatedDate())
+ * @param {Date} startDate - Optional. If provided, only includes games on or after this date.
  * @returns {Object} { skaters: {}, goalies: {} } dictionaries keyed by player_id
  */
-export async function fetchAggregatedStats(seasonId, cutoffDate) {
+export async function fetchAggregatedStats(seasonId, cutoffDate, startDate = null) {
   // Helper to race getDocs with a timeout to prevent hanging on cached emulator connections
   async function getDocsWithTimeout(colRef, timeoutMs = 5000) {
     return Promise.race([
@@ -44,7 +45,7 @@ export async function fetchAggregatedStats(seasonId, cutoffDate) {
     const gDateStr = game.date_played || game.date;
     if (!gDateStr) return;
     const gameDate = new Date(gDateStr);
-    if (gameDate < cutoffDate) {
+    if (gameDate < cutoffDate && (!startDate || gameDate >= startDate)) {
       pastGameIds.add(game.game_id.toString());
     }
   });
@@ -245,4 +246,78 @@ export async function fetchAggregatedStats(seasonId, cutoffDate) {
   });
 
   return { skaters, goalies };
+}
+
+/**
+ * Computes fantasy points for all players strictly bounded within a single matchup week.
+ *
+ * @param {string} seasonId - The PWHL season ID
+ * @param {Date} weekStart - The start date of the week (inclusive)
+ * @param {Date} weekEnd - The end date of the week (inclusive)
+ * @param {Date} simulatedDate - The current simulation cutoff date
+ * @param {Object} scoringSettings - Fantasy points matrix
+ * @returns {Object} Map of player_id -> fantasyPoints
+ */
+export async function fetchWeeklyPlayerPoints(seasonId, weekStart, weekEnd, simulatedDate, scoringSettings) {
+  // We only care about games that happen during the week AND before the simulation date
+  // End bound is min(weekEnd end of day, simulatedDate)
+  let effectiveEnd = new Date(weekEnd);
+  effectiveEnd.setHours(23, 59, 59, 999);
+  
+  if (simulatedDate && simulatedDate < effectiveEnd) {
+    effectiveEnd = simulatedDate;
+  }
+
+  // Start bound is weekStart beginning of day
+  const effectiveStart = new Date(weekStart);
+  effectiveStart.setHours(0, 0, 0, 0);
+
+  // If the week hasn't even started in our simulation yet, return 0 points instantly
+  if (effectiveStart >= effectiveEnd) {
+    return {};
+  }
+
+  const { skaters, goalies } = await fetchAggregatedStats(seasonId, effectiveEnd, effectiveStart);
+  
+  const defaultScoring = {
+    skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
+    goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
+  };
+  const scoring = scoringSettings || defaultScoring;
+  
+  const skaterMatrix = scoring.skaters || defaultScoring.skaters;
+  const goalieMatrix = scoring.goalies || defaultScoring.goalies;
+
+  const pointsMap = {};
+
+  // Compute for skaters
+  for (const [id, s] of Object.entries(skaters)) {
+    let pts = 0;
+    pts += s.goals * (skaterMatrix.goals || 0);
+    pts += s.assists * (skaterMatrix.assists || 0);
+    pts += s.plusMinus * (skaterMatrix.plusMinus || 0);
+    pts += s.powerPlayPoints * (skaterMatrix.ppp || 0);
+    pts += s.shortHandedPoints * (skaterMatrix.shp || 0);
+    pts += s.shotsOnGoal * (skaterMatrix.sog || 0);
+    pts += s.hits * (skaterMatrix.hits || 0);
+    pts += s.blockedShots * (skaterMatrix.blocks || 0);
+    // Defense points are handled via position lookup in Roster/Matchup. 
+    // Here we can't reliably know if player is a Defenseman. The caller will add defensePoints if needed.
+    // However, if we must, we can leave the base points here, and callers add defense points.
+    // For simplicity, we just return the base skater points.
+    pointsMap[id] = pts;
+  }
+
+  // Compute for goalies
+  for (const [id, g] of Object.entries(goalies)) {
+    let pts = 0;
+    pts += g.wins * (goalieMatrix.wins || 0);
+    pts += g.overtimeLosses * (goalieMatrix.otl || 0);
+    pts += g.goalsAgainst * (goalieMatrix.ga || 0);
+    pts += g.shotsSaved * (goalieMatrix.saves || 0);
+    pts += g.shutouts * (goalieMatrix.shutouts || 0);
+    pointsMap[id] = pts;
+  }
+
+  return { pointsMap, skaters, goalies };
 }

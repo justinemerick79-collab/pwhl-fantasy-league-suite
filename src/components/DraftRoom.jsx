@@ -12,7 +12,8 @@ import {
 } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
-import { initializeDraft, submitDraftPick } from '../services/leagueService';
+import { initializeDraft, submitDraftPick, toggleAutoDraftStatus } from '../services/leagueService';
+import { fetchDraftEligiblePlayers } from '../services/pwhlService';
 
 export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const { currentUser } = useAuth();
@@ -32,8 +33,14 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [posFilter, setPosFilter] = useState('ALL'); // 'ALL' | 'F' | 'D' | 'G'
 
+  // Stat view toggle & player card modal
+  const [statViewMode, setStatViewMode] = useState('projections');
+  const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
+  const [prevSeasonId, setPrevSeasonId] = useState(null);
+
   // Tabs within Draft Room: 'lobby' | 'rosters'
   const [subTab, setSubTab] = useState('lobby'); 
+  const [selectedRosterUserId, setSelectedRosterUserId] = useState(null);
   const [selectedRecapTab, setSelectedRecapTab] = useState('round'); // 'round' | 'team'
 
   // Timer Countdown state
@@ -41,47 +48,62 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const [lobbySecondsLeft, setLobbySecondsLeft] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Ref to hold current state to prevent stale closure inside timer loop
+  // Refs to hold current state to prevent stale closures inside timer loop
   const draftStateRef = useRef(null);
   draftStateRef.current = draftState;
+  const allPlayersRef = useRef([]);
+  allPlayersRef.current = allPlayers;
+  const leagueDataRef = useRef(null);
+  leagueDataRef.current = leagueData;
+  const isSubmittingRef = useRef(false);
+  isSubmittingRef.current = isSubmitting;
+  const pwhlTeamsRef = useRef({});
+  pwhlTeamsRef.current = pwhlTeams;
 
-  // 1. Fetch PWHL Player Universe (with fallback, matches Players.jsx resolution)
+  // Team branding helper for player card modal
+  const getTeamBranding = (teamCode) => {
+    const brands = {
+      BOS: { gradient: 'from-green-800 to-green-950', border: 'border-green-500', glow: 'shadow-green-500/20' },
+      MIN: { gradient: 'from-purple-800 to-purple-950', border: 'border-purple-500', glow: 'shadow-purple-500/20' },
+      MTL: { gradient: 'from-red-800 to-red-950', border: 'border-red-500', glow: 'shadow-red-500/20' },
+      NY:  { gradient: 'from-sky-800 to-sky-950', border: 'border-sky-500', glow: 'shadow-sky-500/20' },
+      OTT: { gradient: 'from-red-700 to-gray-900', border: 'border-red-400', glow: 'shadow-red-400/20' },
+      TOR: { gradient: 'from-blue-800 to-blue-950', border: 'border-blue-500', glow: 'shadow-blue-500/20' },
+    };
+    return brands[teamCode] || { gradient: 'from-gray-700 to-gray-900', border: 'border-gray-500', glow: 'shadow-gray-500/20' };
+  };
+
+  // 1. Fetch PWHL Player Universe using centralized service (fixes team resolution)
   useEffect(() => {
     const loadPlayersAndTeams = async () => {
       setPlayersLoading(true);
       try {
-        const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
-        const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
         const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
-        const playersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonId, Number(seasonId)]));
-        const playersSnap = await getDocs(playersQuery);
+        const selectedSeasonId = statViewMode === 'projections' ? seasonId : prevSeasonId || seasonId;
 
-        let resolvedSeasonId = seasonId;
-        let rawPlayers = playersSnap.docs.map(d => d.data());
-
-        if (rawPlayers.length === 0 && seasons.length > 0) {
+        // Resolve prevSeasonId if not yet set
+        if (!prevSeasonId) {
+          const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
+          const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
           const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
           const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
-
           const prevRegularSeasons = seasons.filter(s => {
             const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
             const startsBefore = new Date(s.start_date) < currentStartDate;
             return isRegular && startsBefore;
           });
-
+          prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
           if (prevRegularSeasons.length > 0) {
-            prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
-            const prevRegSeason = prevRegularSeasons[0];
-            resolvedSeasonId = prevRegSeason.season_id.toString();
-
-            const prevPlayersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
-            const prevPlayersSnap = await getDocs(prevPlayersQuery);
-            rawPlayers = prevPlayersSnap.docs.map(d => d.data());
+            setPrevSeasonId(String(prevRegularSeasons[0].season_id));
           }
         }
 
-        const teamsQuery = query(collection(db, 'pwhl_teams'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
+        // Use centralized service that correctly resolves teamId via current_team_id || latest_team_id || team_id
+        const players = await fetchDraftEligiblePlayers(seasonId, selectedSeasonId);
+        setAllPlayers(players);
+
+        // Also fetch PWHL teams for display
+        const teamsQuery = query(collection(db, 'pwhl_teams'), where('season_id', 'in', [seasonId, Number(seasonId)]));
         const teamsSnap = await getDocs(teamsQuery);
         const teamsMap = {};
         teamsSnap.forEach(d => {
@@ -92,21 +114,21 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
             logo: t.team_logo_url || ''
           };
         });
-        setPwhlTeams(teamsMap);
 
-        const mappedList = rawPlayers.map((p, idx) => {
-          return {
-            id: String(p.player_id || p.id || `p_${idx}`),
-            name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
-            pos: p.position || 'F',
-            teamId: String(p.team_id || ''),
-            jersey: p.jersey_number || '-',
-            shoots: p.shoots || 'L',
-            height: p.height || '-',
-            birthDate: p.birth_date || '-'
-          };
-        });
-        setAllPlayers(mappedList);
+        // Also try the previous season teams if current season has none
+        if (Object.keys(teamsMap).length === 0 && prevSeasonId) {
+          const prevTeamsQuery = query(collection(db, 'pwhl_teams'), where('season_id', 'in', [prevSeasonId, Number(prevSeasonId)]));
+          const prevTeamsSnap = await getDocs(prevTeamsQuery);
+          prevTeamsSnap.forEach(d => {
+            const t = d.data();
+            teamsMap[String(t.id)] = {
+              name: t.name,
+              code: t.code || t.name || t.id,
+              logo: t.team_logo_url || ''
+            };
+          });
+        }
+        setPwhlTeams(teamsMap);
       } catch (err) {
         console.error("Failed to load players universe in draft room:", err);
       } finally {
@@ -115,7 +137,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     };
 
     loadPlayersAndTeams();
-  }, [activeSeasonId]);
+  }, [activeSeasonId, statViewMode, prevSeasonId]);
 
   // 2. Fetch main league details and teams list
   useEffect(() => {
@@ -206,29 +228,36 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   }, [leagueData, draftState, getSimulatedDate, activeLeagueId]);
 
   // 4. Timer Loop & Auto-pick triggers
+  // Uses Date.now() to match the deadline's real-clock basis (set by leagueService via Date.now() + 60000).
+  // Any connected client can trigger auto-picks for whoever is on the clock — not limited to the current user.
   useEffect(() => {
     if (!draftState || draftState.status !== 'active') return;
 
     const updateTimer = async () => {
-      const deadline = draftState.pickDeadline;
+      const deadline = draftStateRef.current?.pickDeadline;
       if (!deadline) return;
 
-      const now = getSimulatedDate().getTime();
-      const deadlineMs = deadline.seconds * 1000 + Math.floor(deadline.nanoseconds / 1000000);
+      const now = Date.now();
+      const deadlineMs = deadline.seconds * 1000 + Math.floor((deadline.nanoseconds || 0) / 1000000);
       const diffSecs = Math.max(0, Math.floor((deadlineMs - now) / 1000));
       setSecondsLeft(diffSecs);
 
-      // Trigger client-side Auto-pick if timer runs out AND it's current user's turn
-      if (diffSecs === 0 && draftStateRef.current?.currentTeamOnClock === currentUser?.uid && !isSubmitting) {
-        console.log("[Draft Room] Time expired! Auto-picking top available player...");
-        triggerAutoPick();
+      // Auto-pick: any connected client triggers for whoever is on the clock
+      if (draftStateRef.current?.status === 'active' && !isSubmittingRef.current) {
+        const pickerUid = draftStateRef.current?.currentTeamOnClock;
+        const isUserAutoDraftOn = draftStateRef.current?.autoDraftUsers?.[pickerUid] === true;
+        
+        if (pickerUid && (diffSecs === 0 || (isUserAutoDraftOn && diffSecs <= 57))) {
+          console.log(`[Draft Room] Triggering Auto-Pick for ${pickerUid}...`);
+          triggerAutoPickForUser(pickerUid, diffSecs === 0);
+        }
       }
     };
 
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
-  }, [draftState, getSimulatedDate, currentUser]);
+  }, [draftState]);
 
   // Helper to compile drafted player IDs
   const getDraftedPlayerIds = () => {
@@ -243,28 +272,69 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
 
   const draftedSet = getDraftedPlayerIds();
 
-  // Find the top available player for Auto-Pick, respecting position limits of the picker
+  // Find the top available player for Auto-Pick, sorted by projected fantasy points,
+  // respecting position limits of the picker's roster.
   const getTopAvailablePlayer = (pickerUid) => {
     if (!pickerUid) return null;
-    const myRosterIds = activeRosters[pickerUid] || [];
+    const currentDraftState = draftStateRef.current;
+    const currentAllPlayers = allPlayersRef.current;
+    const currentLeagueData = leagueDataRef.current;
+    if (!currentDraftState || !currentAllPlayers.length) return null;
+
+    const rosters = currentDraftState.activeRosters || {};
+    const pickerRosterIds = rosters[pickerUid] || [];
     const posCounts = { F: 0, D: 0, G: 0 };
-    myRosterIds.forEach(pId => {
-      const p = allPlayers.find(pl => pl.id === pId);
-      if (p) {
-        const pos = p.pos;
-        if (pos === 'F' || pos === 'D' || pos === 'G') {
-          posCounts[pos]++;
-        }
+    pickerRosterIds.forEach(pId => {
+      const p = currentAllPlayers.find(pl => pl.id === pId);
+      if (p && (p.pos === 'F' || p.pos === 'D' || p.pos === 'G')) {
+        posCounts[p.pos]++;
       }
     });
 
-    const rosterSettings = leagueData?.rosterSettings || { bench: 4, forwards: { starters: 6, max: 10 }, defense: { starters: 4, max: 8 }, goalies: { starters: 1, max: 3 } };
+    const rosterSettings = currentLeagueData?.rosterSettings || { bench: 4, forwards: { starters: 6, max: 10 }, defense: { starters: 4, max: 8 }, goalies: { starters: 1, max: 3 } };
     const forwardsLimit = rosterSettings.forwards?.max ?? 10;
     const defenseLimit = rosterSettings.defense?.max ?? 8;
     const goaliesLimit = rosterSettings.goalies?.max ?? 3;
+    
+    // Calculate required starters to prevent getting stuck
+    const fStarters = rosterSettings.forwards?.starters ?? 6;
+    const dStarters = rosterSettings.defense?.starters ?? 4;
+    const gStarters = rosterSettings.goalies?.starters ?? 1;
+    const benchSlots = rosterSettings.bench ?? 4;
+    
+    const totalRosterSize = fStarters + dStarters + gStarters + benchSlots;
+    const picksRemaining = totalRosterSize - pickerRosterIds.length;
+    
+    const fNeeded = Math.max(0, fStarters - posCounts.F);
+    const dNeeded = Math.max(0, dStarters - posCounts.D);
+    const gNeeded = Math.max(0, gStarters - posCounts.G);
+    const totalNeeded = fNeeded + dNeeded + gNeeded;
+    
+    let mustDraftF = false;
+    let mustDraftD = false;
+    let mustDraftG = false;
+    
+    if (picksRemaining <= totalNeeded) {
+      if (fNeeded > 0) mustDraftF = true;
+      if (dNeeded > 0) mustDraftD = true;
+      if (gNeeded > 0) mustDraftG = true;
+    }
 
-    const available = allPlayers.filter(p => {
-      if (draftedSet.has(p.id)) return false;
+    // Build the drafted set from the latest draft state
+    const currentPicks = currentDraftState.picks || [];
+    const currentDraftedSet = new Set(currentPicks.map(p => p.playerId).filter(Boolean));
+
+    // Filter available players respecting position limits and requirements
+    const available = currentAllPlayers.filter(p => {
+      if (currentDraftedSet.has(p.id)) return false;
+      
+      // Force draft required position if running out of bench slots
+      if (picksRemaining <= totalNeeded) {
+        if (p.pos === 'F' && !mustDraftF) return false;
+        if (p.pos === 'D' && !mustDraftD) return false;
+        if (p.pos === 'G' && !mustDraftG) return false;
+      }
+      
       if (p.pos === 'F' && posCounts.F >= forwardsLimit) return false;
       if (p.pos === 'D' && posCounts.D >= defenseLimit) return false;
       if (p.pos === 'G' && posCounts.G >= goaliesLimit) return false;
@@ -272,26 +342,75 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     });
 
     if (available.length === 0) return null;
-    
-    // Prioritize Goalies if we don't have enough goalies to start and goalie limit is not met
-    const goalies = available.filter(p => p.pos === 'G');
-    if (goalies.length > 0 && posCounts.G < (rosterSettings.goalies?.starters ?? 1)) {
-      return goalies[0];
-    }
+
+    // Sort by projected fantasy points (highest first) using the league's scoring settings
+    const defaultScoringFallback = {
+      skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
+      goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
+    };
+    const scoring = currentLeagueData?.scoringSettings || defaultScoringFallback;
+    const seasonIdStr = activeSeasonId ? String(activeSeasonId) : '5';
+
+    const calcFpts = (player) => {
+      const stats = player.stats?.[seasonIdStr] || {};
+      let pts = 0;
+      if (player.pos === 'G') {
+        const m = scoring.goalies || defaultScoringFallback.goalies;
+        pts += (stats.wins || 0) * (m.wins || 0);
+        pts += (stats.overtimeLosses || stats.otl || 0) * (m.otl || 0);
+        pts += (stats.goalsAgainst || stats.ga || 0) * (m.ga || 0);
+        pts += (stats.shotsSaved || stats.saves || 0) * (m.saves || 0);
+        pts += (stats.shutouts || 0) * (m.shutouts || 0);
+      } else {
+        const m = scoring.skaters || defaultScoringFallback.skaters;
+        pts += (stats.goals || 0) * (m.goals || 0);
+        pts += (stats.assists || 0) * (m.assists || 0);
+        pts += (stats.plusMinus || 0) * (m.plusMinus || 0);
+        pts += (stats.powerPlayPoints || stats.ppp || 0) * (m.ppp || 0);
+        pts += (stats.shortHandedPoints || stats.shp || 0) * (m.shp || 0);
+        pts += (stats.shotsOnGoal || stats.shots || 0) * (m.sog || 0);
+        pts += (stats.hits || 0) * (m.hits || 0);
+        pts += (stats.blockedShots || stats.blocks || 0) * (m.blocks || 0);
+        if (player.pos === 'D') {
+          pts += ((stats.goals || 0) + (stats.assists || 0)) * (m.defensePoints || 0);
+        }
+      }
+      return pts;
+    };
+
+    // Sort by projected FPTS descending, then by overallRank ascending as tiebreaker
+    available.sort((a, b) => {
+      const fptsA = calcFpts(a);
+      const fptsB = calcFpts(b);
+      if (fptsB !== fptsA) return fptsB - fptsA;
+      return (a.overallRank || 999) - (b.overallRank || 999);
+    });
+
     return available[0];
   };
 
-  const triggerAutoPick = async () => {
-    const topPlayer = getTopAvailablePlayer(currentUser.uid);
+  // Auto-pick for any user whose clock has expired or who has auto-draft enabled
+  const triggerAutoPickForUser = async (pickerUid, timedOut = false) => {
+    if (isSubmittingRef.current) return;
+    const topPlayer = getTopAvailablePlayer(pickerUid);
     if (!topPlayer) return;
     setIsSubmitting(true);
     try {
-      await submitDraftPick(activeLeagueId, currentUser.uid, topPlayer.id, true);
+      await submitDraftPick(activeLeagueId, pickerUid, topPlayer.id, true, timedOut);
     } catch (err) {
-      console.error("Auto-pick failed:", err);
+      // Another client may have already submitted; ignore duplicate errors gracefully
+      if (!err.message?.includes('already selected')) {
+        console.error("Auto-pick failed:", err);
+      }
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  // Keep the old triggerAutoPick for the LM force-pick button
+  const triggerAutoPick = async () => {
+    const pickerUid = draftStateRef.current?.currentTeamOnClock || currentUser?.uid;
+    await triggerAutoPickForUser(pickerUid, false);
   };
 
   const handleSelectPlayer = async (playerId) => {
@@ -377,14 +496,64 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     return t ? t.teamName : `Owner (${uid.slice(0, 6)})`;
   };
 
+  // Resolve active stats for each player based on statViewMode
+  const activeSeasonIdStr = activeSeasonId ? String(activeSeasonId) : '5';
+  const resolvedStatKey = statViewMode === 'projections' ? activeSeasonIdStr : (prevSeasonId || activeSeasonIdStr);
+
+  // Scoring settings from this league (same defaults as leagueService.js)
+  const defaultScoring = {
+    skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
+    goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
+  };
+  const leagueScoring = leagueData?.scoringSettings || defaultScoring;
+
+  const processedPlayers = allPlayers.map(player => {
+    const activeStats = player.stats?.[resolvedStatKey] || {};
+    const pTeam = pwhlTeams[player.teamId] || {};
+    
+    // Calculate fantasy points using the league's scoring settings
+    let fpts = 0;
+    if (player.pos === 'G') {
+      const matrix = leagueScoring.goalies || defaultScoring.goalies;
+      fpts += (activeStats.wins || 0) * (matrix.wins || 0);
+      fpts += (activeStats.overtimeLosses || activeStats.otl || 0) * (matrix.otl || 0);
+      fpts += (activeStats.goalsAgainst || activeStats.ga || 0) * (matrix.ga || 0);
+      fpts += (activeStats.shotsSaved || activeStats.saves || 0) * (matrix.saves || 0);
+      fpts += (activeStats.shutouts || 0) * (matrix.shutouts || 0);
+    } else {
+      const matrix = leagueScoring.skaters || defaultScoring.skaters;
+      fpts += (activeStats.goals || 0) * (matrix.goals || 0);
+      fpts += (activeStats.assists || 0) * (matrix.assists || 0);
+      fpts += (activeStats.plusMinus || 0) * (matrix.plusMinus || 0);
+      fpts += (activeStats.powerPlayPoints || activeStats.ppp || 0) * (matrix.ppp || 0);
+      fpts += (activeStats.shortHandedPoints || activeStats.shp || 0) * (matrix.shp || 0);
+      fpts += (activeStats.shotsOnGoal || activeStats.shots || 0) * (matrix.sog || 0);
+      fpts += (activeStats.hits || 0) * (matrix.hits || 0);
+      fpts += (activeStats.blockedShots || activeStats.blocks || 0) * (matrix.blocks || 0);
+      // Defense bonus: extra points per point scored by defensemen
+      if (player.pos === 'D' || player.pos === 'Defense') {
+        fpts += ((activeStats.goals || 0) + (activeStats.assists || 0)) * (matrix.defensePoints || 0);
+      }
+    }
+    fpts = Math.round(fpts * 100) / 100;
+
+    return { ...player, activeStats, pTeam, fpts };
+  });
+
   // Available players sorted and filtered
-  const filteredPlayers = allPlayers
+  const filteredPlayers = processedPlayers
     .filter(p => !draftedSet.has(p.id))
     .filter(p => {
       if (posFilter === 'ALL') return true;
       return p.pos === posFilter;
     })
-    .filter(p => p.name.toLowerCase().includes(searchQuery.toLowerCase()));
+    .filter(p => p.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    .sort((a, b) => {
+      if (statViewMode === 'projections') {
+        return (a.overallRank || 999) - (b.overallRank || 999);
+      }
+      return (b.fpts || 0) - (a.fpts || 0);
+    });
 
   const isDraftActiveOrCompleted = draftState && (draftState.status === 'active' || draftState.status === 'completed');
 
@@ -604,7 +773,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
           </div>
         </div>
 
-        {/* Countdown Ring */}
+        {/* Countdown Ring & Controls */}
         <div className="flex items-center gap-4">
           <div className="flex flex-col items-center">
             <span className={`text-3xl font-sports font-black leading-none ${isMyTurn ? 'text-white' : 'text-indigo-600'}`}>
@@ -613,12 +782,23 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
             <span className={`text-[9px] font-black uppercase tracking-wider mt-1 ${isMyTurn ? 'text-indigo-300' : 'text-gray-400'}`}>Time Left</span>
           </div>
 
-          <button
-            onClick={() => setCurrentTab('matchup')}
-            className={`px-5 py-3 rounded-2xl text-[10px] font-black uppercase tracking-wider transition-all active:scale-95 ${isMyTurn ? 'bg-white/10 text-white hover:bg-white/20' : 'bg-gray-100 text-gray-500 hover:bg-gray-200/70 border border-gray-200'}`}
-          >
-            Leave Lobby
-          </button>
+          <div className="flex flex-col gap-2 border-l border-gray-200/30 pl-4">
+            <button
+              onClick={() => setCurrentTab('matchup')}
+              className={`px-5 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all active:scale-95 ${isMyTurn ? 'bg-white/10 text-white hover:bg-white/20' : 'bg-gray-100 text-gray-500 hover:bg-gray-200/70 border border-gray-200'}`}
+            >
+              Leave Lobby
+            </button>
+            <button
+              onClick={async () => {
+                const currentStatus = draftState?.autoDraftUsers?.[currentUser?.uid] === true;
+                await toggleAutoDraftStatus(activeLeagueId, currentUser?.uid, !currentStatus);
+              }}
+              className={`px-5 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all active:scale-95 ${draftState?.autoDraftUsers?.[currentUser?.uid] === true ? 'bg-amber-400 text-amber-900 hover:bg-amber-500' : isMyTurn ? 'bg-white/10 text-white hover:bg-white/20' : 'bg-gray-100 text-gray-500 hover:bg-gray-200/70 border border-gray-200'}`}
+            >
+              {draftState?.autoDraftUsers?.[currentUser?.uid] === true ? 'Auto-Draft: ON' : 'Auto-Draft: OFF'}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -640,7 +820,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
               onClick={() => setSubTab('rosters')}
               className={`flex-1 py-3 text-[10px] font-black uppercase tracking-wider rounded-xl transition-all ${subTab === 'rosters' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
             >
-              My Roster Sheet
+              Roster Sheet
             </button>
           </div>
 
@@ -667,8 +847,17 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                         </span>
                         <div>
                           <div className="flex items-center gap-2">
-                            <span className="text-xs font-black text-gray-800">{team ? team.teamName : `Owner (${uid.slice(0, 6)})`}</span>
+                            <button
+                              onClick={() => {
+                                setSelectedRosterUserId(uid);
+                                setSubTab('rosters');
+                              }}
+                              className="text-xs font-black text-gray-800 hover:text-indigo-600 hover:underline transition-all text-left"
+                            >
+                              {team ? team.teamName : `Owner (${uid.slice(0, 6)})`}
+                            </button>
                             {isUser && <span className="text-[8px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-black uppercase tracking-wider">You</span>}
+                            {draftState?.autoDraftUsers?.[uid] === true && <span className="text-[8px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-black uppercase tracking-wider" title="Auto-Draft is ON">Auto</span>}
                           </div>
                           {lastPlayer && (
                             <span className="text-[9px] text-gray-400 font-semibold block mt-0.5">
@@ -691,16 +880,32 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
             </div>
           )}
 
-          {/* Subtab 2: My Team Roster Preview */}
+          {/* Subtab 2: Team Roster Preview */}
           {subTab === 'rosters' && (
             <div className="bg-white border border-gray-200 rounded-[32px] p-6 shadow-sm space-y-4">
-              <h3 className="font-sports text-sm font-black text-gray-900 uppercase tracking-tight">Roster Command Sheet</h3>
-              <p className="text-[11px] text-gray-400 font-semibold leading-relaxed">Ensure you fill all available positional slots during the draft process.</p>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="font-sports text-sm font-black text-gray-900 uppercase tracking-tight">Roster Command Sheet</h3>
+                  <p className="text-[11px] text-gray-400 font-semibold leading-relaxed mt-1">Review positional slots during the draft.</p>
+                </div>
+                <select
+                  value={selectedRosterUserId || currentUser?.uid}
+                  onChange={(e) => setSelectedRosterUserId(e.target.value)}
+                  className="text-xs font-black text-gray-800 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 max-w-[150px] cursor-pointer"
+                >
+                  {(leagueData.draftOrder || leagueData.members || []).map(uid => {
+                    const t = teams.find(team => team.ownerId === uid);
+                    const name = t ? t.teamName : `Owner (${uid.slice(0,6)})`;
+                    return <option key={uid} value={uid}>{uid === currentUser?.uid ? `${name} (You)` : name}</option>;
+                  })}
+                </select>
+              </div>
               
               {/* Positional Slots Grid */}
               <div className="space-y-2">
                 {(() => {
-                  const myPIds = activeRosters[currentUser?.uid] || [];
+                  const activeRosterUserId = selectedRosterUserId || currentUser?.uid;
+                  const myPIds = activeRosters[activeRosterUserId] || [];
                   const myRosterPlayers = myPIds.map(id => allPlayers.find(p => p.id === id)).filter(Boolean);
                   
                   // Grid of standard lineup slots dynamically generated from settings
@@ -773,12 +978,28 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
         <div className="lg:col-span-8 space-y-6">
           <div className="bg-white border border-gray-200 rounded-[32px] p-6 shadow-sm space-y-6">
             
-            {/* Search and Filters Header */}
+            {/* Stat View Toggle */}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-100 pb-5">
               <h3 className="font-sports text-base font-black text-gray-900 uppercase tracking-tight">Available Player Universe</h3>
               
-              {/* Filters */}
               <div className="flex flex-wrap items-center gap-3">
+                {/* Projections / Last Season Toggle */}
+                <div className="bg-gray-100 p-1 rounded-xl border border-gray-200 flex gap-1">
+                  <button
+                    onClick={() => setStatViewMode('projections')}
+                    className={`px-4 py-1.5 text-[9px] font-black uppercase tracking-wider rounded-lg transition-all ${statViewMode === 'projections' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    📊 Projections
+                  </button>
+                  <button
+                    onClick={() => setStatViewMode('lastSeason')}
+                    className={`px-4 py-1.5 text-[9px] font-black uppercase tracking-wider rounded-lg transition-all ${statViewMode === 'lastSeason' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    📋 Last Season
+                  </button>
+                </div>
+
+                {/* Search */}
                 <input 
                   type="text" 
                   placeholder="Search player name..." 
@@ -787,6 +1008,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                   className="bg-gray-50 border border-gray-200 rounded-xl px-3.5 py-2 text-xs focus:outline-none focus:border-indigo-500 shadow-inner w-44"
                 />
 
+                {/* Position Filter */}
                 <div className="bg-gray-100 p-1 rounded-xl border border-gray-200 flex gap-1">
                   {['ALL', 'F', 'D', 'G'].map(pos => (
                     <button
@@ -801,46 +1023,89 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
               </div>
             </div>
 
-            {/* Players Grid Table */}
+            {/* Players Grid Table — Combined Skater + Goalie Columns */}
             <div className="overflow-x-auto min-h-[40vh]">
-              <table className="w-full border-collapse text-left text-xs font-semibold">
+              <table className="w-full border-collapse text-left text-xs font-semibold min-w-[1100px]">
                 <thead>
                   <tr className="border-b border-gray-150 text-[10px] uppercase font-black text-gray-400 tracking-widest">
-                    <th className="py-3 px-4">#</th>
-                    <th className="py-3 px-4">Name</th>
-                    <th className="py-3 px-4">Pos</th>
-                    <th className="py-3 px-4">Team</th>
-                    <th className="py-3 px-4">Shoots</th>
-                    <th className="py-3 px-4 text-center">Action</th>
+                    <th className="py-3 px-2 sticky left-0 bg-white z-10">#</th>
+                    <th className="py-3 px-2 sticky left-8 bg-white z-10 min-w-[140px]">Name</th>
+                    <th className="py-3 px-2">Pos</th>
+                    <th className="py-3 px-2">Team</th>
+                    <th className="py-3 px-2 text-center">GP</th>
+                    {/* Skater Stats */}
+                    <th className="py-3 px-2 text-center">G</th>
+                    <th className="py-3 px-2 text-center">A</th>
+                    <th className="py-3 px-2 text-center">+/-</th>
+                    <th className="py-3 px-2 text-center">PPP</th>
+                    <th className="py-3 px-2 text-center">SHP</th>
+                    <th className="py-3 px-2 text-center">SOG</th>
+                    <th className="py-3 px-2 text-center">HIT</th>
+                    <th className="py-3 px-2 text-center">BLK</th>
+                    {/* Goalie Stats */}
+                    <th className="py-3 px-2 text-center">W</th>
+                    <th className="py-3 px-2 text-center">L</th>
+                    <th className="py-3 px-2 text-center">OTL</th>
+                    <th className="py-3 px-2 text-center">GA</th>
+                    <th className="py-3 px-2 text-center">SV</th>
+                    <th className="py-3 px-2 text-center">SO</th>
+                    {/* Fantasy */}
+                    <th className="py-3 px-2 text-center">FPTS</th>
+                    <th className="py-3 px-2 text-center">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {filteredPlayers.length === 0 ? (
                     <tr>
-                      <td colSpan="6" className="py-12 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">No available players match query.</td>
+                      <td colSpan="21" className="py-12 text-center text-gray-400 text-xs font-bold uppercase tracking-widest">No available players match query.</td>
                     </tr>
                   ) : (
-                    filteredPlayers.map((player, idx) => {
-                      const pTeam = pwhlTeams[player.teamId] || {};
+                    filteredPlayers.map((player) => {
+                      const s = player.activeStats || {};
+                      const isGoalie = player.pos === 'G';
                       return (
                         <tr key={player.id} className="hover:bg-gray-50/50">
-                          <td className="py-3 px-4 text-gray-400">{player.jersey}</td>
-                          <td className="py-3 px-4">
-                            <span className="font-black text-indigo-600 hover:underline cursor-pointer">{player.name}</span>
+                          <td className="py-3 px-2 text-gray-400 sticky left-0 bg-white">{player.jersey}</td>
+                          <td className="py-3 px-2 sticky left-8 bg-white">
+                            <span 
+                              className="font-black text-indigo-600 hover:underline cursor-pointer"
+                              onClick={() => setSelectedCardPlayer(player)}
+                            >
+                              {player.name}
+                            </span>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-2">
                             <span className={`px-2 py-0.5 rounded text-[9px] font-black border ${player.pos === 'G' ? 'bg-amber-50 text-amber-600 border-amber-100' : player.pos === 'D' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-indigo-50 text-indigo-600 border-indigo-100'}`}>
                               {player.pos}
                             </span>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-2">
                             <div className="flex items-center gap-1.5">
-                              {pTeam.logo && <img src={pTeam.logo} alt="" className="w-4.5 h-4.5 object-contain" />}
-                              <span className="font-bold text-gray-600">{pTeam.code || '-'}</span>
+                              {player.pTeam?.logo && <img src={player.pTeam.logo} alt="" className="w-4 h-4 object-contain" />}
+                              <span className="font-bold text-gray-600">{player.pTeam?.code || '-'}</span>
                             </div>
                           </td>
-                          <td className="py-3 px-4 text-gray-400">{player.shoots}</td>
-                          <td className="py-3 px-4 text-center">
+                          <td className="py-3 px-2 text-center text-gray-500">{s.gamesPlayed || '-'}</td>
+                          {/* Skater stat columns */}
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.goals || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.assists || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.plusMinus || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.powerPlayPoints || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.shortHandedPoints || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.shotsOnGoal || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.hits || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{!isGoalie ? (s.blockedShots || 0) : '-'}</td>
+                          {/* Goalie stat columns */}
+                          <td className="py-3 px-2 text-center">{isGoalie ? (s.wins || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{isGoalie ? (s.losses || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{isGoalie ? (s.overtimeLosses || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{isGoalie ? (s.goalsAgainst || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{isGoalie ? (s.shotsSaved || 0) : '-'}</td>
+                          <td className="py-3 px-2 text-center">{isGoalie ? (s.shutouts || 0) : '-'}</td>
+                          {/* Fantasy Points */}
+                          <td className="py-3 px-2 text-center font-black text-indigo-600">{player.fpts ? player.fpts.toFixed(1) : '-'}</td>
+                          {/* Action */}
+                          <td className="py-3 px-2 text-center">
                             {(() => {
                               const myRosterIds = activeRosters[currentUser?.uid] || [];
                               const posCounts = { F: 0, D: 0, G: 0 };
@@ -863,13 +1128,13 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                                 <button
                                   onClick={() => handleSelectPlayer(player.id)}
                                   disabled={!isMyTurn || isSubmitting || isLimitReached}
-                                  className={`px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-wider transition-all active:scale-95 shadow-sm ${
+                                  className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-wider transition-all active:scale-95 shadow-sm ${
                                     isMyTurn && !isLimitReached
                                       ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-indigo-600/10 hover:from-indigo-500 hover:to-violet-500' 
                                       : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed shadow-none'
                                   }`}
                                 >
-                                  {isLimitReached ? 'Limit Reached' : 'Draft Player'}
+                                  {isLimitReached ? 'Limit' : 'Draft'}
                                 </button>
                               );
                             })()}
@@ -925,6 +1190,162 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
         </div>
 
       </div>
+
+      {/* ── PLAYER CARD MODAL ── */}
+      {selectedCardPlayer && (() => {
+        const p = selectedCardPlayer;
+        const s = p.activeStats || {};
+        const teamInfo = p.pTeam || {};
+        const branding = getTeamBranding(teamInfo.code);
+        const isGoalie = p.pos === 'G';
+
+        // Check if draft button should be enabled
+        const myRosterIds = activeRosters[currentUser?.uid] || [];
+        const posCounts = { F: 0, D: 0, G: 0 };
+        myRosterIds.forEach(pId => {
+          const pl = allPlayers.find(x => x.id === pId);
+          if (pl) {
+            const pos = pl.pos;
+            if (pos === 'F' || pos === 'D' || pos === 'G') posCounts[pos]++;
+          }
+        });
+        const rosterSettings = leagueData?.rosterSettings || { bench: 4, forwards: { starters: 6, max: 10 }, defense: { starters: 4, max: 8 }, goalies: { starters: 1, max: 3 } };
+        const maxLimit = p.pos === 'F' ? (rosterSettings.forwards?.max ?? 10) :
+                         p.pos === 'D' ? (rosterSettings.defense?.max ?? 8) :
+                         (rosterSettings.goalies?.max ?? 3);
+        const isLimitReached = posCounts[p.pos] >= maxLimit;
+        const isDrafted = draftedSet.has(p.id);
+
+        return (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in" onClick={() => setSelectedCardPlayer(null)}>
+            <div 
+              className="bg-white rounded-[32px] shadow-2xl max-w-md w-full overflow-hidden animate-scale-up"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Card Header with Team Branding */}
+              <div className={`bg-gradient-to-br ${branding.gradient} p-6 text-white relative overflow-hidden`}>
+                <div className="absolute inset-0 bg-gradient-to-t from-black/30 to-transparent" />
+                <div className="relative z-10">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-black border ${p.pos === 'G' ? 'bg-amber-500/20 text-amber-200 border-amber-400/30' : p.pos === 'D' ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/30' : 'bg-white/20 text-white/90 border-white/30'}`}>
+                          {p.pos}
+                        </span>
+                        <span className="text-[10px] font-bold text-white/60">#{p.jersey}</span>
+                      </div>
+                      <h2 className="font-sports text-2xl font-black tracking-tight leading-tight">{p.name}</h2>
+                    </div>
+                    <button 
+                      onClick={() => setSelectedCardPlayer(null)}
+                      className="w-8 h-8 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/70 hover:text-white transition-all"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-3 mt-3">
+                    {teamInfo.logo && <img src={teamInfo.logo} alt="" className="w-6 h-6 object-contain" />}
+                    <span className="text-sm font-bold text-white/80">{teamInfo.name || teamInfo.code || 'Free Agent'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Player Details */}
+              <div className="p-6 space-y-5">
+                {/* Bio Row */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-gray-50 border border-gray-150 rounded-xl p-3 text-center">
+                    <span className="text-[9px] font-black text-gray-400 uppercase tracking-wider block">Shoots</span>
+                    <span className="text-sm font-black text-gray-800 block mt-0.5">{p.shoots}</span>
+                  </div>
+                  <div className="bg-gray-50 border border-gray-150 rounded-xl p-3 text-center">
+                    <span className="text-[9px] font-black text-gray-400 uppercase tracking-wider block">Height</span>
+                    <span className="text-sm font-black text-gray-800 block mt-0.5">{p.height}</span>
+                  </div>
+                  <div className="bg-gray-50 border border-gray-150 rounded-xl p-3 text-center">
+                    <span className="text-[9px] font-black text-gray-400 uppercase tracking-wider block">Rank</span>
+                    <span className="text-sm font-black text-gray-800 block mt-0.5">{p.overallRank && p.overallRank !== 999 ? `#${p.overallRank}` : '-'}</span>
+                  </div>
+                </div>
+
+                {/* Stats Section */}
+                <div>
+                  <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3">
+                    {statViewMode === 'projections' ? '📊 Projected Stats' : '📋 Last Season Stats'}
+                  </h4>
+                  {isGoalie ? (
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { label: 'GP', val: s.gamesPlayed },
+                        { label: 'W', val: s.wins },
+                        { label: 'L', val: s.losses },
+                        { label: 'OTL', val: s.overtimeLosses },
+                        { label: 'GA', val: s.goalsAgainst },
+                        { label: 'SV', val: s.shotsSaved },
+                        { label: 'SO', val: s.shutouts },
+                        { label: 'FPTS', val: p.fpts?.toFixed(1) },
+                      ].map(stat => (
+                        <div key={stat.label} className="bg-gray-50 border border-gray-100 rounded-lg p-2 text-center">
+                          <span className="text-[8px] font-black text-gray-400 uppercase block">{stat.label}</span>
+                          <span className="text-xs font-black text-gray-800 block">{stat.val || 0}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { label: 'GP', val: s.gamesPlayed },
+                        { label: 'G', val: s.goals },
+                        { label: 'A', val: s.assists },
+                        { label: '+/-', val: s.plusMinus },
+                        { label: 'PPP', val: s.powerPlayPoints },
+                        { label: 'SHP', val: s.shortHandedPoints },
+                        { label: 'SOG', val: s.shotsOnGoal },
+                        { label: 'HIT', val: s.hits },
+                        { label: 'BLK', val: s.blockedShots },
+                        { label: 'FPTS', val: p.fpts?.toFixed(1) },
+                      ].map(stat => (
+                        <div key={stat.label} className="bg-gray-50 border border-gray-100 rounded-lg p-2 text-center">
+                          <span className="text-[8px] font-black text-gray-400 uppercase block">{stat.label}</span>
+                          <span className="text-xs font-black text-gray-800 block">{stat.val || 0}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Draft Action */}
+                <div className="pt-2 border-t border-gray-100">
+                  {isDrafted ? (
+                    <div className="w-full py-3 rounded-2xl bg-gray-100 text-center text-[10px] font-black uppercase tracking-wider text-gray-400">
+                      Already Drafted
+                    </div>
+                  ) : isLimitReached ? (
+                    <div className="w-full py-3 rounded-2xl bg-amber-50 border border-amber-100 text-center text-[10px] font-black uppercase tracking-wider text-amber-600">
+                      Position Limit Reached ({p.pos})
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        handleSelectPlayer(p.id);
+                        setSelectedCardPlayer(null);
+                      }}
+                      disabled={!isMyTurn || isSubmitting}
+                      className={`w-full py-3.5 rounded-2xl text-xs font-black uppercase tracking-wider transition-all active:scale-[0.98] ${
+                        isMyTurn
+                          ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg shadow-indigo-600/20 hover:from-indigo-500 hover:to-violet-500'
+                          : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed'
+                      }`}
+                    >
+                      {isSubmitting ? '⏳ Submitting...' : isMyTurn ? `⚡ Draft ${p.name}` : 'Not Your Turn'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );

@@ -23,12 +23,10 @@ async function run() {
     // 1. Resolve draft_results.txt path
     let filePath = process.argv[2];
     if (!filePath) {
-      // Check root
       const rootPath = path.resolve(__dirname, "../draft_results.txt");
       if (fs.existsSync(rootPath)) {
         filePath = rootPath;
       } else {
-        // Fallback to home Downloads
         filePath = "/Users/justinemerick/Downloads/draft_results.txt";
       }
     }
@@ -45,11 +43,10 @@ async function run() {
       throw new Error("No data found in draft_results.txt");
     }
 
-    // Skip header
     const dataLines = lines.slice(1);
     console.log(`Loaded ${dataLines.length} draft result records.`);
 
-    // 2. Fetch all existing PWHL players for local matching (one DB read is faster than 90 queries)
+    // 2. Fetch all existing PWHL players and teams for local matching
     console.log("Fetching existing players from Firestore...");
     const playersSnap = await db.collection("pwhl_players").get();
     const existingPlayers = playersSnap.docs.map(doc => ({
@@ -57,15 +54,46 @@ async function run() {
       ref: doc.ref,
       data: doc.data()
     }));
-    console.log(`Loaded ${existingPlayers.length} existing players from Firestore.`);
+    console.log(`Loaded ${existingPlayers.length} existing player documents.`);
+
+    console.log("Fetching existing teams from Firestore...");
+    const teamsSnap = await db.collection("pwhl_teams").get();
+    const existingTeams = teamsSnap.docs.map(doc => ({
+      id: doc.id,
+      ref: doc.ref,
+      data: doc.data()
+    }));
+    console.log(`Loaded ${existingTeams.length} existing team documents.`);
+
+    // Find the max numeric player ID to generate new IDs safely
+    let maxPlayerId = 10000;
+    for (const player of existingPlayers) {
+      const pId = parseInt(player.data.player_id || player.data.id || player.id.split("_")[1], 10);
+      if (!isNaN(pId) && pId > maxPlayerId) {
+        maxPlayerId = pId;
+      }
+    }
+    console.log(`Maximum player ID in database: ${maxPlayerId}`);
 
     // 3. Match and generate operations list
     const operations = [];
     let matchCount = 0;
     let newCount = 0;
+    let deletedOrphans = 0;
+
+    // Clean up orphaned records from previous runs (any player with draftInfo but no season_id)
+    const orphans = existingPlayers.filter(ep => ep.data.draftInfo && !ep.data.season_id);
+    console.log(`Cleaning up ${orphans.length} orphaned player documents (missing season_id)...`);
+    for (const orphan of orphans) {
+      operations.push({
+        type: "delete",
+        ref: orphan.ref,
+        playerName: orphan.data.name
+      });
+      deletedOrphans++;
+    }
 
     for (const line of dataLines) {
-      // Parse CSV line
       // Format: Year,Round,Pick,Team,Player,Position,Previous_Team
       const parts = line.split(",");
       if (parts.length < 7) {
@@ -76,7 +104,7 @@ async function run() {
       const yearStr = cleanString(parts[0]);
       const roundStr = cleanString(parts[1]);
       const pickStr = cleanString(parts[2]);
-      const team = cleanString(parts[3]);
+      const teamNameInput = cleanString(parts[3]);
       const player = cleanString(parts[4]);
       const position = cleanString(parts[5]);
       const formerTeam = cleanString(parts[6]);
@@ -89,28 +117,38 @@ async function run() {
         year: parseInt(yearStr, 10),
         round: parseInt(roundStr, 10),
         pick: parseInt(pickStr, 10),
-        draftedBy: team,
+        draftedBy: teamNameInput,
         formerTeam: formerTeam
       };
 
       // Match player case-insensitively by name field or first_name + last_name
       const cleanedPlayerName = player.toLowerCase();
-      const matchedPlayer = existingPlayers.find(ep => {
+      const matchedPlayers = existingPlayers.filter(ep => {
         const epData = ep.data;
+        // Skip orphans that we are deleting
+        if (epData.draftInfo && !epData.season_id) return false;
+        
         const dbName = (epData.name || "").trim().toLowerCase();
         const dbFullName = `${epData.first_name || ""} ${epData.last_name || ""}`.trim().toLowerCase();
         return dbName === cleanedPlayerName || dbFullName === cleanedPlayerName;
       });
 
-      if (matchedPlayer) {
-        operations.push({
-          type: "update",
-          ref: matchedPlayer.ref,
-          draftInfo: draftInfo,
-          playerName: player
-        });
-        matchCount++;
+      if (matchedPlayers.length > 0) {
+        // Update ALL matched player documents (across different seasons)
+        for (const mp of matchedPlayers) {
+          operations.push({
+            type: "update",
+            ref: mp.ref,
+            draftInfo: draftInfo,
+            playerName: player
+          });
+          matchCount++;
+        }
       } else {
+        // Create new player records for all relevant seasons
+        maxPlayerId++;
+        const newPlayerId = maxPlayerId;
+
         // Map position to F, D, or G
         let positionCode = "F";
         const posUpper = position.toUpperCase();
@@ -124,25 +162,73 @@ async function run() {
         const firstName = nameParts[0] || "";
         const lastName = nameParts.slice(1).join(" ") || "";
 
-        const newDocRef = db.collection("pwhl_players").doc();
-        operations.push({
-          type: "create",
-          ref: newDocRef,
-          playerName: player,
-          data: {
-            name: player,
-            first_name: firstName,
-            last_name: lastName,
-            position: positionCode,
-            pos: positionCode,
-            draftInfo: draftInfo
+        // Determine which seasons to create this player in
+        const draftYear = parseInt(yearStr, 10);
+        const seasonsToCreate = [];
+        if (draftYear === 2024) {
+          // Ingest into seasons from 2024-25 onwards
+          seasonsToCreate.push("4", "5", "7", "8");
+        } else if (draftYear === 2025) {
+          // Ingest into seasons from 2025-26 onwards
+          seasonsToCreate.push("7", "8");
+        } else {
+          seasonsToCreate.push("7", "8");
+        }
+
+        for (const seasonId of seasonsToCreate) {
+          const docId = `${seasonId}_${newPlayerId}`;
+          const newDocRef = db.collection("pwhl_players").doc(docId);
+
+          // Find team_id and team_name for this season based on city name in draftInfo
+          let teamId = "";
+          let finalTeamName = "";
+          const cityLower = teamNameInput.toLowerCase();
+          const matchedTeam = existingTeams.find(t => {
+            return String(t.data.season_id) === String(seasonId) && 
+              (t.data.city?.toLowerCase() === cityLower || 
+               t.data.name?.toLowerCase().includes(cityLower));
+          });
+
+          if (matchedTeam) {
+            teamId = matchedTeam.data.id || "";
+            finalTeamName = matchedTeam.data.name || "";
           }
-        });
-        newCount++;
+
+          operations.push({
+            type: "create",
+            ref: newDocRef,
+            playerName: player,
+            data: {
+              id: String(newPlayerId),
+              player_id: String(newPlayerId),
+              season_id: String(seasonId),
+              name: player,
+              first_name: firstName,
+              last_name: lastName,
+              position: positionCode,
+              pos: positionCode,
+              draftInfo: draftInfo,
+              active: "1",
+              rookie: "1",
+              status: "Signed",
+              points: 0,
+              gp: 0,
+              g_w: 0,
+              a_otl: 0,
+              pm_ga: 0,
+              sog_sv: 0,
+              blk_so: 0,
+              hits: 0,
+              current_team_id: teamId,
+              team_name: finalTeamName
+            }
+          });
+          newCount++;
+        }
       }
     }
 
-    console.log(`Matched ${matchCount} existing players. Creating ${newCount} new player records.`);
+    console.log(`Matched and queued ${matchCount} updates. Queued ${newCount} creations. Queued ${deletedOrphans} deletes.`);
 
     // 4. Batched Commits (chunks of 400)
     let batch = db.batch();
@@ -154,6 +240,8 @@ async function run() {
         batch.update(op.ref, { draftInfo: op.draftInfo });
       } else if (op.type === "create") {
         batch.set(op.ref, op.data);
+      } else if (op.type === "delete") {
+        batch.delete(op.ref);
       }
       batchSize++;
 
@@ -173,6 +261,7 @@ async function run() {
     console.log("SUCCESS: Draft results ingestion completed successfully!");
     console.log(`- Updated records: ${matchCount}`);
     console.log(`- Created records: ${newCount}`);
+    console.log(`- Deleted orphaned records: ${deletedOrphans}`);
   } catch (err) {
     console.error("INGESTION FAILED WITH ERROR:", err);
     process.exit(1);

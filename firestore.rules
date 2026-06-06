@@ -63,6 +63,10 @@ service cloud.firestore {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isAdmin();
     }
+    match /pwhl_projections/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isAdmin();
+    }
     match /pwhl_teams/{document=**} {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isAdmin();

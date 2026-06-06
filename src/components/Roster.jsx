@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../firebase.js';
 import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
-import { useTimeTravel } from '../contexts/TimeTravelContext';;
+import { useTimeTravel } from '../contexts/TimeTravelContext';
+import { normalizePosition, fetchPlayerGameHistory } from '../services/pwhlService';
+import PlayerCardModal from './PlayerCardModal';
 
 export default function Roster({ activeLeagueId }) {
   const { currentUser } = useAuth();
@@ -12,6 +14,10 @@ export default function Roster({ activeLeagueId }) {
   const [myTeam, setMyTeam] = useState(null);
   const [leagueData, setLeagueData] = useState(null);
   const [playersMap, setPlayersMap] = useState({});
+  const [lockedTeamsSet, setLockedTeamsSet] = useState(new Set());
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
+  const [gameHistory, setGameHistory] = useState([]);
 
   useEffect(() => {
     if (!activeLeagueId) return;
@@ -71,8 +77,9 @@ export default function Roster({ activeLeagueId }) {
         let rawPlayers = snapActive.docs.map(d => d.data());
         let isFallback = false;
         
+        const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
+
         if (rawPlayers.length === 0 && seasons.length > 0) {
-          const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
           const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
           
           const prevRegularSeasons = seasons.filter(s => {
@@ -98,32 +105,50 @@ export default function Roster({ activeLeagueId }) {
         const teamsMap = {};
         teamsSnap.forEach(d => {
           const t = d.data();
-          teamsMap[String(t.id)] = t.code || t.name || t.id;
+          teamsMap[String(t.id)] = { code: t.code || t.name || t.id, logo: t.team_logo_url || '' };
         });
         
         let statsData = { skaters: {}, goalies: {} };
+        let pointsMap = {};
+
         if (!isFallback) {
-          const { fetchAggregatedStats } = await import('../services/statsEngine');
+          const { fetchWeeklyPlayerPoints } = await import('../services/statsEngine');
           const simDate = getSimulatedDate();
-          statsData = await fetchAggregatedStats(resolvedSeasonId, simDate);
-        }
-        
-        const statsRef = collection(db, 'pwhl_season_player_stats');
-        const seasonStatsSnap = await getDocs(statsRef);
-        const pointsMap = {};
-        seasonStatsSnap.docs.forEach(d => {
-          const data = d.data();
-          if (data.leagueId === activeLeagueId) {
-            pointsMap[data.playerId] = data.fantasyPoints || 0.0;
+          
+          let weekStartStr = "2024-01-01";
+          let weekEndStr = "2024-01-07";
+          const currentWeek = leagueData.currentWeek || 1;
+          
+          if (currentSeasonDoc && currentSeasonDoc.weeks && currentSeasonDoc.weeks.length > 0) {
+            const wk = currentSeasonDoc.weeks.find(w => w.week === currentWeek);
+            if (wk) {
+              weekStartStr = wk.start;
+              weekEndStr = wk.end;
+            }
+          } else {
+            const baseTime = new Date("2024-01-01T03:00:00-08:00").getTime();
+            const weekMs = 7 * 24 * 60 * 60 * 1000;
+            const start = new Date(baseTime + (currentWeek - 1) * weekMs);
+            const end = new Date(baseTime + currentWeek * weekMs - 1000);
+            weekStartStr = start.toISOString();
+            weekEndStr = end.toISOString();
           }
-        });
+
+          const weekStart = new Date(weekStartStr);
+          const weekEnd = new Date(weekEndStr);
+          
+          const result = await fetchWeeklyPlayerPoints(resolvedSeasonId, weekStart, weekEnd, simDate, leagueData?.scoringSettings);
+          statsData = { skaters: result.skaters, goalies: result.goalies };
+          pointsMap = result.pointsMap || {};
+        }
         
         const map = {};
         rawPlayers.forEach(p => {
           const pId = p.player_id || p.id;
           if (!pId) return;
           
-          const isGoalie = p.position === 'G';
+          const normPos = normalizePosition(p.position);
+          const isGoalie = normPos === 'G';
           let gp = 0, g_w = 0, a_otl = 0, pm_ga = 0, sog_sv = 0, blk_so = 0, hits = 0;
           let statsStr = '';
           
@@ -149,20 +174,50 @@ export default function Roster({ activeLeagueId }) {
             statsStr = isGoalie ? '0W, 0SV, 0.00GAA' : '0G, 0A, 0 +/-';
           }
           
-          const rating = p.rating || (isGoalie ? 85 : (p.position === 'D' ? 82 : 84));
+          const rating = p.rating || (isGoalie ? 85 : (normPos === 'D' ? 82 : 84));
+          const actualTeamId = String(p.current_team_id || p.team_id || '');
           
           map[String(pId)] = {
+            ...p,
             id: String(pId),
             name: p.name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unknown Player',
-            pos: p.position || 'F',
-            team: teamsMap[p.current_team_id || p.team_id] || p.team_name || 'FA',
+            pos: normPos,
+            jersey_number: p.tp_jersey_number || p.jersey_number || '',
+            teamId: actualTeamId,
+            teamCode: teamsMap[actualTeamId]?.code || p.team_name || 'FA',
+            teamLogo: teamsMap[actualTeamId]?.logo,
+            team: teamsMap[actualTeamId]?.code || p.team_name || 'FA',
             rating,
             stats: statsStr,
-            points: pointsMap[pId] || 0.0
+            points: pointsMap[pId] || 0.0,
+            raw: p
           };
         });
         
         setPlayersMap(map);
+
+        // Fetch games to determine live locks
+        const gListSnap = await getDocs(query(collection(db, 'pwhl_games'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)])));
+        const gList = gListSnap.docs.map(d => d.data());
+        
+        const simDate = getSimulatedDate();
+        const lckTeams = new Set();
+        gList.forEach(g => {
+          const gDateStr = g.date_played || g.date;
+          if (gDateStr) {
+            const gStart = new Date(`${gDateStr}T${g.time || '19:00:00'}`);
+            const nextDay1AM = new Date(gStart);
+            nextDay1AM.setDate(nextDay1AM.getDate() + 1);
+            nextDay1AM.setHours(1, 0, 0, 0);
+
+            if (simDate >= gStart && simDate < nextDay1AM) {
+              if (g.home_team) lckTeams.add(String(g.home_team));
+              if (g.visiting_team) lckTeams.add(String(g.visiting_team));
+            }
+          }
+        });
+        setLockedTeamsSet(lckTeams);
+
       } catch (err) {
         console.error("Error loading dynamic players in Roster:", err);
       }
@@ -207,215 +262,233 @@ export default function Roster({ activeLeagueId }) {
     );
   }
 
-  const rosterIds = myTeam.players || [];
+  const rosterSettings = leagueData?.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+  const fLimit = rosterSettings.forwards?.starters ?? 6;
+  const dLimit = rosterSettings.defense?.starters ?? 4;
+  const gLimit = rosterSettings.goalies?.starters ?? 1;
+
+  // Legacy fallback if activePlayers is missing (e.g., from old drafts)
+  let activeIds = myTeam.activePlayers;
+  let benchIds = myTeam.benchPlayers;
+  if (!activeIds) {
+    activeIds = [];
+    benchIds = [];
+    let fc = 0, dc = 0, gc = 0;
+    
+    (myTeam.players || []).forEach(pId => {
+      const p = playersMap[pId];
+      if (!p) { benchIds.push(pId); return; }
+      
+      let toActive = false;
+      if (p.pos === 'F' && fc < fLimit) { fc++; toActive = true; }
+      else if (p.pos === 'D' && dc < dLimit) { dc++; toActive = true; }
+      else if (p.pos === 'G' && gc < gLimit) { gc++; toActive = true; }
+
+      if (toActive) activeIds.push(pId);
+      else benchIds.push(pId);
+    });
+  } else {
+    benchIds = benchIds || [];
+  }
+
   const isPending = leagueData && (
     leagueData.status === 'pending' || 
     (leagueData.members && leagueData.members.length < leagueData.maxTeams) || 
     !leagueData.draftDate
   );
+
+  let fCount = 0, dCount = 0, gCount = 0;
   
-  // Roster Slot Mapping Schema:
-  // Forwards (6 slots), Defense (4 slots), Goalie (1 slot), Bench (4 slots)
-  const layoutSlots = [
-    { label: "Forward", key: "F_1", pos: "F" },
-    { label: "Forward", key: "F_2", pos: "F" },
-    { label: "Forward", key: "F_3", pos: "F" },
-    { label: "Forward", key: "F_4", pos: "F" },
-    { label: "Forward", key: "F_5", pos: "F" },
-    { label: "Forward", key: "F_6", pos: "F" },
-    { label: "Defense", key: "D_1", pos: "D" },
-    { label: "Defense", key: "D_2", pos: "D" },
-    { label: "Defense", key: "D_3", pos: "D" },
-    { label: "Defense", key: "D_4", pos: "D" },
-    { label: "Goalie", key: "G_1", pos: "G" },
-    { label: "Bench", key: "BN_1", pos: "BN" },
-    { label: "Bench", key: "BN_2", pos: "BN" },
-    { label: "Bench", key: "BN_3", pos: "BN" },
-    { label: "Bench", key: "BN_4", pos: "BN" }
-  ];
-
-  // Distribute active athlete IDs to matching position slots dynamically
-  const assignedPlayers = [];
-  const unusedIds = [...rosterIds];
-
-  layoutSlots.forEach(slot => {
-    let matchIdx = -1;
-    if (slot.pos !== 'BN') {
-      // Find first player ID matching starting role F/D/G
-      matchIdx = unusedIds.findIndex(id => playersMap[id]?.pos === slot.pos);
-    } else {
-      // BN matches any remaining player ID
-      matchIdx = 0;
-    }
-
-    if (matchIdx !== -1 && unusedIds.length > 0) {
-      const pId = unusedIds[matchIdx];
-      assignedPlayers.push({
-        slotLabel: slot.label,
-        slotPos: slot.pos,
-        athlete: playersMap[pId] ? { id: pId, ...playersMap[pId] } : null
-      });
-      unusedIds.splice(matchIdx, 1);
-    } else {
-      assignedPlayers.push({
-        slotLabel: slot.label,
-        slotPos: slot.pos,
-        athlete: null
-      });
-    }
+  // Resolve active players
+  const activePlayersList = activeIds.map(id => playersMap[id]).filter(Boolean);
+  activePlayersList.forEach(p => {
+    if (p.pos === 'F') fCount++;
+    if (p.pos === 'D') dCount++;
+    if (p.pos === 'G') gCount++;
   });
 
-  const starters = assignedPlayers.filter(slot => slot.slotPos !== 'BN');
-  const bench = assignedPlayers.filter(slot => slot.slotPos === 'BN');
+  // Sort Active Roster: Forwards -> Defense -> Goalies
+  activePlayersList.sort((a, b) => {
+    const posOrder = { 'F': 1, 'D': 2, 'G': 3 };
+    return (posOrder[a.pos] || 9) - (posOrder[b.pos] || 9);
+  });
 
-  const renderAthleteCard = (slot, idx) => {
-    const athlete = slot.athlete;
-    const isBench = slot.slotPos === 'BN';
-    
-    // Choose theme colors based on position
-    let posColorClass = "border-indigo-100 bg-indigo-50 text-indigo-600";
-    let accentBorder = "hover:border-indigo-300";
-    if (slot.slotPos === 'D') {
-      posColorClass = "border-emerald-100 bg-emerald-50 text-emerald-600";
-      accentBorder = "hover:border-emerald-300";
-    } else if (slot.slotPos === 'G') {
-      posColorClass = "border-purple-100 bg-purple-50 text-purple-600";
-      accentBorder = "hover:border-purple-300";
-    } else if (isBench) {
-      posColorClass = "border-gray-200 bg-gray-50 text-gray-400";
-      accentBorder = "hover:border-gray-300";
+  const benchPlayersList = benchIds.map(id => playersMap[id]).filter(Boolean);
+
+  const getTeamBranding = (teamCode) => {
+    switch (teamCode) {
+      case 'BOS':
+        return { gradient: 'from-emerald-800 to-slate-900', borderColor: 'border-emerald-500/35', glowColor: 'shadow-emerald-500/10' };
+      case 'MIN':
+        return { gradient: 'from-purple-800 to-slate-900', borderColor: 'border-purple-500/35', glowColor: 'shadow-purple-500/10' };
+      case 'MTL':
+        return { gradient: 'from-rose-900 to-slate-900', borderColor: 'border-rose-500/35', glowColor: 'shadow-rose-500/10' };
+      case 'NY':
+        return { gradient: 'from-teal-800 to-slate-900', borderColor: 'border-teal-500/35', glowColor: 'shadow-teal-500/10' };
+      case 'OTT':
+        return { gradient: 'from-red-800 to-slate-900', borderColor: 'border-red-500/35', glowColor: 'shadow-red-500/10' };
+      case 'TOR':
+        return { gradient: 'from-blue-900 to-slate-900', borderColor: 'border-blue-500/35', glowColor: 'shadow-blue-500/10' };
+      default:
+        return { gradient: 'from-indigo-900 to-slate-900', borderColor: 'border-indigo-500/35', glowColor: 'shadow-indigo-500/10' };
     }
-
-    if (!athlete) {
-      return (
-        <div key={idx} className="bg-white/50 border border-dashed border-gray-200 rounded-[24px] p-4 flex flex-col items-center justify-center text-center min-h-[140px] shadow-sm select-none">
-          <span className={`text-[9px] font-black uppercase px-2.5 py-1 rounded-lg border tracking-widest ${posColorClass} mb-3`}>
-            {slot.slotPos}
-          </span>
-          <span className="text-xs font-bold text-gray-300 italic">Empty Slot</span>
-          <span className="text-[9px] uppercase tracking-wider font-black text-gray-300 mt-1">Unassigned</span>
-        </div>
-      );
-    }
-
-    return (
-      <div 
-        key={athlete.id || idx} 
-        className={`bg-white border border-gray-200 rounded-[24px] p-4 flex flex-col justify-between shadow-sm relative overflow-hidden transition-all duration-200 hover:shadow-md ${accentBorder} min-h-[155px]`}
-      >
-        {/* Top bar: Position and OVR */}
-        <div className="flex justify-between items-start">
-          <span className={`text-[9px] font-black uppercase px-2.5 py-1 rounded-lg border tracking-widest shadow-inner ${posColorClass}`}>
-            {slot.slotPos}
-          </span>
-          
-          <div className="text-right">
-            <span className="font-sports text-lg font-bold text-gray-800 leading-none block">{athlete.rating}</span>
-            <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest mt-0.5 block">OVR</span>
-          </div>
-        </div>
-
-        {/* Center: Avatar/Emoji and Name */}
-        <div className="my-3 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center text-xl shadow-inner shrink-0">
-            {slot.slotPos === 'G' ? '🥅' : '🏒'}
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9px] font-black text-gray-500 bg-gray-50 px-1 rounded border border-gray-200">{athlete.team}</span>
-              <span className="text-xs font-black text-gray-800 truncate block">{athlete.name}</span>
-            </div>
-            <span className="text-[9px] text-gray-400 font-bold uppercase tracking-wider block mt-1 truncate">{athlete.stats}</span>
-          </div>
-        </div>
-
-        {/* Bottom bar: Points and swap action */}
-        <div className="flex justify-between items-center pt-2.5 border-t border-gray-100">
-          <div>
-            <span className="text-sm font-sports font-bold text-indigo-600 leading-none">{athlete.points.toFixed(1)}</span>
-            <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest ml-1">pts</span>
-          </div>
-
-          <button 
-            onClick={() => alert("Move option triggered! Roster management is automated.")}
-            disabled={isPending}
-            className="w-8 h-8 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-xs font-bold text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 active:scale-95 transition-all"
-          >
-            ⇄
-          </button>
-        </div>
-      </div>
-    );
   };
 
-  const renderSlotRow = (slot, idx) => {
-    const athlete = slot.athlete;
-    const isBench = slot.slotPos === 'BN';
-
-    return (
-      <div 
-        key={slot.key || idx} 
-        className={`flex items-center gap-3.5 p-3.5 rounded-2xl border transition-all duration-200 ${athlete ? 'bg-white border-gray-200 shadow-sm' : 'border-dashed border-gray-300 bg-white/50'}`}
-      >
-        {/* Position Tag */}
-        <div className="w-12 flex justify-center">
-          <span className={`text-[10px] font-black uppercase px-2 py-1.5 rounded-xl border tracking-widest flex items-center justify-center w-full shadow-inner ${isBench ? 'bg-gray-50 border-gray-200 text-gray-400' : 'bg-indigo-50 border-indigo-100 text-indigo-600'}`}>
-            {slot.slotPos}
-          </span>
-        </div>
-
-        {/* Player Info */}
-        {athlete ? (
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-[9px] font-black text-gray-500 bg-gray-50 px-1.5 py-0.5 rounded border border-gray-200">
-                {athlete.team}
-              </span>
-              <span className="text-xs font-black text-gray-800 truncate">{athlete.name}</span>
-            </div>
-            <div className="flex justify-between items-center mt-1">
-              <span className="text-[9px] text-gray-400 font-black uppercase tracking-wider truncate max-w-[200px]">
-                {athlete.stats}
-              </span>
-              <span className="text-[10px] font-black text-indigo-600">{athlete.points.toFixed(1)} pts</span>
-            </div>
-          </div>
-        ) : (
-          <div className="flex-1 flex justify-between items-center text-xs font-bold text-gray-300 italic">
-            <span>Empty Slot</span>
-            <span className="text-[9px] uppercase tracking-wider font-black text-gray-300">Unassigned</span>
-          </div>
-        )}
-
-        {/* Quick Actions (Move) */}
-        {athlete && (
-          <button 
-            onClick={() => alert("Move option triggered! Drag/drop and roster bench management is automated.")}
-            disabled={isPending}
-            className="w-8 h-8 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-xs font-bold text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 active:scale-95 transition-all"
-          >
-            ⇄
-          </button>
-        )}
-      </div>
-    );
+  const handlePlayerClick = async (p) => {
+    const owner = myTeam ? { label: myTeam.name, color: 'bg-indigo-50 text-indigo-600 border-indigo-200' } : null;
+    let gp = 0, g_w = 0, a_otl = 0, pm_ga = 0, sog_sv = 0, blk_so = 0, hits = 0;
+    if (p.raw) {
+      gp = p.raw.gp || 0;
+      g_w = p.raw.g_w || 0;
+      a_otl = p.raw.a_otl || 0;
+      pm_ga = p.raw.pm_ga || 0;
+      sog_sv = p.raw.sog_sv || 0;
+      blk_so = p.raw.blk_so || 0;
+      hits = p.raw.hits || 0;
+    }
+    const tCode = p.teamCode || p.team || 'FA';
+    const playerObj = {
+      ...p,
+      owner,
+      gp, g_w, a_otl, pm_ga, sog_sv, blk_so, hits
+    };
+    setSelectedCardPlayer(playerObj);
+    setGameHistory([]);
+    const history = await fetchPlayerGameHistory(p.id, p.pos, tCode, activeSeasonId, getSimulatedDate(), leagueData?.scoringSettings);
+    setGameHistory(history);
   };
+
+  const handleMovePlayer = async (playerId, target) => {
+    if (isPending || isUpdating) return;
+    const p = playersMap[playerId];
+    if (p && lockedTeamsSet.has(p.teamId)) {
+      alert("This player's team currently has a live game. They are locked until 1:00 AM.");
+      return;
+    }
+    if (target === 'active') {
+      if (p.pos === 'F' && fCount >= fLimit) { alert("Maximum active Forwards reached."); return; }
+      if (p.pos === 'D' && dCount >= dLimit) { alert("Maximum active Defensemen reached."); return; }
+      if (p.pos === 'G' && gCount >= gLimit) { alert("Maximum active Goalies reached."); return; }
+    }
+    setIsUpdating(true);
+    try {
+      const { moveRosterPlayer } = await import('../services/leagueService');
+      await moveRosterPlayer(activeLeagueId, myTeam.id, playerId, target, rosterSettings);
+      setMyTeam(prev => {
+        const next = { ...prev };
+        let newActive = (next.activePlayers || next.players || []).filter(id => id !== playerId);
+        let newBench = (next.benchPlayers || []).filter(id => id !== playerId);
+        if (target === 'active') newActive.push(playerId);
+        else newBench.push(playerId);
+        next.activePlayers = newActive;
+        next.benchPlayers = newBench;
+        return next;
+      });
+    } catch (err) {
+      console.error("Error moving player:", err);
+      alert(err.message);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const renderTable = (playersToRender, isBenchTable) => (
+    <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm bg-white mb-8">
+      <table className="w-full text-left border-collapse min-w-[600px]">
+        <thead>
+          <tr className="bg-gray-50 border-b border-gray-200">
+            <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Pos</th>
+            <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Player</th>
+            <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Team</th>
+            <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400">Pts</th>
+            <th className="px-4 py-3 text-[10px] font-black uppercase tracking-widest text-gray-400 text-right">Action</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {playersToRender.length === 0 && (
+            <tr>
+              <td colSpan="5" className="px-4 py-8 text-center text-xs font-bold text-gray-400 italic">
+                {isBenchTable ? 'No players on the bench.' : 'No active players.'}
+              </td>
+            </tr>
+          )}
+          {playersToRender.map(p => {
+            const isLocked = lockedTeamsSet.has(p.teamId);
+            const posFull = isBenchTable ? (
+              (p.pos === 'F' && fCount >= fLimit) ||
+              (p.pos === 'D' && dCount >= dLimit) ||
+              (p.pos === 'G' && gCount >= gLimit)
+            ) : false;
+
+            const disableMove = isPending || isUpdating || isLocked || posFull;
+            let posColor = "bg-gray-100 text-gray-600";
+            if (p.pos === 'F') posColor = "bg-indigo-50 text-indigo-600 border-indigo-100";
+            if (p.pos === 'D') posColor = "bg-emerald-50 text-emerald-600 border-emerald-100";
+            if (p.pos === 'G') posColor = "bg-purple-50 text-purple-600 border-purple-100";
+
+            return (
+              <tr key={p.id} className="hover:bg-gray-50/50 transition-colors">
+                <td className="px-4 py-3 whitespace-nowrap w-16">
+                  <span className={`text-[10px] font-black uppercase px-2 py-1 rounded border tracking-widest ${posColor}`}>
+                    {p.pos}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-2 cursor-pointer group" onClick={() => handlePlayerClick(p)}>
+                    <span className="text-sm font-bold text-gray-900 group-hover:text-indigo-600 transition-colors">{p.name}</span>
+                    {isLocked && <span title="Locked due to live game" className="text-xs">🔒</span>}
+                  </div>
+                  <div className="text-[10px] text-gray-500 font-semibold tracking-wide uppercase mt-0.5 truncate max-w-[250px]">
+                    {p.stats}
+                  </div>
+                </td>
+                <td className="px-4 py-3">
+                  <span className="text-[10px] font-black text-gray-600 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200">
+                    {p.team}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className="text-sm font-sports font-bold text-indigo-600">{p.points.toFixed(1)}</span>
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <button 
+                    onClick={() => handleMovePlayer(p.id, isBenchTable ? 'active' : 'bench')}
+                    disabled={disableMove}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all border ${disableMove ? 'bg-gray-50 border-gray-200 text-gray-300 cursor-not-allowed' : 'bg-white border-gray-200 text-gray-600 hover:border-indigo-300 hover:text-indigo-600 shadow-sm hover:shadow active:scale-95'}`}
+                  >
+                    {isLocked ? 'Locked' : (isBenchTable ? (posFull ? 'Limit Reached' : 'Move to Active') : 'Move to Bench')}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 
   return (
     <div className="font-sans select-none antialiased">
-      
-      {/* ── HEADER ── */}
-      <header className="mb-6">
-        <span className="text-[10px] uppercase font-black tracking-widest text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-full border border-indigo-100 shadow-sm shadow-indigo-100/10">
-          {myTeam.teamName}
-        </span>
-        <h1 className="font-sports text-3xl font-black mt-3 tracking-tight text-gray-900">
-          My Roster
-        </h1>
-        <p className="text-xs text-gray-400 font-semibold tracking-wide mt-0.5">Manage your active starting lineup and bench slots.</p>
+      <header className="mb-6 flex justify-between items-end">
+        <div>
+          <span className="text-[10px] uppercase font-black tracking-widest text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-full border border-indigo-100 shadow-sm shadow-indigo-100/10">
+            {myTeam.teamName}
+          </span>
+          <h1 className="font-sports text-3xl font-black mt-3 tracking-tight text-gray-900">
+            My Roster
+          </h1>
+          <p className="text-xs text-gray-400 font-semibold tracking-wide mt-0.5">Manage your active starting lineup and bench slots.</p>
+        </div>
+        <div className="text-right">
+           <div className="text-[10px] uppercase tracking-widest text-gray-400 font-black mb-1">Active Slots</div>
+           <div className="flex gap-2">
+             <span className={`text-xs font-bold px-2 py-1 rounded ${fCount >= fLimit ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-indigo-50 text-indigo-600 border border-indigo-100'}`}>F: {fCount}/{fLimit}</span>
+             <span className={`text-xs font-bold px-2 py-1 rounded ${dCount >= dLimit ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-emerald-50 text-emerald-600 border border-emerald-100'}`}>D: {dCount}/{dLimit}</span>
+             <span className={`text-xs font-bold px-2 py-1 rounded ${gCount >= gLimit ? 'bg-red-50 text-red-600 border border-red-100' : 'bg-purple-50 text-purple-600 border border-purple-100'}`}>G: {gCount}/{gLimit}</span>
+           </div>
+        </div>
       </header>
 
-      {/* ── CENTRAL LOCKED BANNER (Pre-Draft) ── */}
       {isPending && (
         <div className="mb-6 p-4.5 bg-indigo-50 border border-indigo-100 rounded-3xl flex items-center gap-3.5 animate-scale-up">
           <div className="w-10 h-10 rounded-2xl bg-white border border-indigo-100 flex items-center justify-center text-xl text-indigo-600 shadow-sm animate-pulse">
@@ -428,68 +501,23 @@ export default function Roster({ activeLeagueId }) {
         </div>
       )}
 
-      {/* ── ROSTER RESPONSIVE DESKTOP SPLIT GRID ── */}
-      <div className={`${isPending ? 'blur-[1.5px] opacity-45 pointer-events-none' : ''} transition-all duration-300 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start`}>
-        
-        {/* LEFT COLUMN: ACTIVE STARTERS (lg:col-span-8) */}
-        <div className="lg:col-span-8 space-y-4">
-          <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-1 hidden lg:block">⛸️ Active Starting Lineup</h3>
-          
-          {/* Mobile compact lists display */}
-          <div className="block md:hidden space-y-3">
-            {starters.map((slot, idx) => renderSlotRow(slot, idx))}
-          </div>
-
-          {/* Desktop Visual Cards Grids */}
-          <div className="hidden md:block space-y-6">
-            
-            {/* Forwards Section */}
-            <div>
-              <h4 className="text-[10px] font-black uppercase text-indigo-600 bg-indigo-50 border border-indigo-100 px-3.5 py-1.5 rounded-xl inline-block mb-3.5 tracking-widest shadow-sm">⚡ Starting Forwards</h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {starters.filter(s => s.slotPos === 'F').map((slot, idx) => renderAthleteCard(slot, idx))}
-              </div>
-            </div>
-
-            {/* Defense Section */}
-            <div>
-              <h4 className="text-[10px] font-black uppercase text-emerald-600 bg-emerald-50 border border-emerald-100 px-3.5 py-1.5 rounded-xl inline-block mb-3.5 tracking-widest shadow-sm">🛡️ Starting Defense</h4>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {starters.filter(s => s.slotPos === 'D').map((slot, idx) => renderAthleteCard(slot, idx))}
-              </div>
-            </div>
-
-            {/* Goalie Section */}
-            <div>
-              <h4 className="text-[10px] font-black uppercase text-purple-600 bg-purple-50 border border-purple-100 px-3.5 py-1.5 rounded-xl inline-block mb-3.5 tracking-widest shadow-sm">🥅 Starting Goalie</h4>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {starters.filter(s => s.slotPos === 'G').map((slot, idx) => renderAthleteCard(slot, idx))}
-              </div>
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* RIGHT COLUMN: FRANCHISE BENCH (lg:col-span-4) */}
-        <div className="lg:col-span-4 space-y-4">
-          <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-1 hidden lg:block">🛋️ Roster Bench</h3>
-          
-          {/* Mobile lists display */}
-          <div className="block md:hidden space-y-3">
-            {bench.map((slot, idx) => renderSlotRow(slot, idx))}
-          </div>
-
-          {/* Desktop Visual Card Grid */}
-          <div className="hidden md:block">
-            <div className="grid grid-cols-1 gap-4">
-              {bench.map((slot, idx) => renderAthleteCard(slot, idx))}
-            </div>
-          </div>
-        </div>
-        
+      <div className={`${isPending ? 'blur-[1.5px] opacity-45 pointer-events-none' : ''} transition-all duration-300`}>
+        <h3 className="text-sm font-black uppercase tracking-wider text-gray-900 mb-3 ml-1 flex items-center gap-2">
+          <span>⛸️</span> Active Roster
+        </h3>
+        {renderTable(activePlayersList, false)}
+        <h3 className="text-sm font-black uppercase tracking-wider text-gray-900 mb-3 ml-1 flex items-center gap-2 mt-4">
+          <span>🛋️</span> Bench
+        </h3>
+        {renderTable(benchPlayersList, true)}
       </div>
 
+      <PlayerCardModal 
+        player={selectedCardPlayer} 
+        gameHistory={gameHistory} 
+        teamBranding={selectedCardPlayer ? getTeamBranding(selectedCardPlayer.teamCode) : {}} 
+        onClose={() => setSelectedCardPlayer(null)} 
+      />
     </div>
   );
 }

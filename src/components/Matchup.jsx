@@ -3,6 +3,7 @@ import { db } from '../firebase.js';
 import { doc, getDoc, collection, getDocs, query, where, updateDoc } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
+import PlayerCardModal from './PlayerCardModal';
 
 export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const { currentUser } = useAuth();
@@ -13,15 +14,38 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const [loading, setLoading] = useState(true);
   const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0, seconds: 0, totalMs: 0 });
   const [isDraftDetailsOpen, setIsDraftDetailsOpen] = useState(false);
+  const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
 
   const [weeklyMatchups, setWeeklyMatchups] = useState([]);
   const [matchupsLoading, setMatchupsLoading] = useState(true);
   const [playerStats, setPlayerStats] = useState({});
+  const [dailyPlayerStats, setDailyPlayerStats] = useState({});
+  const [selectedMatchupDate, setSelectedMatchupDate] = useState(null);
+  const [matchupWeekBounds, setMatchupWeekBounds] = useState({ start: null, end: null });
+  const [pwhlGames, setPwhlGames] = useState([]);
 
   const [playersMap, setPlayersMap] = useState({});
   const [seasonWeeks, setSeasonWeeks] = useState([]);
   const [isOffWeek, setIsOffWeek] = useState(false);
   const [weekDateRange, setWeekDateRange] = useState('');
+  const [resolvedCurrentWeek, setResolvedCurrentWeek] = useState(1);
+
+  useEffect(() => {
+    if (!leagueData) return;
+    let cw = leagueData.currentWeek || 1;
+    if (seasonWeeks && seasonWeeks.length > 0) {
+      const simDateObj = getSimulatedDate();
+      const matchedWeek = seasonWeeks.find(w => {
+        const s = new Date(w.start);
+        const e = new Date(w.end);
+        return simDateObj >= s && simDateObj <= e;
+      });
+      if (matchedWeek) {
+        cw = matchedWeek.week;
+      }
+    }
+    setResolvedCurrentWeek(cw);
+  }, [leagueData, seasonWeeks, getSimulatedDate]);
 
   useEffect(() => {
     if (!activeLeagueId) return;
@@ -97,24 +121,40 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
         const teamsMap = {};
         teamsSnap.forEach(d => {
           const t = d.data();
-          teamsMap[String(t.id)] = t.code || t.name || t.id;
+          teamsMap[String(t.id)] = { code: t.code || t.name || t.id, logo: t.team_logo_url || '' };
         });
         
         const map = {};
         rawPlayers.forEach(p => {
           const pId = p.player_id || p.id;
           if (!pId) return;
-          const rating = p.rating || (p.position === 'G' ? 85 : (p.position === 'D' ? 82 : 84));
-          map[String(pId)] = {
-            id: String(pId),
+          const cleanId = String(pId);
+          const actualTeamId = p.current_team_id || p.team_id;
+          
+          let normPos = p.position || 'F';
+          if (normPos === 'C' || normPos === 'LW' || normPos === 'RW') normPos = 'F';
+          else if (normPos === 'LD' || normPos === 'RD') normPos = 'D';
+          
+          map[cleanId] = {
+            ...p,
+            id: cleanId,
             name: p.name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unknown Player',
-            pos: p.position || 'F',
-            team: teamsMap[p.current_team_id || p.team_id] || p.team_name || 'FA',
+            pos: normPos,
+            jersey_number: p.tp_jersey_number || p.jersey_number || '',
+            teamCode: teamsMap[actualTeamId]?.code || p.team_name || 'FA',
+            teamLogo: teamsMap[actualTeamId]?.logo,
+            team: teamsMap[actualTeamId]?.code || p.team_name || 'FA',
             rating
           };
         });
         
         setPlayersMap(map);
+        
+        // Fetch schedule to determine daily game statuses
+        const gamesQuery = query(collection(db, 'pwhl_games'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
+        const gamesSnap = await getDocs(gamesQuery);
+        setPwhlGames(gamesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+
       } catch (err) {
         console.error("Error loading season/players in Matchup:", err);
       }
@@ -126,13 +166,12 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   // Fetch matchups and player stats when leagueData updates
   useEffect(() => {
     if (!activeLeagueId || !leagueData) return;
-    const currentWeek = leagueData.currentWeek || 1;
     const matchupsRef = collection(db, `fantasy_leagues/${activeLeagueId}/matchups`);
     setMatchupsLoading(true);
     
     getDocs(matchupsRef).then((snap) => {
       const allMatchups = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      const filtered = allMatchups.filter(m => m.week === currentWeek);
+      const filtered = allMatchups.filter(m => m.week === resolvedCurrentWeek);
       setWeeklyMatchups(filtered);
       setMatchupsLoading(false);
     }).catch(err => {
@@ -140,21 +179,68 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       setMatchupsLoading(false);
     });
 
-    // Fetch player fantasy points for this league
-    const statsRef = collection(db, 'pwhl_season_player_stats');
-    getDocs(statsRef).then((snap) => {
-      const statsMap = {};
-      snap.docs.forEach(d => {
-        const data = d.data();
-        if (data.leagueId === activeLeagueId) {
-          statsMap[data.playerId] = data.fantasyPoints || 0.0;
+    // Fetch player fantasy points for the current matchup week
+    const loadPoints = async () => {
+      try {
+        const { fetchWeeklyPlayerPoints } = await import('../services/statsEngine');
+        const simDate = getSimulatedDate();
+        const resolvedSeasonId = activeSeasonId ? String(activeSeasonId) : '5';
+
+        let weekStartStr = "2024-01-01";
+        let weekEndStr = "2024-01-07";
+        
+        if (seasonWeeks && seasonWeeks.length > 0) {
+          const wk = seasonWeeks.find(w => w.week === resolvedCurrentWeek);
+          if (wk) {
+            weekStartStr = wk.start;
+            weekEndStr = wk.end;
+          }
+        } else {
+          const baseTime = new Date("2024-01-01T03:00:00-08:00").getTime();
+          const weekMs = 7 * 24 * 60 * 60 * 1000;
+          const start = new Date(baseTime + (resolvedCurrentWeek - 1) * weekMs);
+          const end = new Date(baseTime + resolvedCurrentWeek * weekMs - 1000);
+          weekStartStr = start.toISOString();
+          weekEndStr = end.toISOString();
         }
-      });
-      setPlayerStats(statsMap);
-    }).catch(err => {
-      console.error("Error loading player stats:", err);
-    });
-  }, [activeLeagueId, leagueData]);
+
+        const weekStart = new Date(weekStartStr);
+        const weekEnd = new Date(weekEndStr);
+        
+        setMatchupWeekBounds({ start: weekStart, end: weekEnd });
+        
+        // Let selectedMatchupDate float, BUT default to simDate if null.
+        let targetDate = selectedMatchupDate || simDate;
+        
+        // IMPORTANT: we should only auto-clamp if targetDate is out of bounds of the *newly loaded* week.
+        // If the user hasn't clicked arrows, selectedMatchupDate is null, so it falls to simDate.
+        // The simDate determines the resolvedCurrentWeek, so it will naturally fall within week bounds!
+        if (targetDate < weekStart) targetDate = weekStart;
+        if (targetDate > weekEnd) targetDate = weekEnd;
+        
+        if (!selectedMatchupDate || targetDate.getTime() !== selectedMatchupDate.getTime()) {
+          setSelectedMatchupDate(targetDate);
+        }
+
+        const dayStart = new Date(targetDate);
+        dayStart.setHours(0, 0, 0, 0);
+        const dayEnd = new Date(targetDate);
+        dayEnd.setHours(23, 59, 59, 999);
+        
+        // 1. Fetch weekly points for the top scoreboard
+        const weeklyResult = await fetchWeeklyPlayerPoints(resolvedSeasonId, weekStart, weekEnd, simDate, leagueData?.scoringSettings);
+        setPlayerStats(weeklyResult.pointsMap || {});
+
+        // 2. Fetch daily points for the side-by-side roster comparison
+        const dailyResult = await fetchWeeklyPlayerPoints(resolvedSeasonId, dayStart, dayEnd, simDate, leagueData?.scoringSettings);
+        setDailyPlayerStats(dailyResult.pointsMap || {});
+      } catch (err) {
+        console.error("Error loading player points:", err);
+      }
+    };
+    
+    loadPoints();
+  }, [activeLeagueId, leagueData, activeSeasonId, seasonWeeks, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek]);
 
   useEffect(() => {
     if (!leagueData || !leagueData.draftDate) return;
@@ -179,13 +265,12 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     return () => clearInterval(interval);
   }, [leagueData]);
 
-  // Resolve week date range and off-week status when seasonWeeks/currentWeek updates
+  // Resolve week date range and off-week status when seasonWeeks/resolvedCurrentWeek updates
   useEffect(() => {
     if (!leagueData) return;
-    const currentWeek = leagueData.currentWeek || 1;
     
     if (seasonWeeks && seasonWeeks.length > 0) {
-      const wk = seasonWeeks.find(w => w.week === currentWeek);
+      const wk = seasonWeeks.find(w => w.week === resolvedCurrentWeek);
       if (wk) {
         setIsOffWeek(!!wk.isOffWeek);
         const start = new Date(wk.start);
@@ -200,8 +285,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     // Fallback date calculation
     const baseTime = new Date("2024-01-01T03:00:00-08:00").getTime();
     const weekMs = 7 * 24 * 60 * 60 * 1000;
-    const start = new Date(baseTime + (currentWeek - 1) * weekMs);
-    const end = new Date(baseTime + currentWeek * weekMs - 1000);
+    const start = new Date(baseTime + (resolvedCurrentWeek - 1) * weekMs);
+    const end = new Date(baseTime + resolvedCurrentWeek * weekMs - 1000);
     const options = { month: 'short', day: 'numeric' };
     setWeekDateRange(`${start.toLocaleDateString('en-US', options)} - ${end.toLocaleDateString('en-US', options)}`);
   }, [leagueData, seasonWeeks]);
@@ -235,6 +320,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     (leagueData.members && leagueData.members.length < leagueData.maxTeams) || 
     !leagueData.draftDate
   );
+  const isDrafting = leagueData?.status === 'drafting';
   const isCommissioner = leagueData && currentUser && currentUser.uid === leagueData.ownerId;
   const hasDraftDate = leagueData && !!leagueData.draftDate;
   
@@ -268,8 +354,18 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const buildStartingLineups = () => {
     if (!myTeam || !resolvedOppTeam) return [];
     
-    const myPlayers = myTeam.players || [];
-    const oppPlayers = resolvedOppTeam.players || [];
+    // Combine active and bench players if explicitly set, else fallback to players array
+    const getTeamPlayerIds = (t) => {
+      const active = t.activePlayers || [];
+      const bench = t.benchPlayers || [];
+      const combined = [...active, ...bench];
+      const source = combined.length > 0 ? combined : (t.players || []);
+      // Extract robust string ID whether it's stored as primitive or object
+      return source.map(p => String(typeof p === 'object' && p !== null ? (p.id || p.player_id || p) : p));
+    };
+
+    const myPlayers = getTeamPlayerIds(myTeam);
+    const oppPlayers = getTeamPlayerIds(resolvedOppTeam);
 
     const slots = [
       { label: "F", pos: "F" },
@@ -297,7 +393,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       return "F";
     };
 
-    return slots.map((slot) => {
+    const baseLineups = slots.map((slot) => {
       const myMatchIdx = myUnused.findIndex(id => {
         const info = playersMap[id] || {};
         const pos = info.pos || getMockPos(id);
@@ -327,6 +423,21 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
         oppPlayer: oppP ? { id: oppP, ...playersMap[oppP] } : null
       };
     });
+
+    const benchLineups = [];
+    const maxBenchLen = Math.max(myUnused.length, oppUnused.length);
+    for (let i = 0; i < maxBenchLen; i++) {
+      const myP = myUnused[i];
+      const oppP = oppUnused[i];
+      benchLineups.push({
+        slotLabel: "BN",
+        slotPos: "BN",
+        myPlayer: myP ? { id: myP, ...playersMap[myP] } : null,
+        oppPlayer: oppP ? { id: oppP, ...playersMap[oppP] } : null
+      });
+    }
+
+    return [...baseLineups, ...benchLineups];
   };
 
   const comparisonLineups = buildStartingLineups();
@@ -357,11 +468,11 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       </div>
 
       {/* ── 1. DRAFT STATUS BANNER/CARD AT THE TOP (Pre-Draft State) ── */}
-      {isPending && (
+      {(isPending || isDrafting) && (
         <div className="mb-8 animate-scale-up">
           
           {/* STATE 1: WAITING FOR LEAGUE TO FILL */}
-          {!isFull && (
+          {!isFull && !isDrafting && (
             <div className="w-full bg-white border border-gray-200 rounded-[28px] p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="flex items-center gap-4 text-left">
                 <div className="w-14 h-14 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-2xl text-indigo-600 shadow-inner">
@@ -406,7 +517,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           )}
 
           {/* STATE 2: LEAGUE FULL, DRAFT NOT SCHEDULED */}
-          {isFull && !hasDraftDate && (
+          {isFull && !hasDraftDate && !isDrafting && (
             <div className="w-full bg-white border border-amber-200 rounded-[28px] p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="flex items-center gap-4 text-left">
                 <div className="w-14 h-14 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center text-2xl text-amber-500 animate-bounce">
@@ -446,7 +557,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           )}
 
           {/* STATE 3: DRAFT SCHEDULED */}
-          {isFull && hasDraftDate && !isDraftImminent && (
+          {isFull && hasDraftDate && !isDraftImminent && !isDrafting && (
             <div className="w-full bg-white border border-gray-200 rounded-[28px] p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="flex items-center gap-4 text-left">
                 <div className="w-14 h-14 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-2xl text-indigo-600">
@@ -489,7 +600,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           )}
 
           {/* STATE 4: DRAFT IMMINENT */}
-          {isFull && hasDraftDate && isDraftImminent && (
+          {isFull && hasDraftDate && isDraftImminent && !isDrafting && (
             <div className="w-full bg-white border-2 border-indigo-500 rounded-[28px] p-6 shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="flex items-center gap-4 text-left">
                 <div className="w-14 h-14 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-2xl text-indigo-600 animate-pulse">
@@ -508,6 +619,30 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                 className="px-8 py-4.5 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-2xl text-xs font-black uppercase tracking-wider shadow-xl shadow-indigo-600/20 active:scale-95 transition-transform animate-pulse"
               >
                 ENTER DRAFT
+              </button>
+            </div>
+          )}
+
+          {/* STATE 5: ACTIVE DRAFT */}
+          {isDrafting && (
+            <div className="w-full bg-white border-2 border-emerald-500 rounded-[28px] p-6 shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4 animate-scale-up">
+              <div className="flex items-center gap-4 text-left">
+                <div className="w-14 h-14 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-2xl text-emerald-500 animate-pulse">
+                  ⚡
+                </div>
+                <div>
+                  <h2 className="font-sports text-xl font-black text-gray-900 leading-tight text-emerald-600">Draft is LIVE!</h2>
+                  <p className="text-xs text-gray-450 font-semibold mt-1">
+                    The league draft is actively in progress. Re-enter now to make your picks!
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setCurrentTab('draft_room')}
+                className="px-8 py-4.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-2xl text-xs font-black uppercase tracking-wider shadow-xl shadow-emerald-600/20 active:scale-95 transition-transform animate-pulse"
+              >
+                ENTER DRAFT ROOM
               </button>
             </div>
           )}
@@ -649,218 +784,258 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           </div>
         </div>
       ) : (
-        <div className={`${isPending ? 'blur-[1.5px] opacity-45 pointer-events-none' : ''} transition-all duration-300`}>
+        <div className={`${(isPending || isDrafting) ? 'blur-[1.5px] opacity-45 pointer-events-none' : ''} transition-all duration-300`}>
         
-        {/* RESPONSIVE LAYOUT CONTAINER */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* RESPONSIVE STACKED LAYOUT */}
+        <div className="flex flex-col gap-6">
           
-          {/* LEFT PANEL (H2H Duel Card) */}
-          <div className="lg:col-span-4 space-y-6">
-            
-            {/* HEAD-TO-HEAD DUEL CARD */}
-            <div className="bg-white border border-gray-200 rounded-[32px] p-6 shadow-sm relative overflow-hidden">
-              <div className="flex justify-between items-center">
-                {/* Team A */}
-                <div className="text-center w-[40%] flex flex-col items-center">
-                  <div className="w-16 h-16 rounded-3xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-3xl shadow-sm">
-                    {myTeam.avatar || '🏒'}
-                  </div>
-                  <h3 className="text-xs font-black text-gray-800 mt-3 truncate w-full">{myTeam.teamName}</h3>
-                  <p className="text-[10px] text-indigo-600 font-bold mt-0.5">You</p>
-                  
-                  <p className="text-3xl font-black text-gray-900 mt-3 tracking-tight">{myScore.toFixed(1)}</p>
-                  <p className="text-[9px] text-gray-400 font-black uppercase tracking-wider mt-1">
-                    Proj: {myTeamMatchup ? (myScore * 1.15).toFixed(1) : '0.0'}
-                  </p>
+          {/* HEAD-TO-HEAD DUEL CARD (FULL WIDTH) */}
+          <div className="bg-white border border-gray-200 rounded-[32px] p-8 shadow-sm relative overflow-hidden">
+            <div className="flex justify-between items-center max-w-4xl mx-auto">
+              {/* Team A */}
+              <div className="text-center w-[40%] flex flex-col items-center">
+                <div className="w-20 h-20 rounded-3xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-4xl shadow-sm">
+                  {myTeam.avatar || '🏒'}
                 </div>
+                <h3 className="text-sm font-black text-gray-800 mt-4 truncate w-full">{myTeam.teamName}</h3>
+                <p className="text-[10px] text-indigo-600 font-bold mt-0.5 uppercase tracking-widest">You</p>
+                
+                <p className="text-4xl font-black text-gray-900 mt-4 tracking-tight">{myScore.toFixed(1)}</p>
+                <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider mt-1">
+                  Proj Weekly: {myTeamMatchup ? (myScore * 1.15).toFixed(1) : '0.0'}
+                </p>
+              </div>
 
-                {/* VS Score Counter */}
-                <div className="flex flex-col items-center justify-center w-[20%]">
-                  <div className="text-[10px] font-black text-gray-400 tracking-widest uppercase mb-1">VS</div>
-                  <div className="w-12 h-6 rounded-full bg-gray-50 border border-gray-200 flex items-center justify-center text-[10px] font-black text-gray-500">
-                    {myTeam ? `${myTeam.wins || 0}-${myTeam.losses || 0}-${myTeam.ties || 0}` : "0-0"}
-                  </div>
-                </div>
-
-                {/* Team B */}
-                <div className="text-center w-[40%] flex flex-col items-center">
-                  <div className="w-16 h-16 rounded-3xl bg-gray-50 border border-gray-200 flex items-center justify-center text-3xl shadow-sm">
-                    {resolvedOppTeam.avatar || '🥅'}
-                  </div>
-                  <h3 className="text-xs font-black text-gray-800 mt-3 truncate w-full">{resolvedOppTeam.teamName}</h3>
-                  <p className="text-[10px] text-gray-400 font-bold mt-0.5">Opponent</p>
-                  
-                  <p className="text-3xl font-black text-gray-900 mt-3 tracking-tight">{oppScore.toFixed(1)}</p>
-                  <p className="text-[9px] text-gray-400 font-black uppercase tracking-wider mt-1">
-                    Proj: {myTeamMatchup ? (oppScore * 1.15).toFixed(1) : '0.0'}
-                  </p>
+              {/* VS Score Counter */}
+              <div className="flex flex-col items-center justify-center w-[20%]">
+                <div className="text-[12px] font-black text-gray-400 tracking-widest uppercase mb-2">VS</div>
+                <div className="w-16 h-8 rounded-full bg-gray-50 border border-gray-200 flex items-center justify-center text-xs font-black text-gray-500 shadow-inner">
+                  {myTeam ? `${myTeam.wins || 0}-${myTeam.losses || 0}-${myTeam.ties || 0}` : "0-0"}
                 </div>
               </div>
 
-              {/* Win Probability Bar */}
-              <div className="mt-6 pt-5 border-t border-gray-100">
-                <div className="flex justify-between text-[10px] text-gray-400 font-black uppercase tracking-wider mb-2">
-                  <span>Win Probability</span>
-                  <span className="text-indigo-600">{winProb}% {myTeam.teamName.split(' ').pop()}</span>
+              {/* Team B */}
+              <div className="text-center w-[40%] flex flex-col items-center">
+                <div className="w-20 h-20 rounded-3xl bg-gray-50 border border-gray-200 flex items-center justify-center text-4xl shadow-sm">
+                  {resolvedOppTeam.avatar || '🥅'}
                 </div>
-                <div className="h-2 rounded-full bg-gray-100 overflow-hidden flex">
-                  <div className="h-full bg-gradient-to-r from-indigo-600 to-indigo-500" style={{ width: `${winProb}%` }}></div>
-                  <div className="h-full bg-gray-200" style={{ width: `${100 - winProb}%` }}></div>
-                </div>
+                <h3 className="text-sm font-black text-gray-800 mt-4 truncate w-full">{resolvedOppTeam.teamName}</h3>
+                <p className="text-[10px] text-gray-400 font-bold mt-0.5 uppercase tracking-widest">Opponent</p>
+                
+                <p className="text-4xl font-black text-gray-900 mt-4 tracking-tight">{oppScore.toFixed(1)}</p>
+                <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider mt-1">
+                  Proj Weekly: {myTeamMatchup ? (oppScore * 1.15).toFixed(1) : '0.0'}
+                </p>
               </div>
             </div>
 
-            {/* Mobile-Only Tabs Selector (Hidden on Desktop) */}
-            <div className="flex lg:hidden p-1 bg-gray-100 border border-gray-200 rounded-2xl shadow-inner">
-              <button
-                onClick={() => setActiveTab('scoreboard')}
-                className={`flex-1 py-3 text-[10px] font-black uppercase tracking-wider rounded-xl transition-all duration-200 ${activeTab === 'scoreboard' ? 'bg-white text-indigo-600 shadow-sm border border-gray-200' : 'text-gray-400 hover:text-gray-600'}`}
-              >
-                🏆 Matchups
-              </button>
-              <button
-                onClick={() => setActiveTab('rosters')}
-                className={`flex-1 py-3 text-[10px] font-black uppercase tracking-wider rounded-xl transition-all duration-200 ${activeTab === 'rosters' ? 'bg-white text-indigo-600 shadow-sm border border-gray-200' : 'text-gray-400 hover:text-gray-600'}`}
-              >
-                ⛸️ Roster Compare
-              </button>
+            {/* Win Probability Bar */}
+            <div className="mt-8 pt-6 border-t border-gray-100 max-w-4xl mx-auto">
+              <div className="flex justify-between text-xs text-gray-400 font-black uppercase tracking-wider mb-3">
+                <span>Win Probability</span>
+                <span className="text-indigo-600">{winProb}% {myTeam.teamName.split(' ').pop()}</span>
+              </div>
+              <div className="h-2.5 rounded-full bg-gray-100 overflow-hidden flex">
+                <div className="h-full bg-gradient-to-r from-indigo-600 to-indigo-500" style={{ width: `${winProb}%` }}></div>
+                <div className="h-full bg-gray-200" style={{ width: `${100 - winProb}%` }}></div>
+              </div>
             </div>
-            
           </div>
 
-          {/* RIGHT PANEL (Widescreen side-by-side or toggled columns) */}
-          <div className="lg:col-span-8 space-y-6">
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              
-              {/* 1. scoreboard matchups panel */}
-              <div className={`lg:block ${activeTab === 'scoreboard' ? 'block' : 'hidden'}`}>
-                <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-3.5 flex items-center gap-1.5">🏆 Week {currentWeek} Scoreboard</h3>
-                <div className="space-y-3">
-                  {matchupsLoading ? (
-                    <div className="text-center py-8 text-xs text-gray-400 font-bold italic animate-pulse">
-                      Loading scoreboard matchups...
-                    </div>
-                  ) : weeklyMatchups.length === 0 ? (
-                    <div className="text-center py-8 text-xs text-gray-400 font-bold italic">
-                      No matchups found for this week.
-                    </div>
-                  ) : (
-                    weeklyMatchups.map((m) => {
-                      const hTeam = teams.find(t => t.id === m.homeTeamId) || { teamName: m.homeTeamName || "Home Team", avatar: "🏒" };
-                      const aTeam = teams.find(t => t.id === m.awayTeamId) || { teamName: m.awayTeamName || "Away Team", avatar: "🥅" };
-                      const hScore = m.homeScore || 0;
-                      const aScore = m.awayScore || 0;
-
-                      let ratio = 50;
-                      if (hScore > 0 || aScore > 0) {
-                        ratio = Math.round((hScore / (hScore + aScore)) * 100);
-                      }
-
-                      return (
-                        <div key={m.id} className="bg-white border border-gray-200 rounded-2xl p-4 flex flex-col gap-3 shadow-sm hover:border-indigo-100 transition-all duration-200">
-                          <div className="flex justify-between items-center text-xs font-bold">
-                            {/* Home Team */}
-                            <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                              <span className="text-base shrink-0">{hTeam.avatar || '🏒'}</span>
-                              <span className="truncate text-gray-700">{hTeam.teamName}</span>
-                            </div>
-
-                            {/* Scores */}
-                            <div className="flex items-center gap-2 px-3 shrink-0">
-                              <span className={`font-black ${hScore >= aScore ? 'text-gray-900' : 'text-gray-400'}`}>{hScore.toFixed(1)}</span>
-                              <span className="text-gray-300 font-semibold">-</span>
-                              <span className={`font-black ${aScore >= hScore ? 'text-gray-900' : 'text-gray-400'}`}>{aScore.toFixed(1)}</span>
-                            </div>
-
-                            {/* Away Team */}
-                            <div className="flex items-center gap-1.5 min-w-0 flex-1 justify-end text-right">
-                              <span className="truncate text-gray-700">{aTeam.teamName}</span>
-                              <span className="text-base shrink-0">{aTeam.avatar || '🥅'}</span>
-                            </div>
-                          </div>
-
-                          {/* Visual progress bar */}
-                          <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden flex">
-                            <div className="h-full bg-indigo-600" style={{ width: `${ratio}%` }}></div>
-                            <div className="h-full bg-violet-400" style={{ width: `${100 - ratio}%` }}></div>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-
-              {/* 2. roster comparisons list */}
-              <div className={`lg:block ${activeTab === 'rosters' ? 'block' : 'hidden'}`}>
-                <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-3.5 flex items-center gap-1.5">⛸️ Starting Lineups Compare</h3>
-                <div className="space-y-3">
-                  <div className="bg-gray-50 border border-gray-200 rounded-2xl p-3 flex justify-between text-[9px] font-black uppercase text-gray-400 tracking-widest px-4 shadow-inner">
-                    <span>{myTeam.teamName.split(' ').pop()} Athletes</span>
-                    <span>POS</span>
-                    <span>{resolvedOppTeam.teamName.split(' ').pop()} Athletes</span>
-                  </div>
-
-                  {myTeam?.players?.length > 0 || resolvedOppTeam?.players?.length > 0 ? (
-                    comparisonLineups.map((row, idx) => {
-                      const myP = row.myPlayer;
-                      const oppP = row.oppPlayer;
-                      const myPts = myP ? (playerStats[myP.id] || 0.0) : 0.0;
-                      const oppPts = oppP ? (playerStats[oppP.id] || 0.0) : 0.0;
-
-                      return (
-                        <div key={idx} className="bg-white border border-gray-200 rounded-2xl p-3 flex justify-between items-center text-xs shadow-sm">
-                          {/* My Player */}
-                          <div className="flex-1 min-w-0 pr-2">
-                            {myP ? (
-                              <div className="truncate">
-                                <span className="font-black text-gray-800">{myP.name}</span>
-                                <span className="text-[10px] text-indigo-600 font-bold block mt-0.5">{myPts.toFixed(1)} pts</span>
-                              </div>
-                            ) : (
-                              <span className="text-gray-300 italic">Empty Slot</span>
-                            )}
-                          </div>
-
-                          {/* Position */}
-                          <div className="w-10 text-center shrink-0">
-                            <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded border border-indigo-100 bg-indigo-50 text-indigo-600">
-                              {row.slotPos}
-                            </span>
-                          </div>
-
-                          {/* Opponent Player */}
-                          <div className="flex-1 min-w-0 pl-2 text-right">
-                            {oppP ? (
-                              <div className="truncate">
-                                <span className="font-black text-gray-800">{oppP.name}</span>
-                                <span className="text-[10px] text-gray-400 font-bold block mt-0.5">{oppPts.toFixed(1)} pts</span>
-                              </div>
-                            ) : (
-                              <span className="text-gray-300 italic">Empty Slot</span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className="text-center py-16 px-4 text-xs font-bold text-gray-300 italic border border-dashed border-gray-200 rounded-[24px] bg-white/50 shadow-sm flex flex-col items-center justify-center gap-2">
-                      <span className="text-2xl">🥅</span>
-                      <span>No active rosters. Comparisons will sync post-draft.</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
+          {/* DAILY SELECTOR BAR */}
+          <div className="bg-white border border-gray-200 rounded-[24px] p-3 shadow-sm flex items-center justify-between">
+            <button
+              onClick={() => {
+                const newD = new Date(selectedMatchupDate);
+                newD.setDate(newD.getDate() - 1);
+                setSelectedMatchupDate(newD);
+              }}
+              disabled={!selectedMatchupDate || !matchupWeekBounds.start || selectedMatchupDate <= matchupWeekBounds.start}
+              className="px-5 py-3.5 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 disabled:opacity-40 transition-all text-[10px] font-black uppercase tracking-widest text-gray-500 shadow-inner active:scale-95"
+            >
+              &larr; Prev Day
+            </button>
+            <div className="text-center">
+              <span className="text-[10px] font-black uppercase text-gray-400 tracking-widest block mb-1">Matchup Day</span>
+              <h3 className="text-sm font-black text-indigo-600">
+                {selectedMatchupDate ? new Date(selectedMatchupDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }) : 'Loading...'}
+              </h3>
             </div>
+            <button
+              onClick={() => {
+                const newD = new Date(selectedMatchupDate);
+                newD.setDate(newD.getDate() + 1);
+                setSelectedMatchupDate(newD);
+              }}
+              disabled={!selectedMatchupDate || !matchupWeekBounds.end || selectedMatchupDate >= matchupWeekBounds.end}
+              className="px-5 py-3.5 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 disabled:opacity-40 transition-all text-[10px] font-black uppercase tracking-widest text-gray-500 shadow-inner active:scale-95"
+            >
+              Next Day &rarr;
+            </button>
+          </div>
 
+          {/* ROSTER COMPARISON TABLE */}
+          <div className="bg-white border border-gray-200 rounded-[32px] p-6 shadow-sm overflow-hidden">
+            <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-5 flex items-center gap-1.5 px-2">⛸️ Daily Fantasy Roster Compare</h3>
+            <div className="space-y-3">
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-3 flex justify-between text-[10px] font-black uppercase text-gray-400 tracking-widest px-6 shadow-inner">
+                <span className="w-[45%] text-left">{myTeam.teamName.split(' ').pop()} Athletes</span>
+                <span className="w-[10%] text-center">POS</span>
+                <span className="w-[45%] text-right">{resolvedOppTeam.teamName.split(' ').pop()} Athletes</span>
+              </div>
+
+              {myTeam?.players?.length > 0 || resolvedOppTeam?.players?.length > 0 ? (
+                comparisonLineups.map((row, idx) => {
+                  const myP = row.myPlayer;
+                  const oppP = row.oppPlayer;
+                  const myPts = myP ? (dailyPlayerStats[myP.id] || 0.0) : 0.0;
+                  const oppPts = oppP ? (dailyPlayerStats[oppP.id] || 0.0) : 0.0;
+                  
+                  // Helper to get daily game text
+                  const getDailyGameText = (player) => {
+                    if (!player || !selectedMatchupDate) return null;
+                    const dateStr = selectedMatchupDate.toISOString().split('T')[0];
+                    const game = pwhlGames.find(g => {
+                      if (!g.date_played && !g.date) return false;
+                      const gDateStr = new Date(g.date_played || g.date).toISOString().split('T')[0];
+                      if (gDateStr !== dateStr) return false;
+                      return (String(g.home_team) === String(player.team_id) || String(g.visiting_team) === String(player.team_id));
+                    });
+                    if (game) {
+                      const isHome = String(game.home_team) === String(player.team_id);
+                      const oppId = isHome ? game.visiting_team : game.home_team;
+                      // Try to map oppId to code via pwhlGames (could be raw ID)
+                      const oppCode = String(oppId); // In reality we'd want the team code, but fallback to ID or Name
+                      const timeStr = new Date(game.date_played || game.date).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+                      return isHome ? `vs ${oppCode} ${timeStr}` : `@ ${oppCode} ${timeStr}`;
+                    }
+                    return "No Game Today";
+                  };
+
+                  return (
+                    <div key={idx} className="bg-white border border-gray-150 rounded-2xl p-4 flex justify-between items-center text-xs shadow-sm hover:border-indigo-100 transition-all">
+                      {/* My Player */}
+                      <div className="w-[45%] flex gap-3 min-w-0 pr-2">
+                        {myP ? (
+                          <>
+                            <div className="w-10 h-10 rounded-full bg-gray-100 overflow-hidden shrink-0 hidden sm:block">
+                              <img src={myP.player_image} alt={myP.name} className="w-full h-full object-cover" onError={(e) => e.target.style.display='none'} />
+                            </div>
+                            <div className="truncate flex-1">
+                              <span className="font-black text-gray-800 cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => setSelectedCardPlayer(myP)}>{myP.name}</span>
+                              <span className="text-[10px] text-gray-400 font-semibold block mt-0.5 truncate">{getDailyGameText(myP)}</span>
+                              <span className="text-xs text-indigo-600 font-black block mt-1">{myPts.toFixed(1)} pts</span>
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-gray-300 italic flex items-center h-10">Empty Slot</span>
+                        )}
+                      </div>
+
+                      {/* Position */}
+                      <div className="w-[10%] text-center shrink-0">
+                        <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-md border ${row.slotPos === 'BN' ? 'bg-gray-50 border-gray-200 text-gray-400' : 'border-indigo-100 bg-indigo-50 text-indigo-600'}`}>
+                          {row.slotPos}
+                        </span>
+                      </div>
+
+                      {/* Opponent Player */}
+                      <div className="w-[45%] flex gap-3 min-w-0 pl-2 justify-end text-right">
+                        {oppP ? (
+                          <>
+                            <div className="truncate flex-1">
+                              <span className="font-black text-gray-800 cursor-pointer hover:text-indigo-600 transition-colors" onClick={() => setSelectedCardPlayer(oppP)}>{oppP.name}</span>
+                              <span className="text-[10px] text-gray-400 font-semibold block mt-0.5 truncate">{getDailyGameText(oppP)}</span>
+                              <span className="text-xs text-gray-500 font-black block mt-1">{oppPts.toFixed(1)} pts</span>
+                            </div>
+                            <div className="w-10 h-10 rounded-full bg-gray-100 overflow-hidden shrink-0 hidden sm:block">
+                              <img src={oppP.player_image} alt={oppP.name} className="w-full h-full object-cover" onError={(e) => e.target.style.display='none'} />
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-gray-300 italic flex items-center h-10 justify-end">Empty Slot</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="text-center py-16 px-4 text-xs font-bold text-gray-300 italic border border-dashed border-gray-200 rounded-[24px] bg-white/50 shadow-sm flex flex-col items-center justify-center gap-2">
+                  <span className="text-2xl">🥅</span>
+                  <span>No active rosters. Comparisons will sync post-draft.</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* DAILY PWHL GAMES CARDS */}
+          <div className="bg-white border border-gray-200 rounded-[32px] p-6 shadow-sm overflow-hidden mb-12">
+            <h3 className="text-xs font-black uppercase tracking-wider text-gray-400 mb-5 flex items-center gap-1.5 px-2">📅 PWHL Games Today</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {(() => {
+                if (!selectedMatchupDate || pwhlGames.length === 0) return null;
+                const dateStr = selectedMatchupDate.toISOString().split('T')[0];
+                const dailyGames = pwhlGames.filter(g => {
+                  if (!g.date_played && !g.date) return false;
+                  return new Date(g.date_played || g.date).toISOString().split('T')[0] === dateStr;
+                });
+                
+                if (dailyGames.length === 0) {
+                  return <div className="col-span-full text-center py-8 text-xs font-bold text-gray-400 italic">No PWHL games scheduled for this day.</div>;
+                }
+
+                return dailyGames.map(game => {
+                  const isLive = game.status === '2';
+                  const timeStr = new Date(game.date_played || game.date).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+                  
+                  return (
+                    <div key={game.id} className="bg-gray-50 border border-gray-200 rounded-2xl p-5 flex flex-col gap-3 shadow-inner">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[9px] font-black uppercase tracking-widest text-gray-400">
+                          {game.venue || 'TBA Location'}
+                        </span>
+                        {isLive ? (
+                          <div className="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-50 rounded text-[9px] font-black text-emerald-600 border border-emerald-100">
+                            <span className="relative flex h-1.5 w-1.5">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                            </span>
+                            LIVE (P{game.period || '1'})
+                          </div>
+                        ) : (
+                          <span className="text-[9px] font-black uppercase tracking-widest text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
+                            {timeStr}
+                          </span>
+                        )}
+                      </div>
+                      
+                      <div className="flex justify-between items-center mt-2">
+                        <div className="flex items-center gap-3 w-[40%]">
+                          <div className="text-sm font-black text-gray-800">{game.home_team_name || game.home_team || 'Home'}</div>
+                        </div>
+                        <div className="flex justify-center items-center gap-3 w-[20%]">
+                          <span className="text-xl font-black text-gray-900">{game.home_score || 0}</span>
+                          <span className="text-gray-300 font-black">-</span>
+                          <span className="text-xl font-black text-gray-900">{game.visiting_score || 0}</span>
+                        </div>
+                        <div className="flex items-center gap-3 w-[40%] justify-end text-right">
+                          <div className="text-sm font-black text-gray-800">{game.visiting_team_name || game.visiting_team || 'Away'}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
           </div>
           
         </div>
       </div>
       )}
 
+      {selectedCardPlayer && (
+        <PlayerCardModal player={selectedCardPlayer} onClose={() => setSelectedCardPlayer(null)} />
+      )}
     </div>
   );
 }
