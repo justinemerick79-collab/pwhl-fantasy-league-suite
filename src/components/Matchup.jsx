@@ -562,16 +562,6 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
   const comparisonLineups = buildStartingLineups();
 
-  console.log("Matchup Render Debug:", {
-    selectedMatchupDate,
-    selectedMatchupDateType: typeof selectedMatchupDate,
-    selectedMatchupDateIsDate: selectedMatchupDate instanceof Date,
-    seasonBoundsStart: seasonBounds.start,
-    seasonBoundsStartIsDate: seasonBounds.start instanceof Date,
-    matchupWeekBoundsStart: matchupWeekBounds.start,
-    isDisabled: !selectedMatchupDate || !seasonBounds.start || selectedMatchupDate <= seasonBounds.start
-  });
-
   return (
     <div className="relative font-sans select-none antialiased">
       
