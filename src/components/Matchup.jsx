@@ -86,6 +86,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
   // Sync selectedMatchupDate to simulation date (clamped to week bounds) when simulation/league changes
   useEffect(() => {
+    if (!seasonWeeks || seasonWeeks.length === 0) return;
     if (!matchupWeekBounds.start || !matchupWeekBounds.end) return;
     const simDate = getSimulatedDate();
     const simDateStr = getLocalDateStr(simDate);
@@ -106,7 +107,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     } else {
       lastWeekRef.current = resolvedCurrentWeek;
     }
-  }, [activeLeagueId, matchupWeekBounds, getSimulatedDate]);
+  }, [activeLeagueId, matchupWeekBounds, getSimulatedDate, seasonWeeks]);
 
   // Daily lineups scoring state
   const [homeLineupsState, setHomeLineupsState] = useState({});
