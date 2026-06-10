@@ -38,39 +38,110 @@ function App() {
 
   const { currentUser, isAdmin, logout } = useAuth();
 
-  const { simulationState, activeSeasonName } = useTimeTravel();
+  const { simulationState, leagueSimState, getSimulatedDate, isSimulationActive, activeSeasonName, setActiveLeagueId: setTimeTravelLeagueId } = useTimeTravel();
   const [isDayAdvancing, setIsDayAdvancing] = useState(false);
+  const [isSkippingWeek, setIsSkippingWeek] = useState(false);
   const [isTeardownLoading, setIsTeardownLoading] = useState(false);
+
+  const getDateStr = (date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
+  const getCurrentSimDateStr = () => {
+    // Per-league simulation takes priority
+    if (leagueSimState.isSimulation && leagueSimState.simulatedDate) {
+      return leagueSimState.simulatedDate.split('T')[0];
+    }
+    // Fallback to global
+    if (simulationState?.current_simulated_date) {
+      return simulationState.current_simulated_date.split('T')[0];
+    }
+    return null;
+  };
+
+  const advanceSimulationDate = async (targetDateStr) => {
+    try {
+      // Per-league simulation: write to league doc
+      if (leagueSimState.isSimulation && activeLeagueId) {
+        const leagueRef = doc(db, "fantasy_leagues", activeLeagueId);
+        await updateDoc(leagueRef, { simulatedDate: targetDateStr });
+        console.log(`Advanced league ${activeLeagueId} simulation to: ${targetDateStr}`);
+      }
+      // Always update global simulation state so backend trigger fires
+      const simStateRef = doc(db, "admin_settings", "simulation_state");
+      await updateDoc(simStateRef, { current_simulated_date: targetDateStr });
+      console.log("Advanced global simulation date to:", targetDateStr);
+    } catch (err) {
+      throw err;
+    }
+  };
 
   const handleAdvanceDay = async () => {
     setIsDayAdvancing(true);
     try {
-      const getNextDateStr = (currentDateStr) => {
-        let baseDate;
-        if (currentDateStr) {
-          const [year, month, day] = currentDateStr.split('-').map(Number);
-          baseDate = new Date(year, month - 1, day);
-        } else {
-          baseDate = new Date();
-        }
-        baseDate.setDate(baseDate.getDate() + 1);
-        const y = baseDate.getFullYear();
-        const m = String(baseDate.getMonth() + 1).padStart(2, '0');
-        const d = String(baseDate.getDate()).padStart(2, '0');
-        return `${y}-${m}-${d}`;
-      };
-
-      const nextDate = getNextDateStr(simulationState?.current_simulated_date);
-      const simStateRef = doc(db, "admin_settings", "simulation_state");
-      await updateDoc(simStateRef, {
-        current_simulated_date: nextDate
-      });
-      console.log("Advanced simulation date to:", nextDate);
+      const currentDateStr = getCurrentSimDateStr();
+      let baseDate;
+      if (currentDateStr) {
+        const [year, month, day] = currentDateStr.split('-').map(Number);
+        baseDate = new Date(year, month - 1, day);
+      } else {
+        baseDate = new Date();
+      }
+      baseDate.setDate(baseDate.getDate() + 1);
+      await advanceSimulationDate(getDateStr(baseDate));
     } catch (err) {
       console.error("Failed to advance simulated date:", err);
       alert("Failed to advance simulated date: " + err.message);
     } finally {
       setIsDayAdvancing(false);
+    }
+  };
+
+  const handleSkipToEndOfWeek = async () => {
+    setIsSkippingWeek(true);
+    try {
+      // Find the end of the current week from season data
+      const currentDateStr = getCurrentSimDateStr();
+      if (!currentDateStr) throw new Error("No simulated date set");
+
+      const [year, month, day] = currentDateStr.split('-').map(Number);
+      const currentDate = new Date(year, month - 1, day);
+
+      // Try to find the week end from the league's season weeks
+      let weekEndStr = null;
+      if (activeLeagueData?.season_id) {
+        const seasonRef = doc(db, "pwhl_seasons", String(activeLeagueData.season_id));
+        const seasonSnap = await getDoc(seasonRef);
+        if (seasonSnap.exists() && seasonSnap.data().weeks) {
+          const weeks = seasonSnap.data().weeks;
+          const matchedWeek = weeks.find(w => {
+            const ws = new Date(w.start);
+            const we = new Date(w.end);
+            return currentDate >= ws && currentDate <= we;
+          });
+          if (matchedWeek) {
+            weekEndStr = matchedWeek.end.split('T')[0];
+          }
+        }
+      }
+
+      // Fallback: advance to next Sunday
+      if (!weekEndStr) {
+        const daysUntilSunday = (7 - currentDate.getDay()) % 7 || 7;
+        const sunday = new Date(currentDate);
+        sunday.setDate(sunday.getDate() + daysUntilSunday);
+        weekEndStr = getDateStr(sunday);
+      }
+
+      await advanceSimulationDate(weekEndStr);
+    } catch (err) {
+      console.error("Failed to skip to end of week:", err);
+      alert("Failed to skip to end of week: " + err.message);
+    } finally {
+      setIsSkippingWeek(false);
     }
   };
 
@@ -214,12 +285,21 @@ function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, [activeLeagueId, isAdmin, currentTab]);
 
+  // Sync activeLeagueId to Time Travel Context
+  useEffect(() => {
+    if (setTimeTravelLeagueId) {
+      setTimeTravelLeagueId(activeLeagueId);
+    }
+  }, [activeLeagueId, setTimeTravelLeagueId]);
+
   useEffect(() => {
     fetchUserLeagues();
   }, [currentUser, activeLeagueId]);
 
   const handleSetActiveLeague = async (id, name) => {
     setActiveLeagueId(id);
+    // Sync per-league simulation context
+    if (setTimeTravelLeagueId) setTimeTravelLeagueId(id);
     if (id) {
       localStorage.setItem('pwhl_active_league', id);
       setActiveLeagueName(name);
@@ -264,13 +344,13 @@ function App() {
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#111827] font-sans selection:bg-indigo-500/20">
       
-      {simulationState?.testModeActive && (
+      {(simulationState?.testModeActive || leagueSimState.isSimulation) && (
         <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white border-b border-indigo-900/40 px-4 py-2.5 flex flex-col md:flex-row justify-between items-center gap-3 z-50 shadow-md">
           {/* Left section: status + season */}
           <div className="flex items-center gap-3 flex-wrap justify-center md:justify-start">
             <span className="flex items-center gap-1.5 bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 px-2.5 py-1 rounded-full text-[10px] font-black tracking-wider uppercase animate-pulse">
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
-              Simulation Active
+              {leagueSimState.isSimulation ? 'League Simulation' : 'Simulation Active'}
             </span>
             <span className="text-xs font-bold text-slate-300">
               Season: <strong className="text-white font-extrabold">{activeSeasonName}</strong>
@@ -281,8 +361,8 @@ function App() {
           <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
             <span className="text-base">📅</span>
             <span>
-              {simulationState.current_simulated_date ? (
-                <>Simulated Date: <strong className="text-amber-400 font-extrabold">{new Date(simulationState.current_simulated_date + 'T08:00:00-08:00').toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
+              {getCurrentSimDateStr() ? (
+                <>Simulated Date: <strong className="text-amber-400 font-extrabold">{new Date(getCurrentSimDateStr() + 'T08:00:00-08:00').toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
               ) : (
                 <>Real Date: <strong className="text-emerald-400 font-extrabold">{new Date().toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
               )}
@@ -293,17 +373,24 @@ function App() {
           <div className="flex items-center gap-2.5">
             <button
               onClick={handleAdvanceDay}
-              disabled={isDayAdvancing || isTeardownLoading}
+              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
               className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-indigo-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
             >
-              {isDayAdvancing ? 'Advancing...' : 'Simulate Next Day ⚡'}
+              {isDayAdvancing ? 'Advancing...' : '+1 Day ⚡'}
+            </button>
+            <button
+              onClick={handleSkipToEndOfWeek}
+              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
+              className="bg-violet-600 hover:bg-violet-500 disabled:bg-violet-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-violet-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+            >
+              {isSkippingWeek ? 'Skipping...' : 'Skip to Week End ⏭️'}
             </button>
             <button
               onClick={handleDeactivateSimulation}
-              disabled={isDayAdvancing || isTeardownLoading}
+              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
               className="bg-slate-800 hover:bg-rose-950/80 border border-slate-700 hover:border-rose-800/40 text-slate-300 hover:text-rose-200 disabled:bg-slate-900 disabled:text-slate-600 text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
             >
-              {isTeardownLoading ? 'Deactivating...' : 'Deactivate Mode 🚪'}
+              {isTeardownLoading ? 'Deactivating...' : 'Deactivate 🚪'}
             </button>
           </div>
         </div>

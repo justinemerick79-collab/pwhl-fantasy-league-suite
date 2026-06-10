@@ -278,8 +278,19 @@ export async function initializeDraft(leagueId, draftOrder) {
     }
 
     const activeRosters = {};
-    draftOrder.forEach(uid => {
+    const autoDraftUsers = {};
+
+    // Fetch user documents within transaction to see who is a bot (all reads first)
+    const userSnaps = await Promise.all(
+      draftOrder.map(uid => transaction.get(doc(db, "users", uid)))
+    );
+
+    draftOrder.forEach((uid, index) => {
       activeRosters[uid] = [];
+      const userSnap = userSnaps[index];
+      if (userSnap.exists() && userSnap.data().isBot) {
+        autoDraftUsers[uid] = true;
+      }
     });
 
     const nowMs = Date.now();
@@ -294,7 +305,7 @@ export async function initializeDraft(leagueId, draftOrder) {
       pickDeadline: pickDeadline,
       picks: [],
       activeRosters: activeRosters,
-      autoDraftUsers: {},
+      autoDraftUsers: autoDraftUsers,
       createdAt: serverTimestamp()
     });
 
@@ -377,9 +388,12 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
       }
     }
 
-    // Verify roster position maximums limits
+    // Verify roster position maximums limits and active roster requirements
     const currentRosterIds = draftData.activeRosters[draftData.currentTeamOnClock] || [];
-    let posCount = 0;
+    let fCount = 0;
+    let dCount = 0;
+    let gCount = 0;
+
     for (const pId of currentRosterIds) {
       const pRef = doc(db, "pwhl_players", pId);
       const pSnap = await transaction.get(pRef);
@@ -393,24 +407,55 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
           else if (numId >= 8 && numId <= 11) pPos = "D";
         }
       }
-      if (pPos === playerPos) {
-        posCount++;
-      }
+      if (pPos === 'F') fCount++;
+      else if (pPos === 'D') dCount++;
+      else if (pPos === 'G') gCount++;
     }
 
-    const posLimit = playerPos === 'F' ? (rosterSettings.forwards?.max ?? 10) :
-                     playerPos === 'D' ? (rosterSettings.defense?.max ?? 8) :
-                     (rosterSettings.goalies?.max ?? 3);
+    const posCount = playerPos === 'F' ? fCount :
+                     playerPos === 'D' ? dCount :
+                     gCount;
 
-    if (posCount >= posLimit) {
-      throw new Error(`Roster limit exceeded for position ${playerPos}. Maximum allowed is ${posLimit}.`);
+    let nextFCount = fCount;
+    let nextDCount = dCount;
+    let nextGCount = gCount;
+    if (playerPos === 'F') nextFCount++;
+    else if (playerPos === 'D') nextDCount++;
+    else if (playerPos === 'G') nextGCount++;
+
+    const forwardsLimit = rosterSettings.forwards?.max ?? 10;
+    const defenseLimit = rosterSettings.defense?.max ?? 8;
+    const goaliesLimit = rosterSettings.goalies?.max ?? 3;
+
+    if (playerPos === 'F' && nextFCount > forwardsLimit) {
+      throw new Error(`Roster limit exceeded for position F. Maximum allowed is ${forwardsLimit}.`);
     }
-    const maxRounds = (rosterSettings.bench ?? 4) + 
-                       (rosterSettings.forwards?.starters ?? 6) + 
-                       (rosterSettings.defense?.starters ?? 4) + 
-                       (rosterSettings.goalies?.starters ?? 1);
-    
-    const totalPicks = maxRounds * N;
+    if (playerPos === 'D' && nextDCount > defenseLimit) {
+      throw new Error(`Roster limit exceeded for position D. Maximum allowed is ${defenseLimit}.`);
+    }
+    if (playerPos === 'G' && nextGCount > goaliesLimit) {
+      throw new Error(`Roster limit exceeded for position G. Maximum allowed is ${goaliesLimit}.`);
+    }
+
+    const fStarters = rosterSettings.forwards?.starters ?? 6;
+    const dStarters = rosterSettings.defense?.starters ?? 4;
+    const gStarters = rosterSettings.goalies?.starters ?? 1;
+    const benchSlots = rosterSettings.bench ?? 4;
+    const totalRosterSize = fStarters + dStarters + gStarters + benchSlots;
+
+    const picksRemaining = totalRosterSize - currentRosterIds.length;
+    const nextPicksRemaining = picksRemaining - 1;
+
+    const fNeeded = Math.max(0, fStarters - nextFCount);
+    const dNeeded = Math.max(0, dStarters - nextDCount);
+    const gNeeded = Math.max(0, gStarters - nextGCount);
+    const totalNeeded = fNeeded + dNeeded + gNeeded;
+
+    if (nextPicksRemaining < totalNeeded) {
+      throw new Error(`Invalid draft pick. You must draft a player from a position that helps fill your remaining starter requirements (Forwards: ${fNeeded}, Defense: ${dNeeded}, Goalies: ${gNeeded}) with your ${nextPicksRemaining} remaining picks.`);
+    }
+
+    const totalPicks = totalRosterSize * N;
 
     // Execute pick insertion
     const pickerUserId = draftData.currentTeamOnClock;
@@ -1009,4 +1054,286 @@ export async function moveRosterPlayer(leagueId, teamId, playerId, target, roste
 
     transaction.update(teamRef, { activePlayers, benchPlayers });
   });
+}
+
+/**
+ * Helper to format a local date string (YYYY-MM-DD)
+ */
+export function getLocalDateStr(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Atomic transaction to save daily lineup for a team.
+ * Enforces roster rules and time-based slot locking.
+ */
+export async function saveDailyLineup(leagueId, teamId, dateStr, activeLineup, bench) {
+  const leagueRef = doc(db, "fantasy_leagues", leagueId);
+  const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, teamId);
+  const dailyLineupRef = doc(db, `fantasy_leagues/${leagueId}/teams/${teamId}/daily_lineups`, dateStr);
+
+  const simSnap = await getDoc(doc(db, "admin_settings", "simulation_state"));
+  let simDateStr = "";
+  let simDateObj = new Date();
+  if (simSnap.exists()) {
+    const simData = simSnap.data();
+    if (simData.testModeActive === true && simData.current_simulated_date) {
+      simDateStr = simData.current_simulated_date.split('T')[0];
+      simDateObj = simData.current_simulated_date.includes('T')
+        ? new Date(simData.current_simulated_date)
+        : new Date(`${simData.current_simulated_date}T08:00:00-08:00`);
+    }
+  }
+  if (!simDateStr) {
+    simDateStr = getLocalDateStr(new Date());
+    simDateObj = new Date();
+  }
+
+  // Reject if dateStr is in the past
+  if (dateStr < simDateStr) {
+    throw new Error("Cannot modify a roster lineup for a past date.");
+  }
+
+  // Fetch games for dateStr outside the transaction
+  const gamesSnap = await getDocs(collection(db, "pwhl_games"));
+  const dailyGames = gamesSnap.docs.map(d => d.data()).filter(g => {
+    const gDateStr = g.date_played || g.date;
+    if (!gDateStr) return false;
+    return getLocalDateStr(new Date(gDateStr)) === dateStr;
+  });
+
+  await runTransaction(db, async (transaction) => {
+    const leagueSnap = await transaction.get(leagueRef);
+    const teamSnap = await transaction.get(teamRef);
+
+    if (!leagueSnap.exists() || !teamSnap.exists()) {
+      throw new Error("League or team not found.");
+    }
+
+    const teamData = teamSnap.data();
+    const ownedPlayers = (teamData.players || []).map(p => String(typeof p === 'object' && p !== null ? (p.id || p.player_id || p) : p));
+
+    // Validate that all players in activeLineup and bench are owned by this team
+    const newActiveIds = Object.values(activeLineup).filter(Boolean).map(String);
+    const newBenchIds = bench.filter(Boolean).map(String);
+
+    for (const pId of [...newActiveIds, ...newBenchIds]) {
+      if (!ownedPlayers.includes(pId)) {
+        throw new Error(`Player ${pId} is not on your master franchise roster.`);
+      }
+    }
+
+    const seasonId = leagueSnap.data().season_id || "1";
+    // Load all owned player documents to check positions & team IDs
+    const playerSnaps = await Promise.all(
+      ownedPlayers.map(pId => transaction.get(doc(db, "pwhl_players", `${seasonId}_${pId}`)))
+    );
+
+    const playersInfo = {};
+    ownedPlayers.forEach((pId, idx) => {
+      const pSnap = playerSnaps[idx];
+      let pos = 'F';
+      let teamId = '';
+      let name = pId;
+      if (pSnap && pSnap.exists()) {
+        const pData = pSnap.data();
+        pos = normalizePosition(pData.position);
+        teamId = String(pData.current_team_id || pData.team_id || '');
+        name = pData.name || `${pData.first_name || ''} ${pData.last_name || ''}`.trim() || pId;
+      } else {
+        const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
+        if (!isNaN(numId)) {
+          if (numId >= 12 && numId <= 14) pos = "G";
+          else if (numId >= 8 && numId <= 11) pos = "D";
+        }
+      }
+      playersInfo[String(pId)] = { pos, teamId, name };
+    });
+
+    // Validate active lineup limits
+    const rosterSettings = leagueSnap.data().rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+    const fLimit = rosterSettings.forwards?.starters ?? 6;
+    const dLimit = rosterSettings.defense?.starters ?? 4;
+    const gLimit = rosterSettings.goalies?.starters ?? 1;
+
+    let fCount = 0, dCount = 0, gCount = 0;
+    for (const [slot, pId] of Object.entries(activeLineup)) {
+      if (!pId) continue;
+      const info = playersInfo[String(pId)];
+      if (!info) continue;
+      if (slot.startsWith('F')) fCount++;
+      else if (slot.startsWith('D')) dCount++;
+      else if (slot.startsWith('G')) gCount++;
+
+      // Verify player fits the slot position
+      if (slot.startsWith('F') && info.pos !== 'F') throw new Error(`Cannot place non-Forward ${info.name} in slot ${slot}.`);
+      if (slot.startsWith('D') && info.pos !== 'D') throw new Error(`Cannot place non-Defenseman ${info.name} in slot ${slot}.`);
+      if (slot.startsWith('G') && info.pos !== 'G') throw new Error(`Cannot place non-Goalie ${info.name} in slot ${slot}.`);
+    }
+
+    if (fCount > fLimit) throw new Error(`Forwards limit exceeded. Max active forwards: ${fLimit}.`);
+    if (dCount > dLimit) throw new Error(`Defensemen limit exceeded. Max active defensemen: ${dLimit}.`);
+    if (gCount > gLimit) throw new Error(`Goalies limit exceeded. Max active goalies: ${gLimit}.`);
+
+    // Fetch existing lineup
+    const dailyLineupSnap = await transaction.get(dailyLineupRef);
+    let existingActive = {};
+    let existingBench = [];
+
+    if (dailyLineupSnap.exists()) {
+      const dData = dailyLineupSnap.data();
+      existingActive = dData.activeLineup || {};
+      existingBench = dData.bench || [];
+    } else {
+      // Fallback: build default lineup
+      let fc = 0, dc = 0, gc = 0;
+      const activeIds = (teamData.activePlayers || []).map(String);
+      const benchIds = (teamData.benchPlayers || []).map(String);
+
+      activeIds.forEach(pId => {
+        const info = playersInfo[String(pId)];
+        if (!info) return;
+        if (info.pos === 'F' && fc < fLimit) { fc++; existingActive[`F${fc}`] = pId; }
+        else if (info.pos === 'D' && dc < dLimit) { dc++; existingActive[`D${dc}`] = pId; }
+        else if (info.pos === 'G' && gc < gLimit) { gc++; existingActive[`G${gc}`] = pId; }
+        else { existingBench.push(pId); }
+      });
+      benchIds.forEach(pId => {
+        existingBench.push(pId);
+      });
+    }
+
+    // Detect moved players
+    const movedPlayerIds = new Set();
+    const allPlayerIds = new Set([...ownedPlayers]);
+
+    allPlayerIds.forEach(pId => {
+      let currentSlot = 'none';
+      if (existingBench.includes(pId)) {
+        currentSlot = 'bench';
+      } else {
+        const slotKey = Object.keys(existingActive).find(k => existingActive[k] === pId);
+        if (slotKey) currentSlot = slotKey;
+      }
+
+      let newSlot = 'none';
+      if (newBenchIds.includes(pId)) {
+        newSlot = 'bench';
+      } else {
+        const slotKey = Object.keys(activeLineup).find(k => activeLineup[k] === pId);
+        if (slotKey) newSlot = slotKey;
+      }
+
+      if (currentSlot !== newSlot) {
+        movedPlayerIds.add(pId);
+      }
+    });
+
+    // Enforce lock checking for current day writes
+    if (dateStr === simDateStr && movedPlayerIds.size > 0) {
+      for (const pId of movedPlayerIds) {
+        const info = playersInfo[pId];
+        if (!info) continue;
+
+        // Find game for player's team today
+        const playerGame = dailyGames.find(g => {
+          return String(g.home_team) === info.teamId || String(g.visiting_team) === info.teamId;
+        });
+
+        if (playerGame) {
+          const gameStart = new Date(playerGame.date_played || playerGame.date);
+          if (simDateObj >= gameStart) {
+            throw new Error(`Cannot swap ${info.name}. Their game has already started.`);
+          }
+        }
+      }
+    }
+
+    // If validation passes, write the lineup
+    transaction.set(dailyLineupRef, {
+      date: dateStr,
+      activeLineup,
+      bench: newBenchIds,
+      source: "user"
+    });
+  });
+}
+
+/**
+ * Fetches a team's lineup for a given day, falling back to default if document not found.
+ */
+export async function getDailyLineup(leagueId, teamId, dateStr) {
+  const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, teamId);
+  const dailyLineupRef = doc(db, `fantasy_leagues/${leagueId}/teams/${teamId}/daily_lineups`, dateStr);
+
+  const teamSnap = await getDoc(teamRef);
+  if (!teamSnap.exists()) {
+    throw new Error("Team not found.");
+  }
+  const teamData = teamSnap.data();
+
+  const dailyLineupSnap = await getDoc(dailyLineupRef);
+  if (dailyLineupSnap.exists()) {
+    const data = dailyLineupSnap.data();
+    return {
+      date: dateStr,
+      activeLineup: data.activeLineup || {},
+      bench: data.bench || []
+    };
+  }
+
+  // Fallback: build default lineup
+  const leagueRef = doc(db, "fantasy_leagues", leagueId);
+  const leagueSnap = await getDoc(leagueRef);
+  const rosterSettings = leagueSnap.exists() ? (leagueSnap.data().rosterSettings || {}) : {};
+  const fLimit = rosterSettings.forwards?.starters ?? 6;
+  const dLimit = rosterSettings.defense?.starters ?? 4;
+  const gLimit = rosterSettings.goalies?.starters ?? 1;
+
+  const activeIds = (teamData.activePlayers || []).map(String);
+  const benchIds = (teamData.benchPlayers || []).map(String);
+
+  const seasonId = leagueSnap.exists() ? (leagueSnap.data().season_id || "1") : "1";
+  // Fetch all owned player positions to build mapping
+  const ownedPlayers = (teamData.players || []).map(p => String(typeof p === 'object' && p !== null ? (p.id || p.player_id || p) : p));
+  const playersInfo = {};
+  for (const pId of ownedPlayers) {
+    const pSnap = await getDoc(doc(db, "pwhl_players", `${seasonId}_${pId}`));
+    let pos = 'F';
+    if (pSnap.exists()) {
+      pos = normalizePosition(pSnap.data().position);
+    } else {
+      const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
+      if (!isNaN(numId)) {
+        if (numId >= 12 && numId <= 14) pos = "G";
+        else if (numId >= 8 && numId <= 11) pos = "D";
+      }
+    }
+    playersInfo[String(pId)] = pos;
+  }
+
+  const activeLineup = {};
+  const bench = [];
+  let fc = 0, dc = 0, gc = 0;
+
+  activeIds.forEach(pId => {
+    const pos = playersInfo[String(pId)] || 'F';
+    if (pos === 'F' && fc < fLimit) { fc++; activeLineup[`F${fc}`] = pId; }
+    else if (pos === 'D' && dc < dLimit) { dc++; activeLineup[`D${dc}`] = pId; }
+    else if (pos === 'G' && gc < gLimit) { gc++; activeLineup[`G${gc}`] = pId; }
+    else { bench.push(pId); }
+  });
+
+  benchIds.forEach(pId => {
+    bench.push(pId);
+  });
+
+  return {
+    date: dateStr,
+    activeLineup,
+    bench
+  };
 }

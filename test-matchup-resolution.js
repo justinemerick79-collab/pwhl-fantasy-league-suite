@@ -48,21 +48,19 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-// Connect to Emulators
+// Connect to Emulators only if host env is explicitly set
 const firestoreHostEnv = process.env.FIRESTORE_EMULATOR_HOST;
 const authHostEnv = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 
 if (firestoreHostEnv) {
   const [host, port] = firestoreHostEnv.split(":");
   connectFirestoreEmulator(db, host, parseInt(port, 10));
-} else {
-  connectFirestoreEmulator(db, "127.0.0.1", 8080);
+  console.log(`🔌 Connected to Firestore Emulator at ${host}:${port}`);
 }
 
 if (authHostEnv) {
   connectAuthEmulator(auth, `http://${authHostEnv}`);
-} else {
-  connectAuthEmulator(auth, "http://127.0.0.1:9099");
+  console.log(`🔌 Connected to Auth Emulator at ${authHostEnv}`);
 }
 
 const TEST_EMAIL = "gameloop_admin_temp@example.com";
@@ -112,16 +110,7 @@ async function runTest() {
 
     console.log("\n🚀 STEP 1: Setting up mock league environment...");
 
-    // 1. Create bot user doc
-    const botUserRef = doc(db, "users", botUid);
-    await setDoc(botUserRef, {
-      email: `bot_loop_test@fantasy.com`,
-      displayName: "Bot Roster Owner",
-      role: "user",
-      isBot: true,
-      isTestNode: true
-    });
-    createdDocs.push(botUserRef);
+    // 1. Bot user creation skipped (not allowed by rules and not required for test)
 
     // 2. Create league doc
     const leagueRef = doc(db, "fantasy_leagues", leagueId);
@@ -133,6 +122,7 @@ async function runTest() {
       members: [adminUid, botUid],
       status: "active",
       currentWeek: 1,
+      season_id: "1",
       rosterSettings: {
         forwards: { starters: 6 },
         defense: { starters: 4 },
@@ -152,6 +142,7 @@ async function runTest() {
       teamName: "Admin Vipers",
       avatar: "🏒",
       players: ["pwhl_1"],
+      activePlayers: ["pwhl_1"],
       wins: 0, losses: 0, ties: 0, points: 0.0
     });
     createdDocs.push(adminTeamRef);
@@ -163,9 +154,27 @@ async function runTest() {
       teamName: "Bot Vipers",
       avatar: "🤖",
       players: ["pwhl_8"],
+      activePlayers: ["pwhl_8"],
       wins: 0, losses: 0, ties: 0, points: 0.0
     });
     createdDocs.push(botTeamRef);
+
+    // Create initial daily lineups for both teams on Dec 25, 2023 (start of Week 1)
+    const adminLineupRef = doc(db, `fantasy_leagues/${leagueId}/teams/${adminTeamId}/daily_lineups`, "2023-12-25");
+    await setDoc(adminLineupRef, {
+      date: "2023-12-25",
+      activeLineup: { F1: "pwhl_1" },
+      bench: []
+    });
+    createdDocs.push(adminLineupRef);
+
+    const botLineupRef = doc(db, `fantasy_leagues/${leagueId}/teams/${botTeamId}/daily_lineups`, "2023-12-25");
+    await setDoc(botLineupRef, {
+      date: "2023-12-25",
+      activeLineup: { D1: "pwhl_8" },
+      bench: []
+    });
+    createdDocs.push(botLineupRef);
 
     // 5. Create Week 1 matchup
     const matchupRef = doc(db, `fantasy_leagues/${leagueId}/matchups`, "week_1_matchup_1");
@@ -202,13 +211,13 @@ async function runTest() {
     });
     createdDocs.push(p8Ref);
 
-    // 7. Write a completed game played on Jan 4, 2024 (during Week 1)
+    // 7. Write a completed game played on Dec 28, 2023 (during Week 1)
     const gameRef = doc(db, "pwhl_games", "game_100");
     await setDoc(gameRef, {
       game_id: "game_100",
       season_id: "1",
       status: "4",
-      date_played: "2024-01-04T19:00:00-08:00"
+      date_played: "2023-12-28T19:00:00-08:00"
     });
     createdDocs.push(gameRef);
 
@@ -236,26 +245,26 @@ async function runTest() {
 
     console.log("✅ Mock environment successfully set up.");
 
-    console.log("\n🚀 STEP 2: Warping clock to start of Week 1 (2024-01-01)...");
+    console.log("\n🚀 STEP 2: Warping clock to start of Week 1 (2023-12-25)...");
     const simStateRef = doc(db, "admin_settings", "simulation_state");
     await setDoc(simStateRef, {
       testModeActive: true,
-      current_simulated_date: "2024-01-01T08:00:00-08:00",
+      current_simulated_date: "2023-12-25T08:00:00-08:00",
       active_test_league_id: leagueId
     }, { merge: true });
 
-    // Wait 3 seconds to let any initial triggers complete
-    console.log("⏳ Waiting 3 seconds...");
-    await new Promise(r => setTimeout(r, 3000));
+    // Wait 15 seconds to let any initial triggers complete
+    console.log("⏳ Waiting 15 seconds...");
+    await new Promise(r => setTimeout(r, 15000));
 
-    console.log("\n🚀 STEP 3: Warping clock past Week 1 boundary (+8 Days to 2024-01-09)...");
+    console.log("\n🚀 STEP 3: Warping clock past Week 1 boundary (2024-01-02)...");
     await setDoc(simStateRef, {
-      current_simulated_date: "2024-01-09T08:00:00-08:00"
+      current_simulated_date: "2024-01-02T08:00:00-08:00"
     }, { merge: true });
 
-    // Wait 7 seconds for finalization transaction and standings commits
-    console.log("⏳ Waiting 7 seconds for Game Loop processing...");
-    await new Promise(r => setTimeout(r, 7000));
+    // Wait 25 seconds for finalization transaction and standings commits
+    console.log("⏳ Waiting 25 seconds for Game Loop processing...");
+    await new Promise(r => setTimeout(r, 25000));
 
     console.log("\n🚀 STEP 4: Executing assertions on final results...");
 

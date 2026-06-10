@@ -304,21 +304,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     
     const totalRosterSize = fStarters + dStarters + gStarters + benchSlots;
     const picksRemaining = totalRosterSize - pickerRosterIds.length;
-    
-    const fNeeded = Math.max(0, fStarters - posCounts.F);
-    const dNeeded = Math.max(0, dStarters - posCounts.D);
-    const gNeeded = Math.max(0, gStarters - posCounts.G);
-    const totalNeeded = fNeeded + dNeeded + gNeeded;
-    
-    let mustDraftF = false;
-    let mustDraftD = false;
-    let mustDraftG = false;
-    
-    if (picksRemaining <= totalNeeded) {
-      if (fNeeded > 0) mustDraftF = true;
-      if (dNeeded > 0) mustDraftD = true;
-      if (gNeeded > 0) mustDraftG = true;
-    }
+    const nextPicksRemaining = picksRemaining - 1;
 
     // Build the drafted set from the latest draft state
     const currentPicks = currentDraftState.picks || [];
@@ -328,16 +314,30 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     const available = currentAllPlayers.filter(p => {
       if (currentDraftedSet.has(p.id)) return false;
       
-      // Force draft required position if running out of bench slots
-      if (picksRemaining <= totalNeeded) {
-        if (p.pos === 'F' && !mustDraftF) return false;
-        if (p.pos === 'D' && !mustDraftD) return false;
-        if (p.pos === 'G' && !mustDraftG) return false;
-      }
+      const pos = p.pos || 'F';
       
-      if (p.pos === 'F' && posCounts.F >= forwardsLimit) return false;
-      if (p.pos === 'D' && posCounts.D >= defenseLimit) return false;
-      if (p.pos === 'G' && posCounts.G >= goaliesLimit) return false;
+      let nextFCount = posCounts.F;
+      let nextDCount = posCounts.D;
+      let nextGCount = posCounts.G;
+      if (pos === 'F') nextFCount++;
+      else if (pos === 'D') nextDCount++;
+      else if (pos === 'G') nextGCount++;
+
+      // 1. Position Max Limits
+      if (pos === 'F' && nextFCount > forwardsLimit) return false;
+      if (pos === 'D' && nextDCount > defenseLimit) return false;
+      if (pos === 'G' && nextGCount > goaliesLimit) return false;
+
+      // 2. Minimum Active Roster Requirements
+      const fNeeded = Math.max(0, fStarters - nextFCount);
+      const dNeeded = Math.max(0, dStarters - nextDCount);
+      const gNeeded = Math.max(0, gStarters - nextGCount);
+      const totalNeeded = fNeeded + dNeeded + gNeeded;
+
+      if (nextPicksRemaining < totalNeeded) {
+        return false;
+      }
+
       return true;
     });
 
@@ -1124,17 +1124,39 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                                                (rosterSettings.goalies?.max ?? 3);
                               const isLimitReached = posCounts[player.pos] >= maxLimit;
 
+                              const fStarters = rosterSettings.forwards?.starters ?? 6;
+                              const dStarters = rosterSettings.defense?.starters ?? 4;
+                              const gStarters = rosterSettings.goalies?.starters ?? 1;
+                              const benchSlots = rosterSettings.bench ?? 4;
+                              const totalRosterSize = fStarters + dStarters + gStarters + benchSlots;
+
+                              const picksRemaining = totalRosterSize - myRosterIds.length;
+                              const nextPicksRemaining = picksRemaining - 1;
+
+                              let nextFCount = posCounts.F;
+                              let nextDCount = posCounts.D;
+                              let nextGCount = posCounts.G;
+                              if (player.pos === 'F') nextFCount++;
+                              else if (player.pos === 'D') nextDCount++;
+                              else if (player.pos === 'G') nextGCount++;
+
+                              const fNeeded = Math.max(0, fStarters - nextFCount);
+                              const dNeeded = Math.max(0, dStarters - nextDCount);
+                              const gNeeded = Math.max(0, gStarters - nextGCount);
+                              const totalNeeded = fNeeded + dNeeded + gNeeded;
+                              const isEligible = nextPicksRemaining >= totalNeeded;
+
                               return (
                                 <button
                                   onClick={() => handleSelectPlayer(player.id)}
-                                  disabled={!isMyTurn || isSubmitting || isLimitReached}
+                                  disabled={!isMyTurn || isSubmitting || isLimitReached || !isEligible}
                                   className={`px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-wider transition-all active:scale-95 shadow-sm ${
-                                    isMyTurn && !isLimitReached
+                                    isMyTurn && !isLimitReached && isEligible
                                       ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-indigo-600/10 hover:from-indigo-500 hover:to-violet-500' 
                                       : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-not-allowed shadow-none'
                                   }`}
                                 >
-                                  {isLimitReached ? 'Limit' : 'Draft'}
+                                  {isLimitReached ? 'Limit' : !isEligible ? 'Ineligible' : 'Draft'}
                                 </button>
                               );
                             })()}
@@ -1214,6 +1236,29 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                          p.pos === 'D' ? (rosterSettings.defense?.max ?? 8) :
                          (rosterSettings.goalies?.max ?? 3);
         const isLimitReached = posCounts[p.pos] >= maxLimit;
+
+        const fStarters = rosterSettings.forwards?.starters ?? 6;
+        const dStarters = rosterSettings.defense?.starters ?? 4;
+        const gStarters = rosterSettings.goalies?.starters ?? 1;
+        const benchSlots = rosterSettings.bench ?? 4;
+        const totalRosterSize = fStarters + dStarters + gStarters + benchSlots;
+
+        const picksRemaining = totalRosterSize - myRosterIds.length;
+        const nextPicksRemaining = picksRemaining - 1;
+
+        let nextFCount = posCounts.F;
+        let nextDCount = posCounts.D;
+        let nextGCount = posCounts.G;
+        if (p.pos === 'F') nextFCount++;
+        else if (p.pos === 'D') nextDCount++;
+        else if (p.pos === 'G') nextGCount++;
+
+        const fNeeded = Math.max(0, fStarters - nextFCount);
+        const dNeeded = Math.max(0, dStarters - nextDCount);
+        const gNeeded = Math.max(0, gStarters - nextGCount);
+        const totalNeeded = fNeeded + dNeeded + gNeeded;
+        const isEligible = nextPicksRemaining >= totalNeeded;
+
         const isDrafted = draftedSet.has(p.id);
 
         return (
@@ -1323,6 +1368,10 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                   ) : isLimitReached ? (
                     <div className="w-full py-3 rounded-2xl bg-amber-50 border border-amber-100 text-center text-[10px] font-black uppercase tracking-wider text-amber-600">
                       Position Limit Reached ({p.pos})
+                    </div>
+                  ) : !isEligible ? (
+                    <div className="w-full py-3 rounded-2xl bg-amber-50 border border-amber-100 text-center text-[10px] font-black uppercase tracking-wider text-amber-600">
+                      Starter Required (F: {fNeeded}, D: {dNeeded}, G: {gNeeded})
                     </div>
                   ) : (
                     <button

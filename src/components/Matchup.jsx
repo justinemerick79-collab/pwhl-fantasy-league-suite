@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { db } from '../firebase.js';
 import { doc, getDoc, collection, getDocs, query, where, updateDoc } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
@@ -8,6 +8,23 @@ import PlayerCardModal from './PlayerCardModal';
 export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const { currentUser } = useAuth();
   const { activeSeasonId, getSimulatedDate, simulationState } = useTimeTravel();
+
+  const getLocalDateStr = (date) => {
+    if (!date) return '';
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+  // Safe parser: avoids UTC midnight shift when parsing "YYYY-MM-DD" strings
+  const parseDateStr = (dateStr) => {
+    if (!dateStr) return new Date();
+    // If it's already an ISO string with time info, parse normally
+    if (dateStr.includes('T') || dateStr.includes(' ')) return new Date(dateStr);
+    // Bare YYYY-MM-DD: parse as local noon to avoid timezone day shift
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, m - 1, d, 12, 0, 0);
+  };
   const [activeTab, setActiveTab] = useState('scoreboard'); // 'scoreboard' | 'rosters' (Used for mobile aspect stack)
   const [leagueData, setLeagueData] = useState(null);
   const [teams, setTeams] = useState([]);
@@ -21,7 +38,9 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const [playerStats, setPlayerStats] = useState({});
   const [dailyPlayerStats, setDailyPlayerStats] = useState({});
   const [selectedMatchupDate, setSelectedMatchupDate] = useState(null);
-  const [matchupWeekBounds, setMatchupWeekBounds] = useState({ start: null, end: null });
+  const lastSimDateStrRef = useRef('');
+  const lastLeagueIdRef = useRef('');
+  const lastWeekRef = useRef(null);
   const [pwhlGames, setPwhlGames] = useState([]);
 
   const [playersMap, setPlayersMap] = useState({});
@@ -29,6 +48,76 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const [isOffWeek, setIsOffWeek] = useState(false);
   const [weekDateRange, setWeekDateRange] = useState('');
   const [resolvedCurrentWeek, setResolvedCurrentWeek] = useState(1);
+
+  const matchupWeekBounds = useMemo(() => {
+    let weekStartStr = "2024-01-01";
+    let weekEndStr = "2024-01-07";
+    
+    if (seasonWeeks && seasonWeeks.length > 0) {
+      const wk = seasonWeeks.find(w => w.week === resolvedCurrentWeek);
+      if (wk) {
+        weekStartStr = wk.start;
+        weekEndStr = wk.end;
+      }
+    } else {
+      const baseTime = new Date("2024-01-01T03:00:00-08:00").getTime();
+      const weekMs = 7 * 24 * 60 * 60 * 1000;
+      const start = new Date(baseTime + (resolvedCurrentWeek - 1) * weekMs);
+      const end = new Date(baseTime + resolvedCurrentWeek * weekMs - 1000);
+      weekStartStr = start.toISOString();
+      weekEndStr = end.toISOString();
+    }
+
+    return {
+      start: new Date(weekStartStr),
+      end: new Date(weekEndStr)
+    };
+  }, [seasonWeeks, resolvedCurrentWeek]);
+
+  // Sync selectedMatchupDate to simulation date (clamped to week bounds) when simulation/week details change
+  useEffect(() => {
+    if (!matchupWeekBounds.start || !matchupWeekBounds.end) return;
+    const simDate = getSimulatedDate();
+    const simDateStr = getLocalDateStr(simDate);
+
+    const hasSimDateChanged = simDateStr !== lastSimDateStrRef.current;
+    const hasLeagueChanged = activeLeagueId !== lastLeagueIdRef.current;
+    const hasWeekChanged = resolvedCurrentWeek !== lastWeekRef.current;
+
+    if (hasSimDateChanged || hasLeagueChanged || hasWeekChanged || !selectedMatchupDate) {
+      lastSimDateStrRef.current = simDateStr;
+      lastLeagueIdRef.current = activeLeagueId;
+      lastWeekRef.current = resolvedCurrentWeek;
+
+      let targetDate = simDate;
+      if (targetDate < matchupWeekBounds.start) targetDate = matchupWeekBounds.start;
+      if (targetDate > matchupWeekBounds.end) targetDate = matchupWeekBounds.end;
+
+      setSelectedMatchupDate(targetDate);
+    }
+  }, [activeLeagueId, resolvedCurrentWeek, matchupWeekBounds, getSimulatedDate]);
+
+  // Daily lineups scoring state
+  const [homeLineupsState, setHomeLineupsState] = useState({});
+  const [awayLineupsState, setAwayLineupsState] = useState({});
+  // Daily lineups scoring state
+  const [homeScoreCalc, setHomeScoreCalc] = useState(0.0);
+  const [awayScoreCalc, setAwayScoreCalc] = useState(0.0);
+
+  // Extract factual team details from Firestore loaded lists
+  const myTeam = teams.find(t => t.ownerId === currentUser?.uid) || { teamName: "My Team", avatar: "🏒" };
+  const oppTeam = teams.find(t => t.ownerId !== currentUser?.uid) || { teamName: "Waiting for Opponent", avatar: "🥅" };
+
+  const myTeamMatchup = myTeam ? weeklyMatchups.find(m => m.homeTeamId === myTeam.id || m.awayTeamId === myTeam.id) : null;
+  const isHome = myTeam && myTeamMatchup && myTeam.id === myTeamMatchup.homeTeamId;
+  const myScore = myTeamMatchup ? (isHome ? myTeamMatchup.homeScore : myTeamMatchup.awayScore) : 0.0;
+  const oppScore = myTeamMatchup ? (isHome ? myTeamMatchup.awayScore : myTeamMatchup.homeScore) : 0.0;
+
+  const oppTeamId = myTeamMatchup ? (isHome ? myTeamMatchup.awayTeamId : myTeamMatchup.homeTeamId) : null;
+  const resolvedOppTeam = teams.find(t => t.id === oppTeamId) || oppTeam;
+
+  const myScoreCalc = isHome ? homeScoreCalc : awayScoreCalc;
+  const oppScoreCalc = isHome ? awayScoreCalc : homeScoreCalc;
 
   useEffect(() => {
     if (!leagueData) return;
@@ -135,6 +224,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           if (normPos === 'C' || normPos === 'LW' || normPos === 'RW') normPos = 'F';
           else if (normPos === 'LD' || normPos === 'RD') normPos = 'D';
           
+          const rating = p.rating || (normPos === 'G' ? 85 : (normPos === 'D' ? 82 : 84));
+
           map[cleanId] = {
             ...p,
             id: cleanId,
@@ -144,6 +235,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
             teamCode: teamsMap[actualTeamId]?.code || p.team_name || 'FA',
             teamLogo: teamsMap[actualTeamId]?.logo,
             team: teamsMap[actualTeamId]?.code || p.team_name || 'FA',
+            team_id: actualTeamId,
             rating
           };
         });
@@ -181,66 +273,92 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
     // Fetch player fantasy points for the current matchup week
     const loadPoints = async () => {
+      if (!myTeam?.id || !oppTeamId || !selectedMatchupDate) return;
       try {
-        const { fetchWeeklyPlayerPoints } = await import('../services/statsEngine');
+        const { fetchDailyPlayerPointsFromSnapshot } = await import('../services/statsEngine');
         const simDate = getSimulatedDate();
         const resolvedSeasonId = activeSeasonId ? String(activeSeasonId) : '5';
 
-        let weekStartStr = "2024-01-01";
-        let weekEndStr = "2024-01-07";
+        const weekStart = matchupWeekBounds.start || new Date("2024-01-01");
+        const weekEnd = matchupWeekBounds.end || new Date("2024-01-07");
+
+        // 1. Fetch daily player points for the entire week (reads from daily_game_stats with fallback)
+        const dailyPointsForWeek = await fetchDailyPlayerPointsFromSnapshot(resolvedSeasonId, weekStart, weekEnd, simDate, leagueData?.scoringSettings, activeLeagueId);
         
-        if (seasonWeeks && seasonWeeks.length > 0) {
-          const wk = seasonWeeks.find(w => w.week === resolvedCurrentWeek);
-          if (wk) {
-            weekStartStr = wk.start;
-            weekEndStr = wk.end;
-          }
-        } else {
-          const baseTime = new Date("2024-01-01T03:00:00-08:00").getTime();
-          const weekMs = 7 * 24 * 60 * 60 * 1000;
-          const start = new Date(baseTime + (resolvedCurrentWeek - 1) * weekMs);
-          const end = new Date(baseTime + resolvedCurrentWeek * weekMs - 1000);
-          weekStartStr = start.toISOString();
-          weekEndStr = end.toISOString();
+        // Also fetch daily points for the selected matchup day for the rosters table display
+        const dayDateStr = getLocalDateStr(selectedMatchupDate);
+        setDailyPlayerStats(dailyPointsForWeek[dayDateStr] || {});
+
+        // 2. Fetch daily lineups for home and away teams
+        const homeLineupsSnap = await getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/teams/${myTeam.id}/daily_lineups`));
+        const homeLineups = {};
+        homeLineupsSnap.forEach(d => {
+          homeLineups[d.id] = d.data();
+        });
+        setHomeLineupsState(homeLineups);
+
+        const awayLineupsSnap = await getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/teams/${oppTeamId}/daily_lineups`));
+        const awayLineups = {};
+        awayLineupsSnap.forEach(d => {
+          awayLineups[d.id] = d.data();
+        });
+        setAwayLineupsState(awayLineups);
+
+        // 3. Calculate dynamic scores by summing active points day-by-day
+        const dates = [];
+        const current = new Date(weekStart);
+        while (current <= weekEnd) {
+          dates.push(getLocalDateStr(current));
+          current.setDate(current.getDate() + 1);
         }
 
-        const weekStart = new Date(weekStartStr);
-        const weekEnd = new Date(weekEndStr);
-        
-        setMatchupWeekBounds({ start: weekStart, end: weekEnd });
-        
-        // Let selectedMatchupDate float, BUT default to simDate if null.
-        let targetDate = selectedMatchupDate || simDate;
-        
-        // IMPORTANT: we should only auto-clamp if targetDate is out of bounds of the *newly loaded* week.
-        // If the user hasn't clicked arrows, selectedMatchupDate is null, so it falls to simDate.
-        // The simDate determines the resolvedCurrentWeek, so it will naturally fall within week bounds!
-        if (targetDate < weekStart) targetDate = weekStart;
-        if (targetDate > weekEnd) targetDate = weekEnd;
-        
-        if (!selectedMatchupDate || targetDate.getTime() !== selectedMatchupDate.getTime()) {
-          setSelectedMatchupDate(targetDate);
-        }
+        const rosterSettings = leagueData?.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+        const fLimit = rosterSettings.forwards?.starters ?? 6;
+        const dLimit = rosterSettings.defense?.starters ?? 4;
+        const gLimit = rosterSettings.goalies?.starters ?? 1;
 
-        const dayStart = new Date(targetDate);
-        dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date(targetDate);
-        dayEnd.setHours(23, 59, 59, 999);
-        
-        // 1. Fetch weekly points for the top scoreboard
-        const weeklyResult = await fetchWeeklyPlayerPoints(resolvedSeasonId, weekStart, weekEnd, simDate, leagueData?.scoringSettings);
-        setPlayerStats(weeklyResult.pointsMap || {});
+        const calcTeamScore = (teamLineups, teamDoc) => {
+          let score = 0.0;
+          dates.forEach(dStr => {
+            let activeLineup = {};
+            const daily = teamLineups[dStr];
+            if (daily && daily.activeLineup) {
+              activeLineup = daily.activeLineup;
+            } else {
+              // Fallback default position mapping
+              const activeIds = (teamDoc.activePlayers || []).map(String);
+              let fc = 0, dc = 0, gc = 0;
+              activeIds.forEach(pId => {
+                const info = playersMap[pId] || {};
+                const pos = info.pos || 'F';
+                if (pos === 'F' && fc < fLimit) { fc++; activeLineup[`F${fc}`] = pId; }
+                else if (pos === 'D' && dc < dLimit) { dc++; activeLineup[`D${dc}`] = pId; }
+                else if (pos === 'G' && gc < gLimit) { gc++; activeLineup[`G${gc}`] = pId; }
+              });
+            }
 
-        // 2. Fetch daily points for the side-by-side roster comparison
-        const dailyResult = await fetchWeeklyPlayerPoints(resolvedSeasonId, dayStart, dayEnd, simDate, leagueData?.scoringSettings);
-        setDailyPlayerStats(dailyResult.pointsMap || {});
+            Object.values(activeLineup).forEach(pId => {
+              if (pId) {
+                const pts = dailyPointsForWeek[dStr]?.[pId] || 0.0;
+                score += pts;
+              }
+            });
+          });
+          return score;
+        };
+
+        const homeCalc = calcTeamScore(homeLineups, myTeam);
+        const awayCalc = calcTeamScore(awayLineups, resolvedOppTeam);
+        setHomeScoreCalc(homeCalc);
+        setAwayScoreCalc(awayCalc);
+
       } catch (err) {
         console.error("Error loading player points:", err);
       }
     };
     
     loadPoints();
-  }, [activeLeagueId, leagueData, activeSeasonId, seasonWeeks, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek]);
+  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam?.id, oppTeamId, playersMap, matchupWeekBounds]);
 
   useEffect(() => {
     if (!leagueData || !leagueData.draftDate) return;
@@ -330,105 +448,91 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   // Factual check if the league is full or waiting for teams
   const isFull = leagueData && leagueData.members && (leagueData.members.length >= leagueData.maxTeams);
 
-  // Extract factual team details from Firestore loaded lists
-  const myTeam = teams.find(t => t.ownerId === currentUser?.uid) || { teamName: "My Team", avatar: "🏒" };
-  const oppTeam = teams.find(t => t.ownerId !== currentUser?.uid) || { teamName: "Waiting for Opponent", avatar: "🥅" };
-
   const currentWeek = leagueData?.currentWeek || 1;
 
-  const myTeamMatchup = myTeam ? weeklyMatchups.find(m => m.homeTeamId === myTeam.id || m.awayTeamId === myTeam.id) : null;
-  const isHome = myTeam && myTeamMatchup && myTeam.id === myTeamMatchup.homeTeamId;
-  const myScore = myTeamMatchup ? (isHome ? myTeamMatchup.homeScore : myTeamMatchup.awayScore) : 0.0;
-  const oppScore = myTeamMatchup ? (isHome ? myTeamMatchup.awayScore : myTeamMatchup.homeScore) : 0.0;
-
-  const oppTeamId = myTeamMatchup ? (isHome ? myTeamMatchup.awayTeamId : myTeamMatchup.homeTeamId) : null;
-  const resolvedOppTeam = teams.find(t => t.id === oppTeamId) || oppTeam;
-
   let winProb = 50;
-  if (myTeamMatchup && (myScore > 0 || oppScore > 0)) {
-    winProb = Math.round((myScore / (myScore + oppScore)) * 100);
+  if (myTeamMatchup && (myScoreCalc > 0 || oppScoreCalc > 0)) {
+    winProb = Math.round((myScoreCalc / (myScoreCalc + oppScoreCalc)) * 100);
     if (winProb < 5) winProb = 5;
     if (winProb > 95) winProb = 95;
   }
 
   const buildStartingLineups = () => {
-    if (!myTeam || !resolvedOppTeam) return [];
+    if (!myTeam || !resolvedOppTeam || !selectedMatchupDate) return [];
     
-    // Combine active and bench players if explicitly set, else fallback to players array
-    const getTeamPlayerIds = (t) => {
-      const active = t.activePlayers || [];
-      const bench = t.benchPlayers || [];
-      const combined = [...active, ...bench];
-      const source = combined.length > 0 ? combined : (t.players || []);
-      // Extract robust string ID whether it's stored as primitive or object
-      return source.map(p => String(typeof p === 'object' && p !== null ? (p.id || p.player_id || p) : p));
-    };
-
-    const myPlayers = getTeamPlayerIds(myTeam);
-    const oppPlayers = getTeamPlayerIds(resolvedOppTeam);
-
-    const slots = [
-      { label: "F", pos: "F" },
-      { label: "F", pos: "F" },
-      { label: "F", pos: "F" },
-      { label: "F", pos: "F" },
-      { label: "F", pos: "F" },
-      { label: "F", pos: "F" },
-      { label: "D", pos: "D" },
-      { label: "D", pos: "D" },
-      { label: "D", pos: "D" },
-      { label: "D", pos: "D" },
-      { label: "G", pos: "G" }
-    ];
-
-    const myUnused = [...myPlayers];
-    const oppUnused = [...oppPlayers];
-
-    const getMockPos = (id) => {
-      const numId = parseInt(String(id).replace(/^\D+/g, ''), 10);
-      if (!isNaN(numId)) {
-        if (numId >= 12 && numId <= 14) return "G";
-        if (numId >= 8 && numId <= 11) return "D";
-      }
-      return "F";
-    };
-
-    const baseLineups = slots.map((slot) => {
-      const myMatchIdx = myUnused.findIndex(id => {
-        const info = playersMap[id] || {};
-        const pos = info.pos || getMockPos(id);
-        return pos === slot.pos;
+    const dateStr = getLocalDateStr(selectedMatchupDate);
+    const rosterSettings = leagueData?.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+    const fLimit = rosterSettings.forwards?.starters ?? 6;
+    const dLimit = rosterSettings.defense?.starters ?? 4;
+    const gLimit = rosterSettings.goalies?.starters ?? 1;
+    
+    // Resolve home team lineup
+    let homeActive = {};
+    let homeBench = [];
+    const homeDoc = homeLineupsState[dateStr];
+    if (homeDoc) {
+      homeActive = homeDoc.activeLineup || {};
+      homeBench = homeDoc.bench || [];
+    } else {
+      // Fallback
+      const activeIds = (myTeam.activePlayers || []).map(String);
+      let fc = 0, dc = 0, gc = 0;
+      activeIds.forEach(pId => {
+        const info = playersMap[pId] || {};
+        const pos = info.pos || 'F';
+        if (pos === 'F' && fc < fLimit) { fc++; homeActive[`F${fc}`] = pId; }
+        else if (pos === 'D' && dc < dLimit) { dc++; homeActive[`D${dc}`] = pId; }
+        else if (pos === 'G' && gc < gLimit) { gc++; homeActive[`G${gc}`] = pId; }
+        else { homeBench.push(pId); }
       });
-      let myP = null;
-      if (myMatchIdx !== -1) {
-        myP = myUnused[myMatchIdx];
-        myUnused.splice(myMatchIdx, 1);
-      }
+      (myTeam.benchPlayers || []).forEach(pId => homeBench.push(String(pId)));
+    }
 
-      const oppMatchIdx = oppUnused.findIndex(id => {
-        const info = playersMap[id] || {};
-        const pos = info.pos || getMockPos(id);
-        return pos === slot.pos;
+    // Resolve away team lineup
+    let awayActive = {};
+    let awayBench = [];
+    const awayDoc = awayLineupsState[dateStr];
+    if (awayDoc) {
+      awayActive = awayDoc.activeLineup || {};
+      awayBench = awayDoc.bench || [];
+    } else {
+      // Fallback
+      const activeIds = (resolvedOppTeam.activePlayers || []).map(String);
+      let fc = 0, dc = 0, gc = 0;
+      activeIds.forEach(pId => {
+        const info = playersMap[pId] || {};
+        const pos = info.pos || 'F';
+        if (pos === 'F' && fc < fLimit) { fc++; awayActive[`F${fc}`] = pId; }
+        else if (pos === 'D' && dc < dLimit) { dc++; awayActive[`D${dc}`] = pId; }
+        else if (pos === 'G' && gc < gLimit) { gc++; awayActive[`G${gc}`] = pId; }
+        else { awayBench.push(pId); }
       });
-      let oppP = null;
-      if (oppMatchIdx !== -1) {
-        oppP = oppUnused[oppMatchIdx];
-        oppUnused.splice(oppMatchIdx, 1);
-      }
+      (resolvedOppTeam.benchPlayers || []).forEach(pId => awayBench.push(String(pId)));
+    }
 
+    // Align starting positions
+    const slots = [];
+    for (let i = 1; i <= fLimit; i++) slots.push({ label: "F", key: `F${i}`, pos: "F" });
+    for (let i = 1; i <= dLimit; i++) slots.push({ label: "D", key: `D${i}`, pos: "D" });
+    for (let i = 1; i <= gLimit; i++) slots.push({ label: "G", key: `G${i}`, pos: "G" });
+
+    const baseLineups = slots.map(slot => {
+      const myP = homeActive[slot.key];
+      const oppP = awayActive[slot.key];
       return {
         slotLabel: slot.label,
-        slotPos: slot.pos,
+        slotPos: slot.key,
         myPlayer: myP ? { id: myP, ...playersMap[myP] } : null,
         oppPlayer: oppP ? { id: oppP, ...playersMap[oppP] } : null
       };
     });
 
+    // Align bench rows
     const benchLineups = [];
-    const maxBenchLen = Math.max(myUnused.length, oppUnused.length);
+    const maxBenchLen = Math.max(homeBench.length, awayBench.length);
     for (let i = 0; i < maxBenchLen; i++) {
-      const myP = myUnused[i];
-      const oppP = oppUnused[i];
+      const myP = homeBench[i];
+      const oppP = awayBench[i];
       benchLineups.push({
         slotLabel: "BN",
         slotPos: "BN",
@@ -800,9 +904,9 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                 <h3 className="text-sm font-black text-gray-800 mt-4 truncate w-full">{myTeam.teamName}</h3>
                 <p className="text-[10px] text-indigo-600 font-bold mt-0.5 uppercase tracking-widest">You</p>
                 
-                <p className="text-4xl font-black text-gray-900 mt-4 tracking-tight">{myScore.toFixed(1)}</p>
+                <p className="text-4xl font-black text-gray-900 mt-4 tracking-tight">{myScoreCalc.toFixed(1)}</p>
                 <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider mt-1">
-                  Proj Weekly: {myTeamMatchup ? (myScore * 1.15).toFixed(1) : '0.0'}
+                  Proj Weekly: {myTeamMatchup ? (myScoreCalc * 1.15).toFixed(1) : '0.0'}
                 </p>
               </div>
 
@@ -822,9 +926,9 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                 <h3 className="text-sm font-black text-gray-800 mt-4 truncate w-full">{resolvedOppTeam.teamName}</h3>
                 <p className="text-[10px] text-gray-400 font-bold mt-0.5 uppercase tracking-widest">Opponent</p>
                 
-                <p className="text-4xl font-black text-gray-900 mt-4 tracking-tight">{oppScore.toFixed(1)}</p>
+                <p className="text-4xl font-black text-gray-900 mt-4 tracking-tight">{oppScoreCalc.toFixed(1)}</p>
                 <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider mt-1">
-                  Proj Weekly: {myTeamMatchup ? (oppScore * 1.15).toFixed(1) : '0.0'}
+                  Proj Weekly: {myTeamMatchup ? (oppScoreCalc * 1.15).toFixed(1) : '0.0'}
                 </p>
               </div>
             </div>
@@ -884,7 +988,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                 <span className="w-[45%] text-right">{resolvedOppTeam.teamName.split(' ').pop()} Athletes</span>
               </div>
 
-              {myTeam?.players?.length > 0 || resolvedOppTeam?.players?.length > 0 ? (
+              {comparisonLineups.length > 0 ? (
                 comparisonLineups.map((row, idx) => {
                   const myP = row.myPlayer;
                   const oppP = row.oppPlayer;
@@ -894,18 +998,16 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                   // Helper to get daily game text
                   const getDailyGameText = (player) => {
                     if (!player || !selectedMatchupDate) return null;
-                    const dateStr = selectedMatchupDate.toISOString().split('T')[0];
+                    const dateStr = getLocalDateStr(selectedMatchupDate);
                     const game = pwhlGames.find(g => {
                       if (!g.date_played && !g.date) return false;
-                      const gDateStr = new Date(g.date_played || g.date).toISOString().split('T')[0];
+                      const gDateStr = getLocalDateStr(parseDateStr(g.date_played || g.date));
                       if (gDateStr !== dateStr) return false;
                       return (String(g.home_team) === String(player.team_id) || String(g.visiting_team) === String(player.team_id));
                     });
                     if (game) {
                       const isHome = String(game.home_team) === String(player.team_id);
-                      const oppId = isHome ? game.visiting_team : game.home_team;
-                      // Try to map oppId to code via pwhlGames (could be raw ID)
-                      const oppCode = String(oppId); // In reality we'd want the team code, but fallback to ID or Name
+                      const oppCode = isHome ? (game.visiting_team_code || game.visiting_team) : (game.home_team_code || game.home_team);
                       const timeStr = new Date(game.date_played || game.date).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
                       return isHome ? `vs ${oppCode} ${timeStr}` : `@ ${oppCode} ${timeStr}`;
                     }
@@ -974,10 +1076,10 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {(() => {
                 if (!selectedMatchupDate || pwhlGames.length === 0) return null;
-                const dateStr = selectedMatchupDate.toISOString().split('T')[0];
+                const dateStr = getLocalDateStr(selectedMatchupDate);
                 const dailyGames = pwhlGames.filter(g => {
                   if (!g.date_played && !g.date) return false;
-                  return new Date(g.date_played || g.date).toISOString().split('T')[0] === dateStr;
+                  return getLocalDateStr(parseDateStr(g.date_played || g.date)) === dateStr;
                 });
                 
                 if (dailyGames.length === 0) {
@@ -1002,6 +1104,10 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                             </span>
                             LIVE (P{game.period || '1'})
                           </div>
+                        ) : (game.status === '3' || game.status === '4') ? (
+                          <span className="text-[9px] font-black uppercase tracking-widest text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-200">
+                            FINAL
+                          </span>
                         ) : (
                           <span className="text-[9px] font-black uppercase tracking-widest text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
                             {timeStr}
@@ -1014,9 +1120,9 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                           <div className="text-sm font-black text-gray-800">{game.home_team_name || game.home_team || 'Home'}</div>
                         </div>
                         <div className="flex justify-center items-center gap-3 w-[20%]">
-                          <span className="text-xl font-black text-gray-900">{game.home_score || 0}</span>
+                          <span className="text-xl font-black text-gray-900">{game.home_goal_count ?? game.home_score ?? 0}</span>
                           <span className="text-gray-300 font-black">-</span>
-                          <span className="text-xl font-black text-gray-900">{game.visiting_score || 0}</span>
+                          <span className="text-xl font-black text-gray-900">{game.visiting_goal_count ?? game.visiting_score ?? 0}</span>
                         </div>
                         <div className="flex items-center gap-3 w-[40%] justify-end text-right">
                           <div className="text-sm font-black text-gray-800">{game.visiting_team_name || game.visiting_team || 'Away'}</div>

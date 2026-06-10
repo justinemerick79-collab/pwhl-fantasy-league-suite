@@ -94,8 +94,38 @@ service cloud.firestore {
     }
     
     // Fantasy Leagues
-    match /fantasy_leagues/{document=**} {
+    match /fantasy_leagues/{leagueId} {
       allow read, write: if isAuthenticated();
+      
+      match /teams/{teamId} {
+        allow read, write: if isAuthenticated();
+        
+        match /daily_lineups/{date} {
+          allow read: if isAuthenticated();
+          allow write: if isAuthenticated()
+            && get(/databases/$(database)/documents/fantasy_leagues/$(leagueId)/teams/$(teamId)).data.ownerId == request.auth.uid
+            && (
+              !exists(/databases/$(database)/documents/admin_settings/simulation_state) ||
+              date >= get(/databases/$(database)/documents/admin_settings/simulation_state).data.current_simulated_date
+            );
+        }
+      }
+      
+      match /matchups/{document=**} {
+        allow read, write: if isAuthenticated();
+      }
+      match /draft/{document=**} {
+        allow read, write: if isAuthenticated();
+      }
+      match /waivers/{document=**} {
+        allow read, write: if isAuthenticated();
+      }
+      match /waiver_claims/{document=**} {
+        allow read, write: if isAuthenticated();
+      }
+      match /trades/{document=**} {
+        allow read, write: if isAuthenticated();
+      }
     }
     
     // App Settings
