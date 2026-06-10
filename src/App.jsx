@@ -42,6 +42,7 @@ function App() {
   const [isDayAdvancing, setIsDayAdvancing] = useState(false);
   const [isSkippingWeek, setIsSkippingWeek] = useState(false);
   const [isTeardownLoading, setIsTeardownLoading] = useState(false);
+  const [isSyncingStats, setIsSyncingStats] = useState(false);
 
   const getDateStr = (date) => {
     const y = date.getFullYear();
@@ -165,6 +166,25 @@ function App() {
       alert("Simulation Deactivation Failed:\n" + err.message);
     } finally {
       setIsTeardownLoading(false);
+    }
+  };
+
+  const handleTriggerSimulationDailySync = async () => {
+    setIsSyncingStats(true);
+    try {
+      const triggerFn = httpsCallable(functions, 'triggerSimulationDailySync');
+      const res = await triggerFn({ leagueId: activeLeagueId });
+      if (res.data?.success) {
+        alert(`Successfully sync'd game stats for date: ${res.data.dateStr}`);
+        window.location.reload();
+      } else {
+        throw new Error(res.data?.error || "Unknown error during daily sync.");
+      }
+    } catch (err) {
+      console.error("Simulation sync failed:", err);
+      alert("Simulation Sync Failed:\n" + err.message);
+    } finally {
+      setIsSyncingStats(false);
     }
   };
 
@@ -384,6 +404,13 @@ function App() {
               className="bg-violet-600 hover:bg-violet-500 disabled:bg-violet-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-violet-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
             >
               {isSkippingWeek ? 'Skipping...' : 'Skip to Week End ⏭️'}
+            </button>
+            <button
+              onClick={handleTriggerSimulationDailySync}
+              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading || isSyncingStats}
+              className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-emerald-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+            >
+              {isSyncingStats ? 'Syncing...' : 'Sync Stats 🔄'}
             </button>
             <button
               onClick={handleDeactivateSimulation}

@@ -74,7 +74,17 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     };
   }, [seasonWeeks, resolvedCurrentWeek]);
 
-  // Sync selectedMatchupDate to simulation date (clamped to week bounds) when simulation/week details change
+  // Compute full season bounds (first week start to last week end)
+  const seasonBounds = useMemo(() => {
+    if (!seasonWeeks || seasonWeeks.length === 0) return { start: null, end: null };
+    const sorted = [...seasonWeeks].sort((a, b) => a.week - b.week);
+    return {
+      start: new Date(sorted[0].start),
+      end: new Date(sorted[sorted.length - 1].end)
+    };
+  }, [seasonWeeks]);
+
+  // Sync selectedMatchupDate to simulation date (clamped to week bounds) when simulation/league changes
   useEffect(() => {
     if (!matchupWeekBounds.start || !matchupWeekBounds.end) return;
     const simDate = getSimulatedDate();
@@ -82,9 +92,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
     const hasSimDateChanged = simDateStr !== lastSimDateStrRef.current;
     const hasLeagueChanged = activeLeagueId !== lastLeagueIdRef.current;
-    const hasWeekChanged = resolvedCurrentWeek !== lastWeekRef.current;
 
-    if (hasSimDateChanged || hasLeagueChanged || hasWeekChanged || !selectedMatchupDate) {
+    if (hasSimDateChanged || hasLeagueChanged || !selectedMatchupDate) {
       lastSimDateStrRef.current = simDateStr;
       lastLeagueIdRef.current = activeLeagueId;
       lastWeekRef.current = resolvedCurrentWeek;
@@ -94,8 +103,10 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       if (targetDate > matchupWeekBounds.end) targetDate = matchupWeekBounds.end;
 
       setSelectedMatchupDate(targetDate);
+    } else {
+      lastWeekRef.current = resolvedCurrentWeek;
     }
-  }, [activeLeagueId, resolvedCurrentWeek, matchupWeekBounds, getSimulatedDate]);
+  }, [activeLeagueId, matchupWeekBounds, getSimulatedDate]);
 
   // Daily lineups scoring state
   const [homeLineupsState, setHomeLineupsState] = useState({});
@@ -121,20 +132,20 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
   useEffect(() => {
     if (!leagueData) return;
+    const targetDate = selectedMatchupDate || getSimulatedDate();
     let cw = leagueData.currentWeek || 1;
     if (seasonWeeks && seasonWeeks.length > 0) {
-      const simDateObj = getSimulatedDate();
       const matchedWeek = seasonWeeks.find(w => {
         const s = new Date(w.start);
         const e = new Date(w.end);
-        return simDateObj >= s && simDateObj <= e;
+        return targetDate >= s && targetDate <= e;
       });
       if (matchedWeek) {
         cw = matchedWeek.week;
       }
     }
     setResolvedCurrentWeek(cw);
-  }, [leagueData, seasonWeeks, getSimulatedDate]);
+  }, [leagueData, seasonWeeks, selectedMatchupDate, getSimulatedDate]);
 
   useEffect(() => {
     if (!activeLeagueId) return;
@@ -407,7 +418,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     const end = new Date(baseTime + resolvedCurrentWeek * weekMs - 1000);
     const options = { month: 'short', day: 'numeric' };
     setWeekDateRange(`${start.toLocaleDateString('en-US', options)} - ${end.toLocaleDateString('en-US', options)}`);
-  }, [leagueData, seasonWeeks]);
+  }, [leagueData, seasonWeeks, resolvedCurrentWeek]);
 
   if (!activeLeagueId) {
     return (
@@ -954,7 +965,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                 newD.setDate(newD.getDate() - 1);
                 setSelectedMatchupDate(newD);
               }}
-              disabled={!selectedMatchupDate || !matchupWeekBounds.start || selectedMatchupDate <= matchupWeekBounds.start}
+              disabled={!selectedMatchupDate || !seasonBounds.start || selectedMatchupDate <= seasonBounds.start}
               className="px-5 py-3.5 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 disabled:opacity-40 transition-all text-[10px] font-black uppercase tracking-widest text-gray-500 shadow-inner active:scale-95"
             >
               &larr; Prev Day
@@ -971,7 +982,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                 newD.setDate(newD.getDate() + 1);
                 setSelectedMatchupDate(newD);
               }}
-              disabled={!selectedMatchupDate || !matchupWeekBounds.end || selectedMatchupDate >= matchupWeekBounds.end}
+              disabled={!selectedMatchupDate || !seasonBounds.end || selectedMatchupDate >= seasonBounds.end}
               className="px-5 py-3.5 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 disabled:opacity-40 transition-all text-[10px] font-black uppercase tracking-widest text-gray-500 shadow-inner active:scale-95"
             >
               Next Day &rarr;

@@ -521,25 +521,86 @@ async function getLockedPlayerIds(dateStr, seasonId, preloadedGames = null) {
  */
 async function readDailyPoints(dateStr, leagueId = null) {
   const docSnap = await getDb().collection("daily_game_stats").doc(dateStr).get();
-  if (!docSnap.exists) {
+  if (docSnap.exists) {
+    const data = docSnap.data();
+
+    // If a league-specific override exists, use it
+    if (leagueId && data.leaguePoints && data.leaguePoints[leagueId]) {
+      return data.leaguePoints[leagueId];
+    }
+
+    // Otherwise, extract just the fantasyPoints from the global playerPoints
+    const result = {};
+    if (data.playerPoints) {
+      for (const [playerId, entry] of Object.entries(data.playerPoints)) {
+        result[playerId] = entry.fantasyPoints || 0;
+      }
+    }
+    return result;
+  }
+
+  // Fallback: Calculate on the fly if snapshot document doesn't exist
+  console.log(`[DailyStats] Snapshot missing for ${dateStr}. Calculating points on the fly...`);
+  try {
+    const gamesSnap = await getDb().collection("pwhl_games").get();
+    const dailyGames = [];
+    gamesSnap.forEach(doc => {
+      const game = doc.data();
+      const gDateStr = game.date_played || game.date;
+      if (!gDateStr) return;
+      const gDate = parseDateSafe(gDateStr);
+      const isFinal = game.status === "4" || game.status === "3";
+      if (getLocalDateStr(gDate) === dateStr && isFinal) {
+        dailyGames.push({ id: doc.id, ...game });
+      }
+    });
+
+    if (dailyGames.length === 0) {
+      return {};
+    }
+
+    let scoringRules = DEFAULT_SCORING;
+    if (leagueId) {
+      const leagueDoc = await getDb().collection("fantasy_leagues").doc(leagueId).get();
+      if (leagueDoc.exists && leagueDoc.data().scoringSettings) {
+        scoringRules = leagueDoc.data().scoringSettings;
+      }
+    }
+
+    const playersPosMap = {};
+    const playersSnap = await getDb().collection("pwhl_players").get();
+    playersSnap.forEach(pDoc => {
+      const p = pDoc.data();
+      const id = p.player_id || p.id || pDoc.id.split("_")[1];
+      if (id) {
+        playersPosMap[id.toString()] = normalizePosition(p.position);
+      }
+    });
+
+    const result = {};
+    for (const game of dailyGames) {
+      const gameId = String(game.game_id || game.id);
+      const summaryDoc = await getDb().collection("pwhl_game_summaries").doc(gameId).get();
+      if (summaryDoc.exists) {
+        const summary = summaryDoc.data();
+        const stats = calculatePlayerStatsFromSummary(summary, scoringRules, playersPosMap);
+        for (const [playerId, entry] of Object.entries(stats)) {
+          if (!result[playerId]) result[playerId] = 0;
+          result[playerId] += entry.fantasyPoints || 0;
+        }
+      }
+    }
+
+    // Round all fantasy points
+    for (const playerId of Object.keys(result)) {
+      result[playerId] = Math.round(result[playerId] * 100) / 100;
+    }
+
+    return result;
+  } catch (err) {
+    console.error(`[DailyStats] Failed calculating fallback daily points for ${dateStr}:`, err);
     return {};
   }
-
-  const data = docSnap.data();
-
-  // If a league-specific override exists, use it
-  if (leagueId && data.leaguePoints && data.leaguePoints[leagueId]) {
-    return data.leaguePoints[leagueId];
-  }
-
-  // Otherwise, extract just the fantasyPoints from the global playerPoints
-  const result = {};
-  if (data.playerPoints) {
-    for (const [playerId, entry] of Object.entries(data.playerPoints)) {
-      result[playerId] = entry.fantasyPoints || 0;
-    }
-  }
-  return result;
 }
 
 /**
@@ -636,6 +697,62 @@ async function getTeamActiveLineup(leagueId, teamId, dateStr) {
     }
   } catch (err) {
     console.error(`[DailyStats] Error finding previous lineup for team ${teamId}:`, err);
+  }
+
+  // Fallback 2: build default lineup using team's activePlayers
+  try {
+    const teamDoc = await getDb().collection("fantasy_leagues").doc(leagueId)
+      .collection("teams").doc(teamId).get();
+    
+    if (teamDoc.exists) {
+      const teamData = teamDoc.data();
+      const activeIds = (teamData.activePlayers || []).map(String);
+      if (activeIds.length > 0) {
+        const leagueDoc = await getDb().collection("fantasy_leagues").doc(leagueId).get();
+        const leagueData = leagueDoc.exists ? leagueDoc.data() : {};
+        const rosterSettings = leagueData.rosterSettings || {};
+        const seasonId = leagueData.season_id ? String(leagueData.season_id) : "1";
+
+        const fLimit = rosterSettings.forwards?.starters ?? 6;
+        const dLimit = rosterSettings.defense?.starters ?? 4;
+        const gLimit = rosterSettings.goalies?.starters ?? 1;
+
+        // Fetch player positions in parallel
+        const playerPromises = activeIds.map(async (pId) => {
+          try {
+            const pSnap = await getDb().collection("pwhl_players").doc(`${seasonId}_${pId}`).get();
+            let pos = 'F';
+            if (pSnap.exists) {
+              pos = normalizePosition(pSnap.data().position);
+            } else {
+              const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
+              if (!isNaN(numId)) {
+                if (numId >= 12 && numId <= 14) pos = "G";
+                else if (numId >= 8 && numId <= 11) pos = "D";
+              }
+            }
+            return { id: pId, pos };
+          } catch (e) {
+            console.error(`[DailyStats] Error fetching player pos for ${pId}:`, e);
+            return { id: pId, pos: 'F' };
+          }
+        });
+
+        const playerInfos = await Promise.all(playerPromises);
+        
+        const activeLineup = {};
+        let fc = 0, dc = 0, gc = 0;
+        playerInfos.forEach(({ id, pos }) => {
+          if (pos === 'F' && fc < fLimit) { fc++; activeLineup[`F${fc}`] = id; }
+          else if (pos === 'D' && dc < dLimit) { dc++; activeLineup[`D${dc}`] = id; }
+          else if (pos === 'G' && gc < gLimit) { gc++; activeLineup[`G${gc}`] = id; }
+        });
+        
+        return activeLineup;
+      }
+    }
+  } catch (err) {
+    console.error(`[DailyStats] Fallback activePlayers lineup build failed for team ${teamId}:`, err);
   }
 
   return {}; // Empty lineup = 0 points

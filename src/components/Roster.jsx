@@ -20,6 +20,14 @@ export default function Roster({ activeLeagueId }) {
   const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
   const [gameHistory, setGameHistory] = useState([]);
 
+  // Safe parser: avoids UTC midnight shift when parsing "YYYY-MM-DD" strings
+  const parseDateStr = (dateStr) => {
+    if (!dateStr) return new Date();
+    if (dateStr.includes('T') || dateStr.includes(' ')) return new Date(dateStr);
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, m - 1, d, 12, 0, 0);
+  };
+
   // Daily lineups states
   const [resolvedCurrentWeek, setResolvedCurrentWeek] = useState(1);
   const [selectedDateStr, setSelectedDateStr] = useState(''); // "YYYY-MM-DD"
@@ -27,6 +35,7 @@ export default function Roster({ activeLeagueId }) {
   const lastLeagueIdRef = useRef('');
   const lastWeekRef = useRef(null);
   const [weekDates, setWeekDates] = useState([]);
+  const [seasonWeeks, setSeasonWeeks] = useState([]);
   const [dailyLineup, setDailyLineup] = useState({ activeLineup: {}, bench: [] });
   const [pwhlGamesToday, setPwhlGamesToday] = useState([]);
   const [dailyPointsMap, setDailyPointsMap] = useState({});
@@ -78,10 +87,24 @@ export default function Roster({ activeLeagueId }) {
     fetchUserRoster();
   }, [activeLeagueId, currentUser]);
 
-  // Resolve week bounds & generate 7 days (Mon-Sun)
+  // Effect 1: Sync selectedDateStr to simDateStr when simulation date or league changes
   useEffect(() => {
-    if (!leagueData) return;
-    
+    const simDate = getSimulatedDate();
+    const simDateStr = getLocalDateStr(simDate);
+    const hasSimDateChanged = simDateStr !== lastSimDateStrRef.current;
+    const hasLeagueChanged = activeLeagueId !== lastLeagueIdRef.current;
+
+    if (hasSimDateChanged || hasLeagueChanged || !selectedDateStr) {
+      lastSimDateStrRef.current = simDateStr;
+      lastLeagueIdRef.current = activeLeagueId;
+      setSelectedDateStr(simDateStr);
+    }
+  }, [activeLeagueId, getSimulatedDate, selectedDateStr]);
+
+  // Effect 2: Resolve week, seasonWeeks, and weekDates based on selectedDateStr
+  useEffect(() => {
+    if (!leagueData || !selectedDateStr) return;
+
     async function resolveWeekAndDays() {
       try {
         const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
@@ -90,15 +113,16 @@ export default function Roster({ activeLeagueId }) {
         if (seasonDoc.exists() && seasonDoc.data().weeks) {
           weeks = seasonDoc.data().weeks;
         }
+        setSeasonWeeks(weeks);
 
-        const simDate = getSimulatedDate();
+        const targetDate = parseDateStr(selectedDateStr);
         let cw = leagueData.currentWeek || 1;
-        
+
         if (weeks.length > 0) {
           const matchedWeek = weeks.find(w => {
             const s = new Date(w.start);
             const e = new Date(w.end);
-            return simDate >= s && simDate <= e;
+            return targetDate >= s && targetDate <= e;
           });
           if (matchedWeek) {
             cw = matchedWeek.week;
@@ -127,32 +151,13 @@ export default function Roster({ activeLeagueId }) {
           days.push({ date: d, dateStr: dStr, label });
         }
         setWeekDates(days);
-
-        const simDateStr = getLocalDateStr(simDate);
-        const hasSimDate = days.some(d => d.dateStr === simDateStr);
-        
-        const hasSimDateChanged = simDateStr !== lastSimDateStrRef.current;
-        const hasLeagueChanged = activeLeagueId !== lastLeagueIdRef.current;
-        const hasWeekChanged = cw !== lastWeekRef.current;
-
-        if (hasSimDateChanged || hasLeagueChanged || hasWeekChanged || !selectedDateStr) {
-          lastSimDateStrRef.current = simDateStr;
-          lastLeagueIdRef.current = activeLeagueId;
-          lastWeekRef.current = cw;
-
-          if (hasSimDate) {
-            setSelectedDateStr(simDateStr);
-          } else {
-            setSelectedDateStr(days[0].dateStr);
-          }
-        }
       } catch (err) {
         console.error("Error resolving week dates:", err);
       }
     }
-    
+
     resolveWeekAndDays();
-  }, [leagueData, activeSeasonId, getSimulatedDate, activeLeagueId]);
+  }, [leagueData, activeSeasonId, selectedDateStr]);
 
   // Load dynamic players map & daily stats
   useEffect(() => {
@@ -808,7 +813,33 @@ export default function Roster({ activeLeagueId }) {
 
       {/* Date Toggle strip */}
       <div className="mb-6 bg-gray-50 border border-gray-200 rounded-[24px] p-3 shadow-sm">
-        <span className="text-[10px] font-black uppercase text-gray-400 tracking-widest block mb-2 text-center">Matchup Week Days</span>
+        <div className="flex justify-between items-center mb-3 px-1 select-none">
+          <button
+            onClick={() => {
+              const currentD = parseDateStr(selectedDateStr);
+              currentD.setDate(currentD.getDate() - 7);
+              setSelectedDateStr(getLocalDateStr(currentD));
+            }}
+            disabled={resolvedCurrentWeek <= 1}
+            className="px-3 py-1.5 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-[10px] font-black uppercase tracking-wider text-indigo-600 shadow-sm disabled:opacity-40 disabled:hover:bg-white active:scale-95 transition-all cursor-pointer disabled:cursor-not-allowed"
+          >
+            ◀ Week
+          </button>
+          <span className="text-[10px] font-black uppercase text-gray-400 tracking-widest text-center">
+            Week {resolvedCurrentWeek} Days
+          </span>
+          <button
+            onClick={() => {
+              const currentD = parseDateStr(selectedDateStr);
+              currentD.setDate(currentD.getDate() + 7);
+              setSelectedDateStr(getLocalDateStr(currentD));
+            }}
+            disabled={seasonWeeks.length > 0 && resolvedCurrentWeek >= seasonWeeks.length}
+            className="px-3 py-1.5 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-[10px] font-black uppercase tracking-wider text-indigo-600 shadow-sm disabled:opacity-40 disabled:hover:bg-white active:scale-95 transition-all cursor-pointer disabled:cursor-not-allowed"
+          >
+            Week ▶
+          </button>
+        </div>
         
         <div className="flex gap-2.5 overflow-x-auto pb-2 pt-1 px-1 scrollbar-none snap-x select-none">
           {weekDates.map(day => {

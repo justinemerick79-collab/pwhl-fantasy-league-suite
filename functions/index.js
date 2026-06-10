@@ -1005,6 +1005,31 @@ exports.getSimulatedTime = functions.https.onCall(async (data, context) => {
 });
 
 /**
+ * HTTPS Callable function to manually trigger the daily stats snapshot for the simulated date.
+ */
+exports.triggerSimulationDailySync = functions.https.onCall(async (data, context) => {
+  try {
+    const leagueId = data?.leagueId || null;
+    const timeMs = await getSystemDate(leagueId);
+    const simDate = new Date(timeMs);
+    const dateStr = getDateStr(simDate);
+
+    console.log(`[triggerSimulationDailySync] Manually triggering snapshotDailyGameStats for ${dateStr} in league ${leagueId}`);
+
+    // Force trigger snapshotDailyGameStats
+    await snapshotDailyGameStats(dateStr, "final", { seasonId: data?.seasonId });
+
+    return { success: true, dateStr };
+  } catch (err) {
+    console.error("Error in triggerSimulationDailySync:", err);
+    if (err instanceof functions.https.HttpsError) {
+      throw err;
+    }
+    throw new functions.https.HttpsError("internal", err.message || err.toString());
+  }
+});
+
+/**
  * Background Auto-Draft Simulator.
  * Listens to active snake drafts in the local environment.
  * If the current pick belongs to a bot (isBot: true), it waits 3 seconds,
