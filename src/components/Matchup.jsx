@@ -182,7 +182,9 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
         const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
         const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         
-        const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
+        const seasonId = leagueData?.season_id 
+          ? String(leagueData.season_id) 
+          : (activeSeasonId ? String(activeSeasonId) : '5');
         
         // Find season doc to get weeks array
         const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
@@ -289,7 +291,9 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       try {
         const { fetchDailyPlayerPointsFromSnapshot } = await import('../services/statsEngine');
         const simDate = getSimulatedDate();
-        const resolvedSeasonId = activeSeasonId ? String(activeSeasonId) : '5';
+        const resolvedSeasonId = leagueData?.season_id 
+          ? String(leagueData.season_id) 
+          : (activeSeasonId ? String(activeSeasonId) : '5');
 
         const weekStart = matchupWeekBounds.start || new Date("2024-01-01");
         const weekEnd = matchupWeekBounds.end || new Date("2024-01-07");
@@ -557,6 +561,16 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   };
 
   const comparisonLineups = buildStartingLineups();
+
+  console.log("Matchup Render Debug:", {
+    selectedMatchupDate,
+    selectedMatchupDateType: typeof selectedMatchupDate,
+    selectedMatchupDateIsDate: selectedMatchupDate instanceof Date,
+    seasonBoundsStart: seasonBounds.start,
+    seasonBoundsStartIsDate: seasonBounds.start instanceof Date,
+    matchupWeekBoundsStart: matchupWeekBounds.start,
+    isDisabled: !selectedMatchupDate || !seasonBounds.start || selectedMatchupDate <= seasonBounds.start
+  });
 
   return (
     <div className="relative font-sans select-none antialiased">

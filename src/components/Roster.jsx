@@ -107,7 +107,9 @@ export default function Roster({ activeLeagueId }) {
 
     async function resolveWeekAndDays() {
       try {
-        const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
+        const seasonId = leagueData?.season_id 
+          ? String(leagueData.season_id) 
+          : (activeSeasonId ? String(activeSeasonId) : '5');
         const seasonDoc = await getDoc(doc(db, 'pwhl_seasons', seasonId));
         let weeks = [];
         if (seasonDoc.exists() && seasonDoc.data().weeks) {
@@ -169,7 +171,9 @@ export default function Roster({ activeLeagueId }) {
         const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
         const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         
-        const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
+        const seasonId = leagueData?.season_id 
+          ? String(leagueData.season_id) 
+          : (activeSeasonId ? String(activeSeasonId) : '5');
         const qActive = query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonId, Number(seasonId)]));
         const snapActive = await getDocs(qActive);
         
@@ -394,7 +398,10 @@ export default function Roster({ activeLeagueId }) {
     };
     setSelectedCardPlayer(playerObj);
     setGameHistory([]);
-    const history = await fetchPlayerGameHistory(p.id, p.pos, tCode, activeSeasonId, getSimulatedDate(), leagueData?.scoringSettings);
+    const resolvedSeasonId = leagueData?.season_id 
+      ? String(leagueData.season_id) 
+      : (activeSeasonId ? String(activeSeasonId) : '5');
+    const history = await fetchPlayerGameHistory(p.id, p.pos, tCode, resolvedSeasonId, getSimulatedDate(), leagueData?.scoringSettings);
     setGameHistory(history);
   };
 
