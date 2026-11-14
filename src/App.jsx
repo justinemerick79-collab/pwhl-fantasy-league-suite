@@ -68,20 +68,16 @@ function App() {
   };
 
   const advanceSimulationDate = async (targetDateStr) => {
-    try {
-      // Per-league simulation: write to league doc
-      if (leagueSimState.isSimulation && activeLeagueId) {
-        const leagueRef = doc(db, "fantasy_leagues", activeLeagueId);
-        await updateDoc(leagueRef, { simulatedDate: targetDateStr });
-        console.log(`Advanced league ${activeLeagueId} simulation to: ${targetDateStr}`);
-      }
-      // Always update global simulation state so backend trigger fires
-      const simStateRef = doc(db, "admin_settings", "simulation_state");
-      await updateDoc(simStateRef, { current_simulated_date: targetDateStr });
-      console.log("Advanced global simulation date to:", targetDateStr);
-    } catch (err) {
-      throw err;
+    // Per-league simulation: write to league doc
+    if (leagueSimState.isSimulation && activeLeagueId) {
+      const leagueRef = doc(db, "fantasy_leagues", activeLeagueId);
+      await updateDoc(leagueRef, { simulatedDate: targetDateStr });
+      console.log(`Advanced league ${activeLeagueId} simulation to: ${targetDateStr}`);
     }
+    // Always update global simulation state so backend trigger fires
+    const simStateRef = doc(db, "admin_settings", "simulation_state");
+    await updateDoc(simStateRef, { current_simulated_date: targetDateStr });
+    console.log("Advanced global simulation date to:", targetDateStr);
   };
 
   const handleAdvanceDay = async () => {
@@ -675,7 +671,7 @@ function App() {
           {currentTab === 'players' && (
             <Players 
               activeLeagueId={activeLeagueId} 
-              onProposeTrade={(targetPlayer) => {
+              onProposeTrade={(_targetPlayer) => {
                 setCurrentTab('transactions');
               }} 
             />

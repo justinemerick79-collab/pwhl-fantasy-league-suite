@@ -51,7 +51,7 @@ async function fetchFromApi(params) {
  */
 exports.syncDailyData = functions.pubsub
   .schedule("every 24 hours")
-  .onRun(async (context) => {
+  .onRun(async (_context) => {
     console.log("Daily scheduled ingestion started...");
     try {
       // 1. Fetch seasons to identify active seasons to sync
@@ -999,7 +999,7 @@ exports.deactivateSimulation = functions.https.onCall(async (data, context) => {
  * HTTPS Callable function to retrieve the current simulated system clock time.
  * Used for testing and verification of the central clock.
  */
-exports.getSimulatedTime = functions.https.onCall(async (data, context) => {
+exports.getSimulatedTime = functions.https.onCall(async (_data, _context) => {
   const timeMs = await getSystemDate();
   return { timeMs };
 });
@@ -1007,7 +1007,7 @@ exports.getSimulatedTime = functions.https.onCall(async (data, context) => {
 /**
  * HTTPS Callable function to manually trigger the daily stats snapshot for the simulated date.
  */
-exports.triggerSimulationDailySync = functions.https.onCall(async (data, context) => {
+exports.triggerSimulationDailySync = functions.https.onCall(async (data, _context) => {
   try {
     const leagueId = data?.leagueId || null;
     const timeMs = await getSystemDate(leagueId);
@@ -2523,7 +2523,7 @@ async function finalizeLeagueWeek(leagueId, weekInfo) {
 exports.settleMatchupWeeksScheduled = functions.pubsub
   .schedule("0 6 * * 1")
   .timeZone("America/New_York")
-  .onRun(async (context) => {
+  .onRun(async (_context) => {
     console.log("[Scheduler] Weekly matchup settlement started...");
 
     const leaguesSnap = await db.collection("fantasy_leagues")
@@ -2823,7 +2823,7 @@ exports.onLeagueSimulatedDateWritten = onDocumentWritten({
   return null;
 });
 
-exports.generateSeasonProjections = functions.https.onCall(async (data, context) => {
+exports.generateSeasonProjections = functions.https.onCall(async (data, _context) => {
   const seasonIdStr = typeof data === "string" ? data : (data?.seasonId ? String(data.seasonId) : null);
   if (!seasonIdStr) {
     throw new functions.https.HttpsError("invalid-argument", "Missing seasonId string parameter.");

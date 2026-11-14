@@ -51,17 +51,23 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const [lobbySecondsLeft, setLobbySecondsLeft] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Refs to hold current state to prevent stale closures inside timer loop
+  // Refs to hold current state to prevent stale closures inside timer loop.
+  // Assigned in an effect rather than during render: writing to a ref while
+  // rendering is impure (react-hooks/refs). The timer callbacks read these
+  // asynchronously, always after commit, so effect timing is equivalent here.
   const draftStateRef = useRef(null);
-  draftStateRef.current = draftState;
   const allPlayersRef = useRef([]);
-  allPlayersRef.current = allPlayers;
   const leagueDataRef = useRef(null);
-  leagueDataRef.current = leagueData;
   const isSubmittingRef = useRef(false);
-  isSubmittingRef.current = isSubmitting;
   const pwhlTeamsRef = useRef({});
-  pwhlTeamsRef.current = pwhlTeams;
+
+  useEffect(() => {
+    draftStateRef.current = draftState;
+    allPlayersRef.current = allPlayers;
+    leagueDataRef.current = leagueData;
+    isSubmittingRef.current = isSubmitting;
+    pwhlTeamsRef.current = pwhlTeams;
+  }, [draftState, allPlayers, leagueData, isSubmitting, pwhlTeams]);
 
   // Team branding helper for player card modal
   const getTeamBranding = (teamCode) => {
