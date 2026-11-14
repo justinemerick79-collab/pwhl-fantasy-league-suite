@@ -36,7 +36,6 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
   const {
     playersList,
     pwhlTeams,
-    projectionsList,
     gamesList,
     resolvedSeasonId,
     isFallbackUniverse

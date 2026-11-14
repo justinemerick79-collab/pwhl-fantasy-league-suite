@@ -42,7 +42,7 @@ function App() {
 
   const { currentUser, isAdmin, logout } = useAuth();
 
-  const { simulationState, leagueSimState, getSimulatedDate, isSimulationActive, activeSeasonName, setActiveLeagueId: setTimeTravelLeagueId } = useTimeTravel();
+  const { simulationState, leagueSimState, activeSeasonName, setActiveLeagueId: setTimeTravelLeagueId } = useTimeTravel();
   const [isDayAdvancing, setIsDayAdvancing] = useState(false);
   const [isSkippingWeek, setIsSkippingWeek] = useState(false);
   const [isTeardownLoading, setIsTeardownLoading] = useState(false);

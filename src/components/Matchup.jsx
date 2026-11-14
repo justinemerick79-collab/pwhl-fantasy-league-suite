@@ -113,10 +113,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const {
     playersList,
     pwhlTeams,
-    gamesList,
-    resolvedSeasonId,
-    isFallbackUniverse
-  } = activeSeasonData;
+    gamesList
+    } = activeSeasonData;
 
   const seasonDataLoading = loadingStates[seasonId] === true;
   const [teams, setTeams] = useState([]);

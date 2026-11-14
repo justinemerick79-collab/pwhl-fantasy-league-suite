@@ -3,7 +3,7 @@ const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
 const { Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getSystemDate } = require("./utils");
-const { snapshotDailyGameStats, calculateTeamWeekScore, getTeamActiveLineup, readDailyPoints, getLockedPlayerIds, normalizePosition: normPos, getLocalDateStr: getDateStr, DEFAULT_SCORING } = require("./dailyGameStats");
+const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDateStr, DEFAULT_SCORING } = require("./dailyGameStats");
 const { liveGamePoller } = require("./livePoller");
 
 // Re-export the live poller

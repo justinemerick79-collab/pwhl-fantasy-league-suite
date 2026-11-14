@@ -81,10 +81,8 @@ export default function Roster({ activeLeagueId }) {
   const {
     playersList,
     pwhlTeams,
-    gamesList,
-    resolvedSeasonId,
-    isFallbackUniverse
-  } = activeSeasonData;
+    gamesList
+    } = activeSeasonData;
 
   const seasonDataLoading = loadingStates[seasonId] === true;
   const [playersMap, setPlayersMap] = useState({});
