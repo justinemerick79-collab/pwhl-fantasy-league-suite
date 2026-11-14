@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { 
   Trophy, Users, Calendar, Zap, RotateCw, LogOut, Shield, Activity, 
   ChevronDown, Check, Plus, Ticket, Play, Home, Settings
@@ -199,7 +199,8 @@ function App() {
   };
 
   // Helper to sync the state to the URL path
-  const updateUrl = (adminView, tab, leagueId) => {
+  // Stable: reads nothing from component scope.
+  const updateUrl = useCallback((adminView, tab, leagueId) => {
     let path = '/';
     if (adminView) {
       path = '/admin-console';
@@ -209,10 +210,10 @@ function App() {
     if (window.location.pathname !== path) {
       window.history.pushState(null, '', path);
     }
-  };
+  }, []);
 
   // Helper to parse the current URL path and update the component state
-  const parsePathAndSetState = (path) => {
+  const parsePathAndSetState = useCallback((path) => {
     if (!currentUser) return;
     
     if (path === '/admin-console') {
@@ -235,10 +236,36 @@ function App() {
         }
       }
     }
-  };
+  }, [currentUser, isAdmin, currentTab, activeLeagueId, updateUrl]);
 
   // Load user leagues list
-  const fetchUserLeagues = async () => {
+  const handleSetActiveLeague = useCallback(async (id, name) => {
+    setActiveLeagueId(id);
+    // Sync per-league simulation context
+    if (setTimeTravelLeagueId) setTimeTravelLeagueId(id);
+    if (id) {
+      localStorage.setItem('pwhl_active_league', id);
+      setActiveLeagueName(name);
+      try {
+        const lSnap = await withTimeout(getDoc(doc(db, 'fantasy_leagues', id)), 5000);
+        if (lSnap.exists()) {
+          setActiveLeagueData(lSnap.data());
+        }
+      } catch (e) {
+        console.error(e);
+        if (e.message && e.message.includes("timed out")) {
+          alert(e.message);
+        }
+      }
+    } else {
+      localStorage.removeItem('pwhl_active_league');
+      setActiveLeagueName('Select League');
+      setActiveLeagueData(null);
+    }
+    setIsSwitchMenuOpen(false);
+  }, [setTimeTravelLeagueId]);
+
+  const fetchUserLeagues = useCallback(async () => {
     if (!currentUser) {
       setMyLeagues([]);
       return;
@@ -276,7 +303,7 @@ function App() {
     } finally {
       setLoadingLeagues(false);
     }
-  };
+  }, [currentUser, activeLeagueId, handleSetActiveLeague]);
 
   // Sync state to URL changes
   useEffect(() => {
@@ -287,14 +314,14 @@ function App() {
       return;
     }
     updateUrl(isAdminView, currentTab, activeLeagueId);
-  }, [isAdminView, currentTab, activeLeagueId, currentUser]);
+  }, [isAdminView, currentTab, activeLeagueId, currentUser, updateUrl]);
 
   // Handle URL path parsing on initial load and when dependencies change
   useEffect(() => {
     if (currentUser) {
       parsePathAndSetState(window.location.pathname);
     }
-  }, [currentUser, activeLeagueId, isAdmin]);
+  }, [currentUser, activeLeagueId, isAdmin, parsePathAndSetState]);
 
   // Listen for browser back/forward buttons (popstate)
   useEffect(() => {
@@ -303,7 +330,7 @@ function App() {
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [activeLeagueId, isAdmin, currentTab]);
+  }, [activeLeagueId, isAdmin, currentTab, parsePathAndSetState]);
 
   // Sync activeLeagueId to Time Travel Context
   useEffect(() => {
@@ -314,33 +341,7 @@ function App() {
 
   useEffect(() => {
     fetchUserLeagues();
-  }, [currentUser, activeLeagueId]);
-
-  const handleSetActiveLeague = async (id, name) => {
-    setActiveLeagueId(id);
-    // Sync per-league simulation context
-    if (setTimeTravelLeagueId) setTimeTravelLeagueId(id);
-    if (id) {
-      localStorage.setItem('pwhl_active_league', id);
-      setActiveLeagueName(name);
-      try {
-        const lSnap = await withTimeout(getDoc(doc(db, 'fantasy_leagues', id)), 5000);
-        if (lSnap.exists()) {
-          setActiveLeagueData(lSnap.data());
-        }
-      } catch (e) {
-        console.error(e);
-        if (e.message && e.message.includes("timed out")) {
-          alert(e.message);
-        }
-      }
-    } else {
-      localStorage.removeItem('pwhl_active_league');
-      setActiveLeagueName('Select League');
-      setActiveLeagueData(null);
-    }
-    setIsSwitchMenuOpen(false);
-  };
+  }, [currentUser, activeLeagueId, fetchUserLeagues]);
 
   const handleSignOut = async () => {
     await logout();
@@ -721,6 +722,8 @@ function App() {
 
       {/* Authentication Dialog */}
       <AuthModal 
+        key={`${authModalMode}-${isAuthModalOpen}`}
+        initialMode={authModalMode}
         isOpen={isAuthModalOpen} 
         onClose={() => { setIsAuthModalOpen(false); fetchUserLeagues(); }} 
       />

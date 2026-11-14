@@ -510,7 +510,8 @@ export default function DataHub() {
     leagueSimState.isSimulation, 
     leagueSimState.simulatedDate, 
     simulationState.testModeActive, 
-    simulationState.current_simulated_date
+    simulationState.current_simulated_date,
+    getSimulatedDate
   ]);
 
   const toggleGame = async (gameId) => {

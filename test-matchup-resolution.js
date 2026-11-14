@@ -93,7 +93,7 @@ async function authenticateAndSetAdmin() {
 }
 
 async function runTest() {
-  let testUser = null;
+  let testUser;
   const leagueId = "loop_test_league_" + Math.random().toString(36).substring(2, 6);
   const botUid = "loop_test_bot_" + Math.random().toString(36).substring(2, 6);
   const adminTeamId = "team_admin";

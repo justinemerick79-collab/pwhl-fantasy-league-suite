@@ -87,7 +87,6 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     return new Date(y, m - 1, d, 12, 0, 0);
   };
 
-  const [activeTab, setActiveTab] = useState('scoreboard'); // 'scoreboard' | 'rosters' (Used for mobile aspect stack)
   const [leagueData, setLeagueData] = useState(null);
 
   // Season data from DataContext — must be after leagueData declaration
@@ -124,8 +123,6 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
 
   const [weeklyMatchups, setWeeklyMatchups] = useState([]);
-  const [matchupsLoading, setMatchupsLoading] = useState(true);
-  const [playerStats, setPlayerStats] = useState({});
   const [dailyPlayerStats, setDailyPlayerStats] = useState({});
   const [dailyPlayerStatsBreakdown, setDailyPlayerStatsBreakdown] = useState({});
   const [selectedMatchupDate, setSelectedMatchupDate] = useState(null);
@@ -286,7 +283,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     } else {
       lastWeekRef.current = resolvedCurrentWeek;
     }
-  }, [activeLeagueId, leagueData, getSimulatedDate, seasonWeeks, seasonBounds]);
+  }, [activeLeagueId, leagueData, getSimulatedDate, seasonWeeks, seasonBounds,
+      selectedMatchupDate, resolvedCurrentWeek]);
 
   // Daily lineups scoring state
   const [homeLineupsState, setHomeLineupsState] = useState({});
@@ -310,8 +308,6 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   }, [weeklyMatchups, myTeam]);
 
   const isHome = myTeam && myTeamMatchup && myTeam.id === myTeamMatchup.homeTeamId;
-  const myScore = myTeamMatchup ? (isHome ? myTeamMatchup.homeScore : myTeamMatchup.awayScore) : 0.0;
-  const oppScore = myTeamMatchup ? (isHome ? myTeamMatchup.awayScore : myTeamMatchup.homeScore) : 0.0;
 
   const oppTeamId = myTeamMatchup ? (isHome ? myTeamMatchup.awayTeamId : myTeamMatchup.homeTeamId) : null;
   const resolvedOppTeam = useMemo(() => {
@@ -355,7 +351,6 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     if (!activeLeagueId || !leagueData || seasonsLoading || seasonDataLoading) return;
     
     const loadMatchupData = async () => {
-      setMatchupsLoading(true);
       try {
         const matchupsRef = collection(db, `fantasy_leagues/${activeLeagueId}/matchups`);
         
@@ -377,7 +372,6 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
         const allMatchups = matchupsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         const filtered = allMatchups.filter(m => m.week === resolvedCurrentWeek);
         setWeeklyMatchups(filtered);
-        setMatchupsLoading(false);
 
         // Process lineups
         const homeLineups = {};
@@ -476,12 +470,14 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
       } catch (err) {
         console.error("Error loading matchup data / points:", err);
-        setMatchupsLoading(false);
       }
     };
 
     loadMatchupData();
-  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam?.id, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading]);
+  // myTeam (not myTeam?.id): the effect passes the whole object to
+  // calcTeamScore. It is a useMemo, not state, and nothing here writes it,
+  // so tracking its identity cannot loop.
+  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading]);
 
   // Matchup Result Popup trigger (Listens in real-time to the completed week's matchup)
   useEffect(() => {
@@ -553,7 +549,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     calculateTimeLeft();
     const interval = setInterval(calculateTimeLeft, 1000);
     return () => clearInterval(interval);
-  }, [leagueData]);
+  }, [leagueData, getSimulatedDate]);
 
 
 

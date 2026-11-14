@@ -102,7 +102,6 @@ export default function Roster({ activeLeagueId }) {
   const [selectedDateStr, setSelectedDateStr] = useState(''); // "YYYY-MM-DD"
   const lastSimDateStrRef = useRef('');
   const lastLeagueIdRef = useRef('');
-  const lastWeekRef = useRef(null);
   const [weekDates, setWeekDates] = useState([]);
   const [seasonWeeks, setSeasonWeeks] = useState([]);
   const [dailyLineup, setDailyLineup] = useState({ activeLineup: {}, bench: [] });
@@ -288,7 +287,7 @@ export default function Roster({ activeLeagueId }) {
             String(g.visiting_team) === actualTeamId
           );
           
-          let statsStr = '';
+          let statsStr;
           if (hasGame) {
             if (statsObj) {
               statsStr = getActiveStatsText({ ...p, pos: normPos }, statsObj) || 'No stats obtained';
@@ -333,7 +332,11 @@ export default function Roster({ activeLeagueId }) {
     }
     
     loadDynamicPlayersAndStats();
-  }, [activeLeagueId, activeSeasonId, leagueData, selectedDateStr, myTeam?.id, playersList, pwhlTeams, gamesList, seasonsLoading, seasonDataLoading]);
+  // myTeam rather than myTeam?.id: the effect also branches on the object
+  // itself. It is set by the league-loading effect above, never here, so
+  // tracking its identity cannot loop.
+  }, [activeLeagueId, activeSeasonId, leagueData, selectedDateStr, myTeam, playersList, pwhlTeams,
+      gamesList, seasonsLoading, seasonDataLoading, getSimulatedDate, seasons]);
 
   if (!activeLeagueId) {
     return (
@@ -386,24 +389,6 @@ export default function Roster({ activeLeagueId }) {
   const simDateStr = getLocalDateStr(simDate);
   const isReadOnly = isPending || (selectedDateStr < simDateStr);
 
-  const getTeamBranding = (teamCode) => {
-    switch (teamCode) {
-      case 'BOS':
-        return { gradient: 'from-emerald-800 to-slate-900', borderColor: 'border-emerald-500/35', glowColor: 'shadow-emerald-500/10' };
-      case 'MIN':
-        return { gradient: 'from-purple-800 to-slate-900', borderColor: 'border-purple-500/35', glowColor: 'shadow-purple-500/10' };
-      case 'MTL':
-        return { gradient: 'from-rose-900 to-slate-900', borderColor: 'border-rose-500/35', glowColor: 'shadow-rose-500/10' };
-      case 'NY':
-        return { gradient: 'from-teal-800 to-slate-900', borderColor: 'border-teal-500/35', glowColor: 'shadow-teal-500/10' };
-      case 'OTT':
-        return { gradient: 'from-red-800 to-slate-900', borderColor: 'border-red-500/35', glowColor: 'shadow-red-500/10' };
-      case 'TOR':
-        return { gradient: 'from-blue-900 to-slate-900', borderColor: 'border-blue-500/35', glowColor: 'shadow-blue-500/10' };
-      default:
-        return { gradient: 'from-indigo-900 to-slate-900', borderColor: 'border-indigo-500/35', glowColor: 'shadow-indigo-500/10' };
-    }
-  };
 
   const handlePlayerClick = (p) => {
     setSelectedCardPlayer(p);
@@ -635,7 +620,6 @@ export default function Roster({ activeLeagueId }) {
               const p = pId ? playersMap[pId] : null;
               const isLocked = p ? isPlayerLocked(p) : false;
 
-              let posColor = "text-slate-600 font-semibold";
 
               return (
                 <tr 
@@ -747,7 +731,6 @@ export default function Roster({ activeLeagueId }) {
               
               const emptySlotExists = positionSlots.some(s => !dailyLineup.activeLineup[s]);
 
-              let posColor = "text-slate-600 font-semibold";
 
               return (
                 <tr 

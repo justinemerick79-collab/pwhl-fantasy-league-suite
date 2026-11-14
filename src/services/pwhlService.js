@@ -207,7 +207,6 @@ export async function fetchPlayerGameHistory(playerId, pos, teamCode, seasonId, 
         if (p) {
           participated = true;
           const goals = parseInt(p.goals || 0);
-          const pim = parseInt(p.pim || 0);
           const shots = parseInt(p.shots_on || p.shots || 0);
           const blocks = parseInt(p.shots_blocked_by_player || p.shots_blocked || 0);
           const hits = parseInt(p.hits || 0);
@@ -270,7 +269,7 @@ export async function fetchPlayerGameHistory(playerId, pos, teamCode, seasonId, 
         const myScore = parseInt(isHome ? gameDoc.home_goal_count : gameDoc.visiting_goal_count);
         const oppScore = parseInt(isHome ? gameDoc.visiting_goal_count : gameDoc.home_goal_count);
 
-        let result = '';
+        let result;
         if (myScore > oppScore) {
           result = `W ${myScore}-${oppScore}`;
         } else if (myScore < oppScore) {
@@ -649,7 +648,7 @@ export async function fetchDraftEligiblePlayers(draftSeasonId, selectedSeasonId)
   // 2. Fetch players for the draft/current season
   const playersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [draftSeasonId, Number(draftSeasonId)]));
   const playersSnap = await getDocs(playersQuery);
-  let resolvedSeasonId = draftSeasonId;
+  let resolvedSeasonId;
   let rawPlayers = playersSnap.docs.map(d => d.data());
 
   if (rawPlayers.length === 0 && seasons.length > 0) {
@@ -903,7 +902,7 @@ export async function generateSeasonProjectionsClient(seasonIdStr) {
     const s2 = validSeasons[1];
 
     let goalsRate = 0, assistsRate = 0, plusMinusRate = 0, powerPlayGoalsRate = 0, powerPlayAssistsRate = 0, powerPlayPointsRate = 0;
-    let shortHandedGoalsRate = 0, shortHandedAssistsRate = 0, shortHandedPointsRate = 0, pimRate = 0, shotsOnGoalRate = 0, blockedShotsRate = 0, hitsRate = 0, timeOnIceRate = 0;
+    let shortHandedGoalsRate = 0, shortHandedAssistsRate = 0, shortHandedPointsRate = 0, pimRate = 0, shotsOnGoalRate = 0, blockedShotsRate = 0, hitsRate = 0, timeOnIceRate;
     let winsRate = 0, lossesRate = 0, overtimeLossesRate = 0, shotsSavedRate = 0, goalsAgainstRate = 0, shutoutsRate = 0;
 
     const isVeteran = validSeasons.length > 0;
@@ -964,8 +963,8 @@ export async function generateSeasonProjectionsClient(seasonIdStr) {
 
     expectedGamesPlayed = Math.max(0, Math.min(expectedGamesPlayed, gamesPerTeam));
 
-    let projected_season_stats = {};
-    let projectedFPP = 0;
+    let projected_season_stats;
+    let projectedFPP;
 
     if (position === "G") {
       projected_season_stats = {

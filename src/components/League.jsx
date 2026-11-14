@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback} from 'react';
 import { 
   Trophy, Shield, Settings, Zap, Trash2, Lock, Clock, ArrowRightLeft, Send, X, AlertCircle, Plus
 } from 'lucide-react';
@@ -121,7 +121,7 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
     }
   };
 
-  const fetchLeagueDetails = async () => {
+  const fetchLeagueDetails = useCallback(async () => {
     if (!activeLeagueId) return;
     setLoading(true);
     try {
@@ -209,11 +209,11 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeLeagueId, currentUser]);
 
   useEffect(() => {
     fetchLeagueDetails();
-  }, [activeLeagueId, currentUser]);
+  }, [activeLeagueId, currentUser, fetchLeagueDetails]);
 
   if (!activeLeagueId) {
     return (
@@ -412,19 +412,14 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
   };
 
   // Dynamic titles and subtitles
-  let tabTitle = "League Central";
   let tabSub = "Manage weekly standings, playoff trees, and commissioner configurations.";
   if (initialTab === 'standings') {
-    tabTitle = "Standings & Playoffs";
     tabSub = "Track leaderboard rankings and playoff tree qualifiers.";
   } else if (initialTab === 'transactions') {
-    tabTitle = "Waivers & Trades Central";
     tabSub = "Track dynamic rolling waiver priority, active claims, and trade proposals.";
   } else if (initialTab === 'schedule') {
-    tabTitle = "Settings & Team";
     tabSub = "Customize your team profile and review active league rules.";
   } else if (initialTab === 'manager') {
-    tabTitle = "LM Toolset";
     tabSub = "Commissioner controls for drafts, settings, and recruitment.";
   }
 

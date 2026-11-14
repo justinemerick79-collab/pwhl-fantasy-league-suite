@@ -235,7 +235,7 @@ function calculatePlayerStatsFromSummary(summary, scoringRules, playersPosMap) {
   }
 
   // Round all fantasy points
-  for (const [id, entry] of Object.entries(result)) {
+  for (const entry of Object.values(result)) {
     entry.fantasyPoints = Math.round(entry.fantasyPoints * 100) / 100;
   }
 
