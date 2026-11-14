@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db, functions } from '../firebase';
 import { collection, getDocs, doc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
-import { runFullSync, autoGenerateMissingWeeks } from '../services/pwhlService';
+import { runFullSync, autoGenerateMissingWeeks, generateSeasonProjectionsClient } from '../services/pwhlService';
 import DataHub from './DataHub';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { httpsCallable } from 'firebase/functions';

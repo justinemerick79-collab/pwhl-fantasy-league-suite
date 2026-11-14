@@ -14,7 +14,7 @@ Note `package.json` is still named `temp_web` and `README.md` is the stock Vite 
 ```bash
 npm run dev        # Vite dev server — REQUIRED for any live PWHL API work (see API proxy below)
 npm run build      # Vite build to dist/
-npm run lint       # eslint (~236 pre-existing findings in app code — see Linting below)
+npm run lint       # eslint (~233 pre-existing findings in app code — see Linting below)
 ```
 
 Deploys (Firebase CLI is authenticated; `pwhl-fantasy-mobile-26` is the active project, set via local
@@ -204,15 +204,18 @@ Getting this wrong is what previously made lint unusable: browser globals were a
 Node scripts produced a flood of spurious `'process' is not defined`. `no-unused-vars` is tuned project-wide
 to allow an unused `catch (e)` binding and `_`-prefixed parameters.
 
-`npm run lint` still reports ~236 **genuine** pre-existing findings, so it is not yet a clean gate — judge new
+`npm run lint` still reports ~233 **genuine** pre-existing findings, so it is not yet a clean gate — judge new
 code on its own diff. The bulk is ~172 `no-unused-vars` (mostly unused imports, e.g. leftover `lucide-react`
 icons and the no-longer-needed React 19 default import). More serious clusters worth fixing deliberately:
 9 `react-hooks/rules-of-hooks`, 13 `react-hooks/set-state-in-effect`, and 13 `react-hooks/exhaustive-deps`.
 
-**`no-undef` in `src/` indicates a real `ReferenceError`, not lint noise.** There are 4 known ones: missing
-imports of `useMemo` (`LeagueHub.jsx:102`), `updateDoc` (`leagueService.js:659`), and
-`generateSeasonProjectionsClient` (`AdminPanel.jsx:230`), plus undefined `handleProposeTrade` /
-`submittingTrade` in `League.jsx`'s propose-trade modal (~line 1582). Treat any `no-undef` here as a bug.
+**`no-undef` in `src/` indicates a real `ReferenceError`, not lint noise.** Treat any occurrence as a bug.
+
+One known case remains: `handleProposeTrade` and `submittingTrade` are referenced by the propose-trade
+modal's JSX in `League.jsx` (lines 1582-1650) but defined nowhere in the file, so rendering that modal
+throws. It looks like an unfinished refactor — the handler and its submitting state still need to be
+written. (Three earlier cases — missing `useMemo`, `updateDoc`, and `generateSeasonProjectionsClient`
+imports — have been fixed.)
 
 ### Scripts
 

@@ -9,7 +9,8 @@ import {
   getDocs,
   Timestamp,
   getDoc,
-  setDoc
+  setDoc,
+  updateDoc
 } from 'firebase/firestore';
 import { normalizePosition } from './pwhlService';
 import { notifyTradeEvent } from './notificationService';
