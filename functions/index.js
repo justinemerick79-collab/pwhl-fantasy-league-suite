@@ -3,7 +3,7 @@ const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
 const { Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getSystemDate } = require("./utils");
-const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDateStr, DEFAULT_SCORING } = require("./dailyGameStats");
+const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDateStr } = require("./dailyGameStats");
 const { liveGamePoller } = require("./livePoller");
 
 // Re-export the live poller
@@ -1459,7 +1459,6 @@ function calculateSummaryFantasyPoints(summary, scoringRules, defaultScoring, pl
     if (!id) return;
 
     const goals = parseInt(player.goals || 0);
-    const pim = parseInt(player.pim || 0);
     const shots = parseInt(player.shots_on || player.shots || 0);
     const blocks = parseInt(player.shots_blocked_by_player || player.shots_blocked || 0);
     const hits = parseInt(player.hits || 0);
@@ -1888,186 +1887,6 @@ function normalizePosition(posStr) {
   return 'F';
 }
 
-async function buildWeeklyDailyPoints(leagueId, startBound, endBound, scoringRules, defaultScoring, playersPosMap) {
-  const gamesSnap = await db.collection("pwhl_games").get();
-  const gameIds = [];
-  const gameDateMap = {};
-  gamesSnap.forEach(gDoc => {
-    const game = gDoc.data();
-    const gDateStr = game.date_played || game.date;
-    if (!gDateStr) return;
-    const gDate = parseDateSafe(gDateStr);
-    if (gDate >= startBound && gDate <= endBound && (game.status === "4" || game.status === "3")) {
-      const gId = gDoc.id.toString();
-      gameIds.push(gId);
-      gameDateMap[gId] = getLocalDateStr(gDate);
-    }
-  });
-
-  const dailyPoints = {};
-  if (gameIds.length === 0) {
-    return dailyPoints;
-  }
-
-  const allSummaries = [];
-  if (gameIds.length > 0) {
-    const chunks = [];
-    for (let i = 0; i < gameIds.length; i += 30) {
-      chunks.push(gameIds.slice(i, i + 30));
-    }
-    for (const chunk of chunks) {
-      const refs = chunk.map(id => db.collection("pwhl_game_summaries").doc(id));
-      const snaps = await db.getAll(...refs);
-      snaps.forEach(snap => {
-        if (snap.exists) {
-          allSummaries.push(snap);
-        }
-      });
-    }
-  }
-
-  allSummaries.forEach(sDoc => {
-    const summary = sDoc.data();
-    const dStr = gameDateMap[sDoc.id];
-    if (!dStr) return;
-
-    if (!dailyPoints[dStr]) {
-      dailyPoints[dStr] = {};
-    }
-    const dayMap = dailyPoints[dStr];
-
-    const scoringPlays = Array.isArray(summary.goals) ? summary.goals : [];
-    const assistCounts = {};
-    const goalCounts = {};
-
-    scoringPlays.forEach(goal => {
-      const isPP = goal.power_play === "1" || goal.power_play === 1;
-      const isSH = goal.short_handed === "1" || goal.short_handed === 1;
-      if (goal.goal_scorer?.player_id) {
-        const scorerId = String(goal.goal_scorer.player_id);
-        if (!goalCounts[scorerId]) goalCounts[scorerId] = { ppGoals: 0, shGoals: 0 };
-        const g = goalCounts[scorerId];
-        if (isPP) g.ppGoals++;
-        if (isSH) g.shGoals++;
-      }
-      [goal.assist1_player, goal.assist2_player].forEach(a => {
-        if (!a?.player_id) return;
-        const assistId = String(a.player_id);
-        if (!assistCounts[assistId]) assistCounts[assistId] = { assists: 0, ppAssists: 0, shAssists: 0 };
-        const obj = assistCounts[assistId];
-        obj.assists++;
-        if (isPP) obj.ppAssists++;
-        if (isSH) obj.shAssists++;
-      });
-    });
-
-    const homeSkaters = summary.home_team_lineup?.players || [];
-    const visitorSkaters = summary.visitor_team_lineup?.players || [];
-    [...homeSkaters, ...visitorSkaters].forEach(player => {
-      const id = String(player.player_id);
-      if (!id) return;
-
-      const goals = parseInt(player.goals || 0);
-      const pim = parseInt(player.pim || 0);
-      const shots = parseInt(player.shots_on || player.shots || 0);
-      const blocks = parseInt(player.shots_blocked_by_player || player.shots_blocked || 0);
-      const hits = parseInt(player.hits || 0);
-      
-      let plusMinus = 0;
-      const pm = player.plusminus;
-      if (pm !== undefined && pm !== null && pm !== "") {
-        plusMinus = parseInt(pm, 10) || 0;
-      }
-
-      let assists = 0;
-      let ppPoints = 0;
-      let shPoints = 0;
-
-      const assistObj = assistCounts[id];
-      if (assistObj) {
-        assists += assistObj.assists;
-        ppPoints += assistObj.ppAssists;
-        shPoints += assistObj.shAssists;
-      }
-
-      const goalObj = goalCounts[id];
-      if (goalObj) {
-        ppPoints += goalObj.ppGoals;
-        shPoints += goalObj.shGoals;
-      }
-
-      let pts = 0;
-      const matrix = scoringRules.skaters || defaultScoring.skaters;
-      pts += goals * (matrix.goals || 0);
-      pts += assists * (matrix.assists || 0);
-      pts += plusMinus * (matrix.plusMinus || 0);
-      pts += ppPoints * (matrix.ppp || 0);
-      pts += shPoints * (matrix.shp || 0);
-      pts += shots * (matrix.sog || 0);
-      pts += hits * (matrix.hits || 0);
-      pts += blocks * (matrix.blocks || 0);
-
-      const mockPos = id.startsWith("pwhl_") ? (id.startsWith("pwhl_12") || id.startsWith("pwhl_13") || id.startsWith("pwhl_14") ? "G" : (id.startsWith("pwhl_8") || id.startsWith("pwhl_9") || id.startsWith("pwhl_10") || id.startsWith("pwhl_11") ? "D" : "F")) : null;
-      const pos = playersPosMap[id] || mockPos || "F";
-      if (pos === "D" || pos === "Defense") {
-        pts += (goals + assists) * (matrix.defensePoints || 0);
-      }
-
-      dayMap[id] = (dayMap[id] || 0) + pts;
-    });
-
-    const homeGoalies = summary.goalies?.home || [];
-    const visitorGoalies = summary.goalies?.visitor || [];
-    
-    const gameGoaliesMap = {};
-    [...homeGoalies, ...visitorGoalies].forEach(goalie => {
-      const id = String(goalie.player_id);
-      if (!id) return;
-      
-      let secs = parseInt(goalie.seconds || goalie.secs || 0);
-      if (!secs && goalie.secs_mmss && goalie.secs_mmss.includes(":")) {
-        const [m, s] = goalie.secs_mmss.split(":").map(Number);
-        secs = m * 60 + s;
-      }
-
-      if (!gameGoaliesMap[id]) {
-        gameGoaliesMap[id] = {
-          saves: parseInt(goalie.saves || 0),
-          goalsAgainst: parseInt(goalie.goals_against || 0),
-          wins: parseInt(goalie.win || 0),
-          overtimeLosses: parseInt(goalie.ot_loss || 0),
-          shutouts: parseInt(goalie.shutout || 0),
-          timeOnIce: secs
-        };
-      } else {
-        const existing = gameGoaliesMap[id];
-        existing.saves += parseInt(goalie.saves || 0);
-        existing.goalsAgainst += parseInt(goalie.goals_against || 0);
-        existing.wins = Math.max(existing.wins, parseInt(goalie.win || 0));
-        existing.overtimeLosses = Math.max(existing.overtimeLosses, parseInt(goalie.ot_loss || 0));
-        existing.shutouts = Math.max(existing.shutouts, parseInt(goalie.shutout || 0));
-        existing.timeOnIce += secs;
-      }
-    });
-
-    for (const [id, stats] of Object.entries(gameGoaliesMap)) {
-      if (stats.timeOnIce > 0 || stats.saves > 0 || stats.goalsAgainst > 0) {
-        let pts = 0;
-        const matrix = scoringRules.goalies || defaultScoring.goalies;
-        pts += stats.wins * (matrix.wins || 0);
-        pts += stats.overtimeLosses * (matrix.otl || 0);
-        pts += stats.goalsAgainst * (matrix.ga || 0);
-        pts += stats.saves * (matrix.saves || 0);
-        pts += stats.shutouts * (matrix.shutouts || 0);
-
-        dayMap[id] = (dayMap[id] || 0) + pts;
-      }
-    }
-  });
-
-  return dailyPoints;
-}
-
 /**
  * Cloud Function triggered when the central Time Travel clock updates.
  * Recalculates player statistics up to the new warp date, culls weekly game stats,
@@ -2303,13 +2122,13 @@ exports.onSimulationStateWritten = onDocumentWritten({
           const homeScore = teamScores[matchup.homeTeamId] || 0.0;
           const awayScore = teamScores[matchup.awayTeamId] || 0.0;
 
-          let homeWin = false, awayWin = false, tie = false;
+          // A tie needs no flag: the trailing else below and the winnerId
+          // ternary both treat "neither won" as the tie case.
+          let homeWin = false, awayWin = false;
           if (homeScore > awayScore) {
             homeWin = true;
           } else if (awayScore > homeScore) {
             awayWin = true;
-          } else {
-            tie = true;
           }
 
           const rHome = getRecordObj(matchup.homeTeamId);
@@ -2639,7 +2458,6 @@ exports.onLeagueSimulatedDateWritten = onDocumentWritten({
   console.log(`[SimLoop] League ${leagueId}: date advanced ${oldDate.toISOString()} → ${newDate.toISOString()}`);
 
   const seasonId = afterData.season_id ? String(afterData.season_id) : '5';
-  const scoringRules = afterData.scoringSettings || DEFAULT_SCORING;
   const rosterSettings = afterData.rosterSettings || null;
 
   // Pre-fetch shared data for performance

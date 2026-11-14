@@ -207,7 +207,6 @@ export async function fetchPlayerGameHistory(playerId, pos, teamCode, seasonId, 
         if (p) {
           participated = true;
           const goals = parseInt(p.goals || 0);
-          const pim = parseInt(p.pim || 0);
           const shots = parseInt(p.shots_on || p.shots || 0);
           const blocks = parseInt(p.shots_blocked_by_player || p.shots_blocked || 0);
           const hits = parseInt(p.hits || 0);

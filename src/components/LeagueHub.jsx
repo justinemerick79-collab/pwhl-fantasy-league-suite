@@ -28,7 +28,7 @@ const EMPTY_LEAGUE_DETAIL = { leagueId: null, league: null, teams: [], myTeam: n
 export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const { currentUser } = useAuth();
   const { activeSeasonId } = useTimeTravel();
-  const { seasonsLoading, seasonCache, loadingStates, loadSeasonData } = useData();
+  const { seasonsLoading, seasonCache, loadSeasonData } = useData();
   
   // Outer Launcher Tab: 'my-leagues' | 'create' | 'join'
   const [launcherTab, setLauncherTab] = useState('my-leagues');

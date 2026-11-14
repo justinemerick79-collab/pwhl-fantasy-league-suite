@@ -32,7 +32,7 @@ export async function createNotification(userId, title, message, type = 'info', 
  * to involved team owners or all league members.
  */
 export async function notifyTradeEvent(eventType, leagueId, tradeData, extraInfo = {}) {
-  const { proposerTeamId, receiverTeamId, proposerSends, receiverSends, teamsMap = {}, userMap = {} } = extraInfo;
+  const { proposerTeamId, receiverTeamId, teamsMap = {} } = extraInfo;
 
   const proposerOwnerId = teamsMap[proposerTeamId]?.ownerId;
   const receiverOwnerId = teamsMap[receiverTeamId]?.ownerId;
