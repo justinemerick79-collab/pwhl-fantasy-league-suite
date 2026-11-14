@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "typeui": {
+      "serverUrl": "https://mcp.typeui.sh",
+      "timeout": 6000
+    }
+  }
+}

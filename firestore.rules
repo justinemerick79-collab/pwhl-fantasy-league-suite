@@ -59,6 +59,10 @@ service cloud.firestore {
     }
 
     // PWHL Data Collections - Only admins can write, anyone can read
+    match /daily_game_stats/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isAdmin();
+    }
     match /pwhl_seasons/{document=**} {
       allow read: if isAuthenticated();
       allow write: if isAuthenticated() && isAdmin();

@@ -1,14 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { db, functions } from '../firebase';
 import { collection, getDocs, doc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
-import { runFullSync, autoGenerateMissingWeeks } from '../services/pwhlService';
+import { runFullSync, autoGenerateMissingWeeks, generateSeasonProjectionsClient } from '../services/pwhlService';
 import DataHub from './DataHub';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { httpsCallable } from 'firebase/functions';
 
-
-
 export default function AdminPanel() {
+  const [mainTab, setMainTab] = useState('controls'); // 'controls' | 'datahub'
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -99,7 +98,6 @@ export default function AdminPanel() {
   }, []);
 
   useEffect(() => {
-    // Helper to race getDocs with a timeout to prevent hanging on cached emulator connections
     async function getDocsWithTimeout(colRef, timeoutMs = 5000) {
       return Promise.race([
         getDocs(colRef),
@@ -110,33 +108,26 @@ export default function AdminPanel() {
     }
 
     async function fetchUsersAndSeasons() {
-      console.log("[AdminPanel] fetchUsersAndSeasons: start");
       try {
-        console.log("[AdminPanel] fetchUsersAndSeasons: fetching users...");
         const querySnapshot = await getDocsWithTimeout(collection(db, "users"), 5000);
-        console.log("[AdminPanel] fetchUsersAndSeasons: users size =", querySnapshot.size);
         const usersList = querySnapshot.docs.map(doc => ({
           id: doc.id,
           ...doc.data()
         }));
         setUsers(usersList);
         
-        // Fetch seasons for the sync dropdown
-        console.log("[AdminPanel] fetchUsersAndSeasons: fetching seasons...");
         const seasonsSnap = await getDocsWithTimeout(collection(db, 'pwhl_seasons'), 5000);
-        console.log("[AdminPanel] fetchUsersAndSeasons: seasons size =", seasonsSnap.size);
         const seasonList = seasonsSnap.docs.map(d => ({id: d.id, ...d.data()}));
         seasonList.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
         setSeasons(seasonList);
       } catch (err) {
         console.error("[AdminPanel] fetchUsersAndSeasons error:", err);
         if (err.message && err.message.includes("Connection timed out")) {
-          setError('Failed to load Admin Panel: Firestore connection timed out. If you recently started/stopped Firebase emulators, please perform a hard refresh (Cmd+Shift+R or Ctrl+F5) to clear the browser\'s cached connection.');
+          setError('Failed to load Admin Panel: Firestore connection timed out. Please perform a hard refresh (Cmd+Shift+R or Ctrl+F5).');
         } else {
           setError('Failed to fetch data. Ensure you have admin privileges. Error: ' + err.message);
         }
       } finally {
-        console.log("[AdminPanel] fetchUsersAndSeasons: finally, setting loading=false");
         setLoading(false);
       }
     }
@@ -180,8 +171,6 @@ export default function AdminPanel() {
         const newLeagueId = res.data.active_test_league_id;
         setSimLog(`Success! Test League Created: ${newLeagueId}`);
         alert(`Simulation Sandbox Successfully Active!\nLeague: ${res.data.leagueName || "Simulation Test League"}\nID: ${newLeagueId}`);
-        
-        // Save the new league ID as the active league and refresh the page to auto-load
         localStorage.setItem('pwhl_active_league', newLeagueId);
         window.location.reload();
       } else {
@@ -223,18 +212,31 @@ export default function AdminPanel() {
       return;
     }
     setIsProcessing(true);
-    setProjectionsLog('Calling projections engine on the cloud...');
+    setProjectionsLog('Running projections engine...');
     try {
-      const generateSeasonProjectionsFunc = httpsCallable(functions, 'generateSeasonProjections');
-      const res = await generateSeasonProjectionsFunc({ seasonId: projectionsSeasonId });
-      
-      if (res.data?.success) {
-        const { processedCount, baselines } = res.data;
+      let resData = null;
+      try {
+        const generateSeasonProjectionsFunc = httpsCallable(functions, 'generateSeasonProjections');
+        const res = await generateSeasonProjectionsFunc({ seasonId: projectionsSeasonId });
+        if (res.data?.success && res.data?.processedCount > 0) {
+          resData = res.data;
+        }
+      } catch (cloudErr) {
+        console.warn("Cloud function execution skipped/failed, using client projections engine fallback:", cloudErr);
+      }
+
+      if (!resData) {
+        setProjectionsLog('Running projections calculation engine in client fallback mode...');
+        resData = await generateSeasonProjectionsClient(projectionsSeasonId);
+      }
+
+      if (resData?.success) {
+        const { processedCount, baselines } = resData;
         const successMsg = `Successfully processed ${processedCount} players!\nBaselines - F: ${baselines.forward}, D: ${baselines.defense}, G: ${baselines.goalie}`;
         setProjectionsLog(successMsg);
         alert(`Projections Generated Successfully!\n\n${successMsg}`);
       } else {
-        throw new Error(res.data?.error || 'Failed to generate projections.');
+        throw new Error(resData?.error || 'Failed to generate projections.');
       }
     } catch (err) {
       setProjectionsLog(`Error: ${err.message}`);
@@ -245,331 +247,306 @@ export default function AdminPanel() {
     }
   };
 
-  if (loading) return <div style={{ padding: '60px 40px', color: 'var(--text-main)' }}>Loading Admin Panel...</div>;
+  if (loading) {
+    return (
+      <div className="dashboard-container" style={{ padding: '60px 24px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+        Loading Admin Panel...
+      </div>
+    );
+  }
 
   return (
     <div className="dashboard-container">
+      {/* Header */}
       <header className="dashboard-header">
         <h1>Admin Console</h1>
-        <p>Manage users and app-wide settings.</p>
+        <p>Manage application settings, run data pipelines, warp simulation time, and inspect PWHL data.</p>
       </header>
 
-      {error && <div className="error-message">{error}</div>}
-
-      <div className="grid-layout" style={{ marginBottom: '24px' }}>
-        <div className="glass-panel">
-          <h2 style={{ marginBottom: '16px', fontSize: '1.5rem' }}>Data Pipeline</h2>
-          <p style={{ color: 'var(--text-muted)', marginBottom: '16px' }}>
-            Pull the latest Seasons, Teams, Rosters, Games, and Stats from the official PWHL API into Firebase.
-          </p>
-          <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-            <select 
-              className="input-field" 
-              style={{ width: '250px', background: 'rgba(255,255,255,0.1)' }}
-              value={syncTargetSeason}
-              onChange={e => setSyncTargetSeason(e.target.value)}
-            >
-              <option value="all" style={{ color: '#000' }}>All Seasons</option>
-              {seasons.map(s => (
-                <option key={s.id} value={s.season_id} style={{ color: '#000' }}>{s.season_name}</option>
-              ))}
-            </select>
-            <button 
-              className="btn-primary" 
-              onClick={handleSync} 
-              disabled={isSyncing}
-            >
-              {isSyncing ? 'Syncing...' : 'Run Sync'}
-            </button>
-          </div>
-          <pre style={{ 
-            marginTop: '16px', 
-            background: 'rgba(0,0,0,0.3)', 
-            padding: '12px', 
-            borderRadius: '8px',
-            maxHeight: '200px',
-            overflowY: 'auto',
-            fontSize: '0.85rem'
-          }}>
-            {syncLog || 'No syncs run yet this session.'}
-          </pre>
+      {error && (
+        <div style={{ padding: '16px 20px', background: 'rgba(220, 38, 38, 0.08)', border: '1px solid var(--accent-danger)', borderRadius: '10px', color: 'var(--accent-danger)', marginBottom: '24px', fontSize: '0.9rem' }}>
+          {error}
         </div>
+      )}
 
-        {/* Active PWHL Season Selection Card */}
-        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-            <div>
-              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Active Season</h2>
-              <p style={{ color: 'var(--text-muted)' }}>Define the active season for the entire fantasy app.</p>
-            </div>
-            <span style={{ fontSize: '2rem' }}>🗓️</span>
-          </div>
-          
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: 'auto' }}>
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Current Active Season</label>
-            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-              <select 
-                className="input-field" 
-                style={{ flex: 1, background: 'rgba(255,255,255,0.1)' }}
-                value={localActiveSeasonId}
-                onChange={e => setLocalActiveSeasonId(e.target.value)}
-              >
-                {seasons.map(s => (
-                  <option key={s.id} value={s.season_id} style={{ color: '#000' }}>{s.season_name}</option>
-                ))}
-              </select>
-              <button 
-                className="btn-primary" 
-                onClick={handleApplyActiveSeason} 
-                disabled={isApplyingSeason}
-              >
-                {isApplyingSeason ? 'Applying...' : 'Apply Season'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Top-Level Navigation Tabs */}
+      <div className="tabs-navigation" style={{ marginBottom: '28px' }}>
+        <button 
+          className={`tab-btn ${mainTab === 'controls' ? 'active' : ''}`}
+          onClick={() => setMainTab('controls')}
+        >
+          ⚙️ System Controls
+        </button>
+        <button 
+          className={`tab-btn ${mainTab === 'datahub' ? 'active' : ''}`}
+          onClick={() => setMainTab('datahub')}
+        >
+          📊 PWHL Data Hub
+        </button>
+      </div>
 
+      {mainTab === 'controls' && (
+        <>
+          {/* Admin Control Cards Grid */}
+          <div className="admin-grid">
+            
+            {/* Card 1: Data Pipeline */}
+            <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                <div>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: '700', marginBottom: '4px' }}>Data Pipeline</h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Sync PWHL Seasons, Teams, Rosters, and Stats into Firebase.</p>
+                </div>
+                <span style={{ fontSize: '1.5rem' }}>🔄</span>
+              </div>
 
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: 'auto', marginBottom: '12px' }}>
+                <select 
+                  className="input-field" 
+                  style={{ flex: 1 }}
+                  value={syncTargetSeason}
+                  onChange={e => setSyncTargetSeason(e.target.value)}
+                >
+                  <option value="all">All Seasons</option>
+                  {seasons.map(s => (
+                    <option key={s.id} value={s.season_id}>{s.season_name}</option>
+                  ))}
+                </select>
+                <button 
+                  className="btn-primary" 
+                  onClick={handleSync} 
+                  disabled={isSyncing}
+                >
+                  {isSyncing ? 'Syncing...' : 'Run Sync'}
+                </button>
+              </div>
 
-        {/* Simulation Mode Card */}
-        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-            <div>
-              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Simulation Mode</h2>
-              <p style={{ color: 'var(--text-muted)' }}>Generate a complete safe testing environment.</p>
-            </div>
-            <span style={{ fontSize: '2rem' }}>⚡</span>
-          </div>
-          
-          <div style={{ 
-            background: 'rgba(0,0,0,0.2)', 
-            padding: '20px', 
-            borderRadius: '12px', 
-            border: '1px solid var(--border-color)', 
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '16px',
-            flexGrow: 1,
-            justifyContent: 'center'
-          }}>
-            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', lineHeight: '1.5', margin: 0 }}>
-              Instantly provisions a sandbox environment containing:
-            </p>
-            <ul style={{ 
-              fontSize: '0.85rem', 
-              color: 'var(--text-main)', 
-              margin: '0 0 8px 0', 
-              paddingLeft: '20px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '6px'
-            }}>
-              <li>7 Bot Users with automatic teams</li>
-              <li>1 Active 8-Team League (Simulation Test League)</li>
-              <li>28 Weekly H2H Matchups pre-scheduled</li>
-              <li>All test nodes tagged with <code style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px' }}>isTestNode: true</code></li>
-            </ul>
-
-            <button 
-              className="btn-primary" 
-              style={{ 
-                background: 'linear-gradient(135deg, #10B981, #059669)',
-                boxShadow: '0 4px 14px rgba(16, 185, 129, 0.4)',
-                border: 'none',
-                fontWeight: '700',
-                transition: 'transform 0.2s, box-shadow 0.2s',
-                cursor: 'pointer'
-              }}
-              onClick={handleStartTestSeason}
-              disabled={isSimulating}
-            >
-              {isSimulating ? 'Initializing Environment...' : 'Start Test Season ⚡'}
-            </button>
-          </div>
-
-          {simLog && (
-            <div style={{ 
-              marginTop: '16px', 
-              padding: '12px', 
-              background: 'rgba(16, 185, 129, 0.1)', 
-              color: '#34D399', 
-              borderRadius: '8px', 
-              fontSize: '0.85rem', 
-              textAlign: 'center',
-              border: '1px solid rgba(16, 185, 129, 0.2)'
-            }}>
-              {simLog}
-            </div>
-          )}
-        </div>
-
-        {/* Time Machine Card */}
-        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-            <div>
-              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Time Machine</h2>
-              <p style={{ color: 'var(--text-muted)' }}>Control and warp the application's central clock.</p>
-            </div>
-            <span style={{ fontSize: '2rem' }}>🛸</span>
-          </div>
-
-          <div style={{ 
-            background: 'rgba(0,0,0,0.2)', 
-            padding: '16px', 
-            borderRadius: '12px', 
-            border: '1px solid var(--border-color)', 
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '12px',
-            marginBottom: '16px'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-              <span style={{ color: 'var(--text-muted)' }}>Real-World Date:</span>
-              <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString()}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', alignItems: 'center' }}>
-              <span style={{ color: 'var(--text-muted)' }}>Simulated Clock:</span>
-              <span style={{ 
-                fontWeight: '700', 
-                color: simulationState.testModeActive ? 'var(--primary-color)' : 'var(--text-main)',
-                background: simulationState.testModeActive ? 'rgba(108, 92, 231, 0.1)' : 'transparent',
-                padding: simulationState.testModeActive ? '2px 8px' : '0',
-                borderRadius: '4px'
+              <pre style={{ 
+                background: 'var(--bg-surface-alt)', 
+                border: '1px solid var(--border-primary)', 
+                padding: '10px 12px', 
+                borderRadius: '8px',
+                maxHeight: '120px',
+                overflowY: 'auto',
+                fontSize: '0.78rem',
+                color: 'var(--text-secondary)',
+                fontFamily: 'monospace',
+                margin: 0
               }}>
-                {simulationState.testModeActive && simulationState.current_simulated_date
-                  ? new Date(simulationState.current_simulated_date).toLocaleDateString()
-                  : 'Real-Time Clock Active'}
-              </span>
+                {syncLog || 'No sync log recorded for this session.'}
+              </pre>
             </div>
-          </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: 'auto' }}>
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Set Simulated Date</label>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <input 
-                type="date" 
-                className="input-field" 
-                style={{ flexGrow: 1 }}
-                value={jumpDate} 
-                onChange={(e) => setJumpDate(e.target.value)}
-              />
+            {/* Card 2: Active PWHL Season */}
+            <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                <div>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: '700', marginBottom: '4px' }}>Active Season</h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Define the active season for the entire fantasy application.</p>
+                </div>
+                <span style={{ fontSize: '1.5rem' }}>🗓️</span>
+              </div>
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: 'auto' }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: '600', color: 'var(--text-secondary)' }}>Target Season</label>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                  <select 
+                    className="input-field" 
+                    style={{ flex: 1 }}
+                    value={localActiveSeasonId}
+                    onChange={e => setLocalActiveSeasonId(e.target.value)}
+                  >
+                    {seasons.map(s => (
+                      <option key={s.id} value={s.season_id}>{s.season_name}</option>
+                    ))}
+                  </select>
+                  <button 
+                    className="btn-primary" 
+                    onClick={handleApplyActiveSeason} 
+                    disabled={isApplyingSeason}
+                  >
+                    {isApplyingSeason ? 'Applying...' : 'Apply Season'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 3: Simulation Mode */}
+            <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                <div>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: '700', marginBottom: '4px' }}>Simulation Mode</h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Provision a isolated 8-team sandbox league environment.</p>
+                </div>
+                <span style={{ fontSize: '1.5rem' }}>⚡</span>
+              </div>
+              
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: '1.4', marginBottom: '14px' }}>
+                Provisions 7 bot managers, pre-calculates 28 H2H weekly matchups, and tags all nodes safely.
+              </p>
+
               <button 
                 className="btn-primary" 
-                style={{ padding: '8px 16px', fontSize: '0.85rem', whiteSpace: 'nowrap', cursor: 'pointer' }}
-                onClick={handleJumpToDate}
-                disabled={isUpdatingDate}
+                style={{ 
+                  background: 'var(--accent-action)',
+                  marginTop: 'auto',
+                  justifyContent: 'center'
+                }}
+                onClick={handleStartTestSeason}
+                disabled={isSimulating}
               >
-                {isUpdatingDate ? 'Warping...' : 'Jump to Date'}
+                {isSimulating ? 'Initializing...' : 'Start Sandbox League ⚡'}
               </button>
-            </div>
-          </div>
-        </div>
 
-        {/* Pre-Season Projections Engine Card */}
-        <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-            <div>
-              <h2 style={{ fontSize: '1.5rem', marginBottom: '4px' }}>Pre-Season Projections</h2>
-              <p style={{ color: 'var(--text-muted)' }}>Compute player projections, positional baselines, and VORP ranks.</p>
+              {simLog && (
+                <div style={{ marginTop: '10px', padding: '8px 12px', background: 'rgba(5, 150, 105, 0.08)', color: 'var(--accent-action)', borderRadius: '6px', fontSize: '0.78rem', textAlign: 'center' }}>
+                  {simLog}
+                </div>
+              )}
             </div>
-            <span style={{ fontSize: '2rem' }}>🔮</span>
-          </div>
-          
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginTop: 'auto' }}>
-            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Target Season</label>
-            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-              <select 
-                className="input-field" 
-                style={{ flex: 1, background: 'rgba(255,255,255,0.1)' }}
-                value={projectionsSeasonId}
-                onChange={e => setProjectionsSeasonId(e.target.value)}
-              >
-                {seasons.map(s => (
-                  <option key={s.id} value={s.season_id} style={{ color: '#000' }}>{s.season_name}</option>
-                ))}
-              </select>
-              <button 
-                className="btn-primary" 
-                style={{ whiteSpace: 'nowrap', cursor: 'pointer' }}
-                onClick={handleGenerateProjections} 
-                disabled={isProcessing}
-              >
-                {isProcessing ? 'Computing Math...' : 'Generate Projections'}
-              </button>
-            </div>
-          </div>
 
-          {projectionsLog && (
-            <div style={{ 
-              marginTop: '16px', 
-              padding: '12px', 
-              background: projectionsLog.startsWith('Error') ? 'rgba(239, 68, 68, 0.1)' : 'rgba(108, 92, 231, 0.1)', 
-              color: projectionsLog.startsWith('Error') ? '#F87171' : 'var(--primary-color)', 
-              borderRadius: '8px', 
-              fontSize: '0.85rem', 
-              textAlign: 'center',
-              border: projectionsLog.startsWith('Error') ? '1px solid rgba(239, 68, 68, 0.2)' : '1px solid rgba(108, 92, 231, 0.2)'
-            }}>
-              {projectionsLog}
-            </div>
-          )}
-        </div>
-      </div>
+            {/* Card 4: Time Machine */}
+            <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                <div>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: '700', marginBottom: '4px' }}>Time Machine</h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Warp the system's simulated clock date.</p>
+                </div>
+                <span style={{ fontSize: '1.5rem' }}>🛸</span>
+              </div>
 
-      <div className="glass-panel" style={{ padding: '0', overflow: 'hidden' }}>
-        <h2 style={{ padding: '24px', fontSize: '1.5rem', borderBottom: '1px solid var(--border-color)' }}>User Management</h2>
-        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
-          <thead>
-            <tr style={{ background: 'rgba(0,0,0,0.3)', borderBottom: '1px solid var(--border-color)' }}>
-              <th style={{ padding: '16px 24px', color: 'var(--text-muted)', fontWeight: '500' }}>Email</th>
-              <th style={{ padding: '16px 24px', color: 'var(--text-muted)', fontWeight: '500' }}>Role</th>
-              <th style={{ padding: '16px 24px', color: 'var(--text-muted)', fontWeight: '500' }}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map(user => (
-              <tr key={user.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                <td style={{ padding: '16px 24px' }}>{user.email}</td>
-                <td style={{ padding: '16px 24px' }}>
-                  <span style={{ 
-                    padding: '4px 8px', 
-                    borderRadius: '4px', 
-                    fontSize: '0.85rem',
-                    fontWeight: '600',
-                    background: user.role === 'admin' ? 'rgba(108, 92, 231, 0.2)' : 'rgba(255, 255, 255, 0.1)',
-                    color: user.role === 'admin' ? 'var(--primary-color)' : 'var(--text-main)'
-                  }}>
-                    {(user.role || 'user').toUpperCase()}
+              <div style={{ background: 'var(--bg-surface-alt)', border: '1px solid var(--border-primary)', padding: '12px', borderRadius: '8px', marginBottom: '14px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', marginBottom: '6px' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>Real Today:</span>
+                  <span style={{ fontWeight: '600' }}>{new Date().toLocaleDateString()}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', alignItems: 'center' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>Simulated Date:</span>
+                  <span className={`badge ${simulationState.testModeActive ? 'badge-primary' : 'badge-neutral'}`}>
+                    {simulationState.testModeActive && simulationState.current_simulated_date
+                      ? simulationState.current_simulated_date
+                      : 'Real Clock'}
                   </span>
-                </td>
-                <td style={{ padding: '16px 24px' }}>
-                  {user.email !== 'justinemerick79@gmail.com' ? (
-                    <button 
-                      onClick={() => toggleRole(user.id, user.role)}
-                      className="btn-secondary" 
-                      style={{ padding: '8px 16px', fontSize: '0.9rem' }}
-                    >
-                      {user.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
-                    </button>
-                  ) : (
-                    <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem', fontStyle: 'italic' }}>Super Admin</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {users.length === 0 && (
-              <tr>
-                <td colSpan="3" style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                  No users found.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                </div>
+              </div>
 
-      {/* Data Hub embedded within Admin Panel */}
-      <DataHub />
+              <div style={{ display: 'flex', gap: '8px', marginTop: 'auto' }}>
+                <input 
+                  type="date" 
+                  className="input-field" 
+                  style={{ flexGrow: 1 }}
+                  value={jumpDate} 
+                  onChange={(e) => setJumpDate(e.target.value)}
+                />
+                <button 
+                  className="btn-secondary" 
+                  style={{ whiteSpace: 'nowrap' }}
+                  onClick={handleJumpToDate}
+                  disabled={isUpdatingDate}
+                >
+                  {isUpdatingDate ? 'Warping...' : 'Jump'}
+                </button>
+              </div>
+            </div>
+
+            {/* Card 5: Pre-Season Projections Engine */}
+            <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                <div>
+                  <h3 style={{ fontSize: '1.25rem', fontWeight: '700', marginBottom: '4px' }}>Pre-Season Projections</h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Compute VORP rankings and fantasy point projections.</p>
+                </div>
+                <span style={{ fontSize: '1.5rem' }}>🔮</span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: 'auto' }}>
+                <select 
+                  className="input-field" 
+                  style={{ flex: 1 }}
+                  value={projectionsSeasonId}
+                  onChange={e => setProjectionsSeasonId(e.target.value)}
+                >
+                  {seasons.map(s => (
+                    <option key={s.id} value={s.season_id}>{s.season_name}</option>
+                  ))}
+                </select>
+                <button 
+                  className="btn-primary" 
+                  onClick={handleGenerateProjections} 
+                  disabled={isProcessing}
+                >
+                  {isProcessing ? 'Computing...' : 'Generate Projections'}
+                </button>
+              </div>
+
+              {projectionsLog && (
+                <div style={{ marginTop: '10px', padding: '8px 12px', background: projectionsLog.startsWith('Error') ? 'rgba(220, 38, 38, 0.08)' : 'rgba(74, 85, 104, 0.08)', color: projectionsLog.startsWith('Error') ? 'var(--accent-danger)' : 'var(--accent-primary)', borderRadius: '6px', fontSize: '0.78rem' }}>
+                  {projectionsLog}
+                </div>
+              )}
+            </div>
+
+          </div>
+
+          {/* User Management Section */}
+          <div className="data-table-wrapper" style={{ marginTop: '8px' }}>
+            <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-primary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h3 style={{ fontSize: '1.2rem', fontWeight: '700', fontFamily: 'Outfit, sans-serif' }}>User Access Management</h3>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: '2px 0 0 0' }}>Manage roles and administrator permissions.</p>
+              </div>
+              <span className="badge badge-neutral">{users.length} Users Registered</span>
+            </div>
+
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>User Email</th>
+                  <th>Current Role</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map(user => (
+                  <tr key={user.id}>
+                    <td style={{ fontWeight: '600' }}>{user.email}</td>
+                    <td>
+                      <span className={`badge ${user.role === 'admin' ? 'badge-primary' : 'badge-neutral'}`}>
+                        {(user.role || 'user').toUpperCase()}
+                      </span>
+                    </td>
+                    <td>
+                      {user.email !== 'justinemerick79@gmail.com' ? (
+                        <button 
+                          onClick={() => toggleRole(user.id, user.role)}
+                          className="btn-secondary" 
+                          style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+                        >
+                          {user.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
+                        </button>
+                      ) : (
+                        <span className="badge badge-warning">Super Admin</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {users.length === 0 && (
+                  <tr>
+                    <td colSpan="3" style={{ textAlign: 'center', padding: '32px', color: 'var(--text-tertiary)' }}>
+                      No registered users found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {/* Embedded Data Hub Tab */}
+      {mainTab === 'datahub' && (
+        <DataHub />
+      )}
 
     </div>
   );

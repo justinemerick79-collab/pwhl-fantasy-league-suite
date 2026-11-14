@@ -1,4 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
+import { 
+  Trophy, Users, Calendar, Zap, RotateCw, LogOut, Shield, Activity, 
+  ChevronDown, Check, Plus, Ticket, Play, Home, Settings
+} from 'lucide-react';
 import './index.css';
 import AuthModal from './components/AuthModal';
 import AdminPanel from './components/AdminPanel';
@@ -38,7 +42,7 @@ function App() {
 
   const { currentUser, isAdmin, logout } = useAuth();
 
-  const { simulationState, leagueSimState, getSimulatedDate, isSimulationActive, activeSeasonName, setActiveLeagueId: setTimeTravelLeagueId } = useTimeTravel();
+  const { simulationState, leagueSimState, activeSeasonName, setActiveLeagueId: setTimeTravelLeagueId } = useTimeTravel();
   const [isDayAdvancing, setIsDayAdvancing] = useState(false);
   const [isSkippingWeek, setIsSkippingWeek] = useState(false);
   const [isTeardownLoading, setIsTeardownLoading] = useState(false);
@@ -64,20 +68,16 @@ function App() {
   };
 
   const advanceSimulationDate = async (targetDateStr) => {
-    try {
-      // Per-league simulation: write to league doc
-      if (leagueSimState.isSimulation && activeLeagueId) {
-        const leagueRef = doc(db, "fantasy_leagues", activeLeagueId);
-        await updateDoc(leagueRef, { simulatedDate: targetDateStr });
-        console.log(`Advanced league ${activeLeagueId} simulation to: ${targetDateStr}`);
-      }
-      // Always update global simulation state so backend trigger fires
-      const simStateRef = doc(db, "admin_settings", "simulation_state");
-      await updateDoc(simStateRef, { current_simulated_date: targetDateStr });
-      console.log("Advanced global simulation date to:", targetDateStr);
-    } catch (err) {
-      throw err;
+    // Per-league simulation: write to league doc
+    if (leagueSimState.isSimulation && activeLeagueId) {
+      const leagueRef = doc(db, "fantasy_leagues", activeLeagueId);
+      await updateDoc(leagueRef, { simulatedDate: targetDateStr });
+      console.log(`Advanced league ${activeLeagueId} simulation to: ${targetDateStr}`);
     }
+    // Always update global simulation state so backend trigger fires
+    const simStateRef = doc(db, "admin_settings", "simulation_state");
+    await updateDoc(simStateRef, { current_simulated_date: targetDateStr });
+    console.log("Advanced global simulation date to:", targetDateStr);
   };
 
   const handleAdvanceDay = async () => {
@@ -225,7 +225,7 @@ function App() {
     } else {
       setIsAdminView(false);
       const tabName = path.slice(1); // strip leading slash
-      const validTabs = ['matchup', 'roster', 'players', 'standings', 'settings', 'manager'];
+      const validTabs = ['matchup', 'roster', 'players', 'standings', 'transactions', 'settings', 'manager'];
       if (validTabs.includes(tabName)) {
         setCurrentTab(tabName);
       } else {
@@ -362,125 +362,118 @@ function App() {
   const isCommissioner = activeLeagueData && currentUser && currentUser.uid === activeLeagueData.ownerId;
 
   return (
-    <div className="min-h-screen bg-[#F8F9FA] text-[#111827] font-sans selection:bg-indigo-500/20">
+    <div className="min-h-screen text-slate-800 font-sans" style={{ backgroundColor: '#FAFAF8' }}>
       
       {(simulationState?.testModeActive || leagueSimState.isSimulation) && (
-        <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white border-b border-indigo-900/40 px-4 py-2.5 flex flex-col md:flex-row justify-between items-center gap-3 z-50 shadow-md">
-          {/* Left section: status + season */}
+        <div className="border-b px-4 py-2 flex flex-col md:flex-row justify-between items-center gap-3 z-50" style={{ backgroundColor: '#F5F5F3', borderColor: '#E5E5E3' }}>
           <div className="flex items-center gap-3 flex-wrap justify-center md:justify-start">
-            <span className="flex items-center gap-1.5 bg-indigo-500/20 border border-indigo-400/30 text-indigo-300 px-2.5 py-1 rounded-full text-[10px] font-black tracking-wider uppercase animate-pulse">
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+            <span className="flex items-center gap-1.5 text-[10px] font-bold tracking-wider uppercase text-slate-600">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
               {leagueSimState.isSimulation ? 'League Simulation' : 'Simulation Active'}
             </span>
-            <span className="text-xs font-bold text-slate-300">
-              Season: <strong className="text-white font-extrabold">{activeSeasonName}</strong>
+            <span className="text-xs font-medium text-slate-500">
+              Season: <strong className="text-slate-800">{activeSeasonName}</strong>
             </span>
           </div>
-
-          {/* Middle section: date display */}
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-            <span className="text-base">📅</span>
+          <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
+            <Calendar className="w-3.5 h-3.5 text-slate-400" />
             <span>
               {getCurrentSimDateStr() ? (
-                <>Simulated Date: <strong className="text-amber-400 font-extrabold">{new Date(getCurrentSimDateStr() + 'T08:00:00-08:00').toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
+                <>Simulated: <strong className="text-slate-800">{new Date(getCurrentSimDateStr() + 'T08:00:00-08:00').toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
               ) : (
-                <>Real Date: <strong className="text-emerald-400 font-extrabold">{new Date().toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
+                <>Today: <strong className="text-slate-800">{new Date().toLocaleDateString(undefined, { dateStyle: 'full' })}</strong></>
               )}
             </span>
           </div>
-
-          {/* Right section: actions */}
-          <div className="flex items-center gap-2.5">
-            <button
-              onClick={handleAdvanceDay}
-              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
-              className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-indigo-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
-            >
-              {isDayAdvancing ? 'Advancing...' : '+1 Day ⚡'}
+          <div className="flex items-center gap-2">
+            <button onClick={handleAdvanceDay} disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
+              className="bg-slate-700 hover:bg-slate-600 disabled:bg-slate-300 text-white text-[10px] font-semibold uppercase tracking-wider px-3 py-1.5 rounded-lg active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed">
+              <Zap className="w-3 h-3" /> {isDayAdvancing ? 'Advancing...' : '+1 Day'}
             </button>
-            <button
-              onClick={handleSkipToEndOfWeek}
-              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
-              className="bg-violet-600 hover:bg-violet-500 disabled:bg-violet-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-violet-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
-            >
-              {isSkippingWeek ? 'Skipping...' : 'Skip to Week End ⏭️'}
+            <button onClick={handleSkipToEndOfWeek} disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
+              className="bg-slate-700 hover:bg-slate-600 disabled:bg-slate-300 text-white text-[10px] font-semibold uppercase tracking-wider px-3 py-1.5 rounded-lg active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed">
+              <Play className="w-3 h-3" /> {isSkippingWeek ? 'Skipping...' : 'Skip to Week End'}
             </button>
-            <button
-              onClick={handleTriggerSimulationDailySync}
-              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading || isSyncingStats}
-              className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800 text-white text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl shadow-lg shadow-emerald-600/20 hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
-            >
-              {isSyncingStats ? 'Syncing...' : 'Sync Stats 🔄'}
+            <button onClick={handleTriggerSimulationDailySync} disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading || isSyncingStats}
+              className="bg-emerald-700 hover:bg-emerald-600 disabled:bg-slate-300 text-white text-[10px] font-semibold uppercase tracking-wider px-3 py-1.5 rounded-lg active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed">
+              <RotateCw className={`w-3 h-3 ${isSyncingStats ? 'animate-spin' : ''}`} /> {isSyncingStats ? 'Syncing...' : 'Sync Stats'}
             </button>
-            <button
-              onClick={handleDeactivateSimulation}
-              disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
-              className="bg-slate-800 hover:bg-rose-950/80 border border-slate-700 hover:border-rose-800/40 text-slate-300 hover:text-rose-200 disabled:bg-slate-900 disabled:text-slate-600 text-[10px] font-black uppercase tracking-wider px-3.5 py-1.5 rounded-xl hover:scale-[1.03] active:scale-95 transition-all duration-200 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
-            >
-              {isTeardownLoading ? 'Deactivating...' : 'Deactivate 🚪'}
+            <button onClick={handleDeactivateSimulation} disabled={isDayAdvancing || isSkippingWeek || isTeardownLoading}
+              className="bg-white hover:bg-red-50 border text-slate-600 hover:text-red-600 disabled:bg-slate-100 disabled:text-slate-400 text-[10px] font-semibold uppercase tracking-wider px-3 py-1.5 rounded-lg active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed" style={{ borderColor: '#E5E5E3' }}>
+              <LogOut className="w-3 h-3" /> {isTeardownLoading ? 'Deactivating...' : 'Deactivate'}
             </button>
           </div>
         </div>
       )}
 
-      {/* ── 1. STICKY GLOBAL NAVIGATION BAR ── */}
-      <nav className="sticky top-0 z-40 bg-white/80 border-b border-gray-200 backdrop-blur-md px-4 py-3.5 flex justify-between items-center select-none shadow-sm shadow-gray-100">
-        <div className="flex items-center gap-3">
+      {/* ── 1. GLOBAL NAVIGATION HEADER ── */}
+      <nav className="bg-white border-b px-6 py-3 flex justify-between items-center z-40 select-none" style={{ borderColor: '#E5E5E3' }}>
+        {/* Left Branding & League Selector */}
+        <div className="flex items-center gap-4">
           <div 
             onClick={handleNavHome}
-            className="font-sports text-xl font-bold tracking-tight bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent cursor-pointer hover:opacity-90 transition-opacity"
+            className="flex items-center gap-2.5 cursor-pointer group"
           >
-            PWHL Fantasy
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center font-sports font-black text-white text-sm transition-all" style={{ backgroundColor: '#4A5568' }}>
+              PW
+            </div>
+            <div>
+              <span className="font-sports font-bold text-sm tracking-tight text-slate-800 block leading-none">
+                PWHL Fantasy
+              </span>
+              <span className="text-[9px] uppercase font-semibold tracking-widest text-slate-400 block mt-0.5">
+                League Suite
+              </span>
+            </div>
           </div>
 
-          {/* Active League Switcher Dropdown (Inside active league) */}
+          {/* Active League Dropdown Selector */}
           {currentUser && activeLeagueId && (
             <div className="relative">
               <button 
                 onClick={() => setIsSwitchMenuOpen(!isSwitchMenuOpen)}
-                className="flex items-center gap-1 bg-[#F3F4F6] border border-gray-200 px-2.5 py-1.5 rounded-xl text-xs font-bold text-gray-700 active:scale-95 transition-transform"
+                className="flex items-center gap-2 bg-white hover:bg-gray-50 border px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 transition-all cursor-pointer" style={{ borderColor: '#E5E5E3' }}
               >
-                <span className="max-w-[100px] truncate">{activeLeagueName}</span>
-                <span className="text-[8px] text-indigo-500">▼</span>
+                <span className="max-w-[160px] truncate">{activeLeagueName}</span>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
               </button>
 
               {isSwitchMenuOpen && (
-                <div className="absolute left-0 mt-2 w-56 rounded-2xl bg-white border border-gray-200 shadow-2xl p-2 z-50">
-                  <div className="text-[9px] font-black text-gray-400 px-3 py-1.5 uppercase tracking-widest border-b border-gray-100 mb-1">Switch Leagues</div>
-                  
+                <div className="absolute left-0 mt-1.5 w-60 rounded-xl bg-white border shadow-lg p-1.5 z-50 animate-scale-up" style={{ borderColor: '#E5E5E3' }}>
+                  <div className="px-3 py-1.5 text-[9px] font-semibold uppercase tracking-wider text-slate-400 border-b mb-1" style={{ borderColor: '#F0F0EE' }}>My Leagues</div>
                   {myLeagues.map(l => (
                     <button
                       key={l.id}
                       onClick={() => handleSetActiveLeague(l.id, l.name)}
-                      className={`w-full text-left px-3 py-2 text-xs font-bold rounded-xl transition-colors truncate flex items-center justify-between ${activeLeagueId === l.id ? 'bg-indigo-50 text-indigo-600' : 'text-gray-600 hover:bg-gray-50'}`}
+                      className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg transition-colors flex items-center justify-between cursor-pointer ${activeLeagueId === l.id ? 'bg-slate-100 text-slate-800 font-semibold' : 'text-slate-600 hover:bg-slate-50'}`}
                     >
                       <span className="truncate">{l.name}</span>
-                      {activeLeagueId === l.id && <span className="text-[10px] text-indigo-600">✓</span>}
+                      {activeLeagueId === l.id && <Check className="w-3.5 h-3.5 text-slate-500" />}
                     </button>
                   ))}
 
-                  <div className="border-t border-gray-100 my-1.5"></div>
+                  <div className="border-t my-1" style={{ borderColor: '#F0F0EE' }}></div>
                   
                   <button 
                     onClick={() => { setShowCreateModal(true); setIsSwitchMenuOpen(false); }}
-                    className="w-full text-left px-3 py-2 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+                    className="w-full text-left px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
                   >
-                    ➕ Create New League
+                    <Plus className="w-3.5 h-3.5 text-slate-400" /> Create New League
                   </button>
                   <button 
                     onClick={() => { setShowJoinModal(true); setIsSwitchMenuOpen(false); }}
-                    className="w-full text-left px-3 py-2 text-xs font-bold text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors"
+                    className="w-full text-left px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
                   >
-                    🚪 Join Another League
+                    <Ticket className="w-3.5 h-3.5 text-slate-400" /> Join Another League
                   </button>
                   
-                  <div className="border-t border-gray-100 my-1.5"></div>
+                  <div className="border-t my-1" style={{ borderColor: '#F0F0EE' }}></div>
                   
                   <button 
                     onClick={() => handleSetActiveLeague(null, '')}
-                    className="w-full text-left px-3 py-2 text-xs font-bold text-gray-500 hover:bg-gray-50 rounded-xl transition-colors"
+                    className="w-full text-left px-3 py-2 text-xs font-medium text-slate-500 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
                   >
-                    🏠 League Selector
+                    <Home className="w-3.5 h-3.5 text-slate-400" /> League Selector
                   </button>
                 </div>
               )}
@@ -489,36 +482,45 @@ function App() {
         </div>
 
         {/* Right Account Operations */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          {currentUser && activeLeagueId && (
+            <button 
+              onClick={() => setCurrentTab('settings')}
+              className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${currentTab === 'settings' || currentTab === 'manager' ? 'bg-slate-200 text-slate-700' : 'hover:bg-slate-100 text-slate-400'}`}
+              title="League Settings"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          )}
           {currentUser ? (
             <div className="relative">
               <button 
                 onClick={() => setIsAccountMenuOpen(!isAccountMenuOpen)}
-                className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center font-black text-xs text-indigo-600 shadow-sm active:scale-95 transition-transform"
+                className="w-8 h-8 rounded-lg bg-slate-100 border flex items-center justify-center font-semibold text-xs text-slate-600 active:scale-95 transition-transform cursor-pointer" style={{ borderColor: '#E5E5E3' }}
               >
                 {currentUser.email ? currentUser.email.charAt(0).toUpperCase() : "U"}
               </button>
 
               {isAccountMenuOpen && (
-                <div className="absolute right-0 mt-2 w-48 rounded-2xl bg-white border border-gray-200 shadow-2xl p-2 z-50">
-                  <div className="px-3 py-2 text-[10px] text-gray-400 truncate border-b border-gray-100 mb-1.5">
-                    Signed in as<br/><strong className="text-gray-700 font-bold text-xs truncate block">{currentUser.email}</strong>
+                <div className="absolute right-0 mt-1.5 w-52 rounded-xl bg-white border shadow-lg p-1.5 z-50" style={{ borderColor: '#E5E5E3' }}>
+                  <div className="px-3 py-2 text-[10px] text-slate-400 truncate border-b mb-1" style={{ borderColor: '#F0F0EE' }}>
+                    Signed in as<br/><strong className="text-slate-700 font-semibold text-xs truncate block">{currentUser.email}</strong>
                   </div>
                   
                   {isAdmin && (
                     <button 
                       onClick={() => { setIsAdminView(!isAdminView); setIsAccountMenuOpen(false); }}
-                      className={`w-full text-left px-3 py-2 text-xs font-bold rounded-xl transition-colors ${isAdminView ? 'bg-purple-600 text-white' : 'text-purple-600 hover:bg-purple-50'}`}
+                      className={`w-full text-left px-3 py-2 text-xs font-medium rounded-lg transition-colors flex items-center gap-2 cursor-pointer ${isAdminView ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
                     >
-                      🛡️ Admin Console
+                      <Shield className="w-3.5 h-3.5" /> Admin Console
                     </button>
                   )}
 
                   <button 
                     onClick={handleSignOut}
-                    className="w-full text-left px-3 py-2 text-xs font-bold text-rose-500 hover:bg-rose-50 rounded-xl transition-colors mt-1"
+                    className="w-full text-left px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 rounded-lg transition-colors mt-0.5 flex items-center gap-2 cursor-pointer"
                   >
-                    🚪 Sign Out
+                    <LogOut className="w-3.5 h-3.5" /> Sign Out
                   </button>
                 </div>
               )}
@@ -526,80 +528,85 @@ function App() {
           ) : (
             <button 
               onClick={() => { setAuthModalMode('login'); setIsAuthModalOpen(true); }}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-wider shadow-md active:scale-95 transition-transform"
+              className="text-white px-4 py-2 rounded-lg text-xs font-semibold active:scale-95 transition-transform cursor-pointer" style={{ backgroundColor: '#4A5568' }}
             >
-              Log-in
+              Log in
             </button>
           )}
         </div>
       </nav>
 
-      {/* ── SUB-HEADER NAVIGATION BAR (TOP WEB TABS) ── */}
-      {currentUser && activeLeagueId && !isAdminView && currentTab !== 'draft_room' && (
-        <div className="bg-white border-b border-gray-200 px-4 flex overflow-x-auto scrollbar-none select-none shadow-sm shadow-gray-100/50 justify-center">
-          <div className="flex gap-2 max-w-sm sm:max-w-none">
+      {/* ── SUB-HEADER NAVIGATION BAR (5 CORE TABS) ── */}
+      {currentUser && activeLeagueId && !isAdminView && currentTab !== 'draft_room' && currentTab !== 'settings' && currentTab !== 'manager' && (
+        <div className="bg-white border-b px-4 flex overflow-x-auto scrollbar-none select-none justify-center" style={{ borderColor: '#E5E5E3' }}>
+          <div className="flex gap-0">
             {[
-              { key: 'matchup', label: '📊 Matchup' },
-              { key: 'roster', label: '⛸️ Roster' },
-              { key: 'players', label: '🔍 Players' },
-              { key: 'standings', label: '🏆 Standings' },
-              { key: 'settings', label: '⚙️ Settings' },
-              ...(isCommissioner ? [{ key: 'manager', label: '🛡️ LM Toolset' }] : [])
-            ].map(tab => (
-              <button
-                key={tab.key}
-                onClick={() => setCurrentTab(tab.key)}
-                className={`py-3.5 px-4 text-xs font-black uppercase tracking-wider border-b-2 transition-all duration-200 flex items-center gap-2 ${currentTab === tab.key ? 'border-indigo-600 text-indigo-600 font-extrabold' : 'border-transparent text-gray-400 hover:text-gray-600 hover:border-gray-200'}`}
-              >
-                {tab.label}
-              </button>
-            ))}
+              { key: 'matchup', label: 'Matchup' },
+              { key: 'roster', label: 'Roster' },
+              { key: 'players', label: 'Players' },
+              { key: 'standings', label: 'Standings' },
+              { key: 'transactions', label: 'Transactions' },
+            ].map(tab => {
+              const isActive = currentTab === tab.key;
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => setCurrentTab(tab.key)}
+                  className={`py-3 px-5 text-xs font-semibold tracking-wide border-b-2 transition-all duration-150 cursor-pointer ${isActive ? 'text-slate-800 font-bold' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+                  style={isActive ? { borderColor: '#4A5568' } : {}}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
 
-      {/* ── 2. STAGE 1: MINIMALIST SPORTS LANDING PAGE (NOT LOGGED IN) ── */}
+      {/* ── 2. STAGE 1: LANDING PAGE (NOT LOGGED IN) ── */}
       {!currentUser && (
-        <div className="px-4 py-12 max-w-6xl mx-auto min-h-[80vh] flex flex-col lg:flex-row items-center gap-12 justify-center select-none">
-          {/* Left Column: Brand & Hero Header */}
-          <div className="flex-1 text-center lg:text-left max-w-md">
-            <h1 className="font-sports text-6xl lg:text-7xl font-black tracking-tight leading-none bg-gradient-to-r from-gray-900 to-gray-700 bg-clip-text text-transparent mb-6">
-              PWHL FANTASY
-            </h1>
-            <p className="text-sm text-gray-500 font-semibold leading-relaxed mb-8">
-              Experience the inaugural PWHL season! Draft your ultimate team of star athletes, manage live weekly matchups, and lead your franchise to the championship.
+        <div className="max-w-3xl mx-auto px-6 py-20 animate-fade-in">
+          <div className="text-center max-w-xl mx-auto">
+            <p className="text-[11px] uppercase font-semibold tracking-widest text-slate-400 mb-3">
+              Professional Fantasy Sports Platform
             </p>
-            <div className="space-y-3.5 sm:space-y-0 sm:flex sm:gap-4 max-w-xs sm:max-w-none mx-auto lg:mx-0">
+            <h1 className="font-sports text-4xl sm:text-5xl font-extrabold text-slate-800 tracking-tight leading-tight">
+              PWHL Fantasy League Suite
+            </h1>
+            <p className="text-sm text-slate-500 mt-4 font-medium leading-relaxed max-w-md mx-auto">
+              The premier fantasy hockey platform for the Professional Women's Hockey League. Draft rosters, manage daily lineups, and compete head-to-head.
+            </p>
+            <div className="mt-10 flex gap-3 justify-center">
               <button
                 onClick={() => { setAuthModalMode('login'); setIsAuthModalOpen(true); }}
-                className="w-full sm:w-auto px-8 py-4.5 bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-xs font-black uppercase tracking-wider rounded-2xl shadow-xl shadow-indigo-600/10 active:scale-95 transition-transform"
+                className="px-6 py-3 text-white text-xs font-semibold rounded-lg active:scale-95 transition-all cursor-pointer" style={{ backgroundColor: '#4A5568' }}
               >
-                Log-in
+                Log in
               </button>
               <button
                 onClick={() => { setAuthModalMode('signup'); setIsAuthModalOpen(true); }}
-                className="w-full sm:w-auto px-8 py-4.5 bg-white border border-gray-200 rounded-2xl text-xs font-black uppercase text-gray-700 tracking-wider hover:bg-gray-50 active:scale-95 transition-transform"
+                className="px-6 py-3 bg-white border text-xs font-semibold text-slate-600 active:scale-95 transition-all cursor-pointer rounded-lg" style={{ borderColor: '#E5E5E3' }}
               >
                 Create Account
               </button>
             </div>
           </div>
           
-          {/* Right Column: Styled Graphic preview */}
-          <div className="flex-1 w-full max-w-lg rounded-[40px] overflow-hidden border border-gray-200 bg-white shadow-2xl relative aspect-[4/3] flex items-center justify-center">
-            <div className="absolute inset-0 bg-gradient-to-tr from-indigo-500/10 via-[#F8F9FA] to-emerald-500/10"></div>
-            <div className="absolute inset-0 opacity-[0.03] bg-[radial-gradient(#6C5CE7_1px,transparent_1px)] [background-size:16px_16px]"></div>
-            
-            <div className="relative text-center p-8 z-10 flex flex-col items-center">
-              <div className="flex -space-x-4 mb-6">
-                <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-indigo-600 to-violet-500 border-4 border-white flex items-center justify-center text-3xl shadow-lg font-black text-white">💜</div>
-                <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-emerald-500 to-teal-500 border-4 border-white flex items-center justify-center text-3xl shadow-lg font-black text-white">🏆</div>
-                <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-indigo-700 to-pink-500 border-4 border-white flex items-center justify-center text-3xl shadow-lg font-black text-white">⚡</div>
-              </div>
-              <span className="text-[11px] uppercase font-black tracking-widest text-indigo-600 bg-indigo-50 px-4 py-2 rounded-full border border-indigo-100 shadow-sm">
-                Inaugural PWHL Season
-              </span>
-              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-4">Draft Star Athletes • Compete Weekly • Claim the Cup</p>
+          <div className="mt-16 flex justify-center gap-12 text-center">
+            <div>
+              <Activity className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+              <p className="text-xs font-semibold text-slate-600">Live Matchups</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">Head-to-head weekly</p>
+            </div>
+            <div>
+              <Trophy className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+              <p className="text-xs font-semibold text-slate-600">League Standings</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">Playoff bracket system</p>
+            </div>
+            <div>
+              <Users className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+              <p className="text-xs font-semibold text-slate-600">Player Scouting</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">Full PWHL stat database</p>
             </div>
           </div>
         </div>
@@ -610,47 +617,40 @@ function App() {
 
       {/* ── 4. STAGE 3: LOGGED IN - NO LEAGUES ONBOARDING ── */}
       {currentUser && !isAdminView && !activeLeagueId && (
-        <div className="px-4 py-12 max-w-4xl mx-auto min-h-[85vh] flex flex-col justify-center select-none">
+        <div className="px-4 py-16 max-w-3xl mx-auto min-h-[80vh] flex flex-col justify-center select-none">
           {loadingLeagues ? (
-            <div className="py-20 text-center text-gray-400 text-xs font-black tracking-widest animate-pulse">Establishing arena...</div>
+            <div className="py-20 text-center text-slate-400 text-xs font-medium tracking-wider animate-pulse">Loading leagues...</div>
           ) : (
             <div className="space-y-10">
               <header className="text-center mb-4 max-w-md mx-auto">
-                <h2 className="font-sports text-5xl font-black text-gray-900 leading-tight">Welcome to the Arena</h2>
-                <p className="text-xs text-gray-400 font-semibold mt-2">Get started by creating a league to act as commissioner or join a friend's active draft lobby.</p>
+                <h2 className="font-sports text-3xl font-extrabold text-slate-800 leading-tight">Get Started</h2>
+                <p className="text-sm text-slate-500 font-medium mt-2">Create a league as commissioner or join an existing one with an invite code.</p>
               </header>
 
-              {/* Grid Layout: Side-by-Side on wide screens */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Card 1: Start a League */}
-                <div className="bg-white border border-gray-200 p-8 rounded-[36px] shadow-sm text-center flex flex-col justify-between">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-white border p-8 rounded-xl text-center flex flex-col justify-between hover:border-slate-300 transition-colors" style={{ borderColor: '#E5E5E3' }}>
                   <div>
-                    <div className="w-16 h-16 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-3xl mx-auto mb-5 font-black text-indigo-600">
-                      🏆
-                    </div>
-                    <h3 className="text-lg font-black text-gray-800 leading-tight">Start a League</h3>
-                    <p className="text-xs text-gray-400 mt-2 max-w-[240px] mx-auto font-medium">Become commissioner, define custom rules, and draft roster sheets.</p>
+                    <Trophy className="w-7 h-7 text-slate-400 mx-auto mb-4" />
+                    <h3 className="text-base font-bold text-slate-800">Start a League</h3>
+                    <p className="text-xs text-slate-500 mt-2 max-w-[240px] mx-auto">Define custom rules, configure scoring, and draft rosters.</p>
                   </div>
                   <button 
                     onClick={() => setShowCreateModal(true)}
-                    className="w-full py-4 bg-gradient-to-r from-indigo-600 to-violet-600 rounded-2xl text-[10px] font-black uppercase text-white tracking-wider active:scale-95 transition-transform mt-8 shadow-md shadow-indigo-600/10"
+                    className="w-full py-3 rounded-lg text-xs font-semibold text-white active:scale-95 transition-transform mt-8 cursor-pointer" style={{ backgroundColor: '#4A5568' }}
                   >
                     Create New League
                   </button>
                 </div>
 
-                {/* Card 2: Join a League */}
-                <div className="bg-white border border-gray-200 p-8 rounded-[36px] shadow-sm text-center flex flex-col justify-between">
+                <div className="bg-white border p-8 rounded-xl text-center flex flex-col justify-between hover:border-slate-300 transition-colors" style={{ borderColor: '#E5E5E3' }}>
                   <div>
-                    <div className="w-16 h-16 rounded-2xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-3xl mx-auto mb-5 font-black text-emerald-600">
-                      🎟️
-                    </div>
-                    <h3 className="text-lg font-black text-gray-800 leading-tight">Join a League</h3>
-                    <p className="text-xs text-gray-400 mt-2 max-w-[240px] mx-auto font-medium">Enter an invite code to join a friend's active recruitment lobby.</p>
+                    <Ticket className="w-7 h-7 text-slate-400 mx-auto mb-4" />
+                    <h3 className="text-base font-bold text-slate-800">Join a League</h3>
+                    <p className="text-xs text-slate-500 mt-2 max-w-[240px] mx-auto">Enter an invite code to join an active recruitment lobby.</p>
                   </div>
                   <button 
                     onClick={() => setShowJoinModal(true)}
-                    className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 rounded-2xl text-[10px] font-black uppercase text-white tracking-wider active:scale-95 transition-transform mt-8 shadow-md shadow-emerald-600/10"
+                    className="w-full py-3 bg-white border rounded-lg text-xs font-semibold text-slate-600 active:scale-95 transition-transform mt-8 cursor-pointer" style={{ borderColor: '#E5E5E3' }}
                   >
                     Join Existing League
                   </button>
@@ -668,8 +668,16 @@ function App() {
           {/* Tab Routing */}
           {currentTab === 'matchup' && <Matchup activeLeagueId={activeLeagueId} setCurrentTab={setCurrentTab} />}
           {currentTab === 'roster' && <Roster activeLeagueId={activeLeagueId} />}
-          {currentTab === 'players' && <Players activeLeagueId={activeLeagueId} />}
+          {currentTab === 'players' && (
+            <Players 
+              activeLeagueId={activeLeagueId} 
+              onProposeTrade={(_targetPlayer) => {
+                setCurrentTab('transactions');
+              }} 
+            />
+          )}
           {currentTab === 'standings' && <League activeLeagueId={activeLeagueId} initialTab="standings" setActiveLeagueId={handleSetActiveLeague} />}
+          {currentTab === 'transactions' && <League activeLeagueId={activeLeagueId} initialTab="transactions" setActiveLeagueId={handleSetActiveLeague} />}
           {currentTab === 'settings' && <League activeLeagueId={activeLeagueId} initialTab="schedule" setActiveLeagueId={handleSetActiveLeague} />}
           {currentTab === 'manager' && isCommissioner && <League activeLeagueId={activeLeagueId} initialTab="manager" setActiveLeagueId={handleSetActiveLeague} />}
           {currentTab === 'draft_room' && <DraftRoom activeLeagueId={activeLeagueId} setCurrentTab={setCurrentTab} />}
@@ -680,12 +688,12 @@ function App() {
 
       {/* ── 6. FLOATING MODAL OVERLAYS (CREATE / JOIN LOBBIES) ── */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
           <div className="w-full max-w-sm my-8 animate-scale-up">
-            <div className="bg-white border border-gray-200 rounded-[32px] p-6 relative shadow-2xl">
+            <div className="bg-white border rounded-2xl p-6 relative shadow-xl" style={{ borderColor: '#E5E5E3' }}>
               <button 
                 onClick={() => setShowCreateModal(false)}
-                className="absolute top-4 right-4 text-gray-400 text-lg hover:text-gray-700 transition-colors"
+                className="absolute top-4 right-4 text-slate-400 text-lg hover:text-slate-600 transition-colors cursor-pointer"
               >
                 &times;
               </button>
@@ -696,12 +704,12 @@ function App() {
       )}
 
       {showJoinModal && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="w-full max-w-sm animate-scale-up">
-            <div className="bg-white border border-gray-200 rounded-[32px] p-6 relative shadow-2xl">
+            <div className="bg-white border rounded-2xl p-6 relative shadow-xl" style={{ borderColor: '#E5E5E3' }}>
               <button 
                 onClick={() => setShowJoinModal(false)}
-                className="absolute top-4 right-4 text-gray-400 text-lg hover:text-gray-700 transition-colors"
+                className="absolute top-4 right-4 text-slate-400 text-lg hover:text-slate-600 transition-colors cursor-pointer"
               >
                 &times;
               </button>

@@ -24,7 +24,6 @@ import {
   getFirestore, 
   connectFirestoreEmulator, 
   doc, 
-  getDoc, 
   deleteDoc, 
   setDoc 
 } from "firebase/firestore";

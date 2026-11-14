@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { Timer, Zap } from 'lucide-react';
 import { db } from '../firebase.js';
 import { 
   doc, 
@@ -12,12 +13,14 @@ import {
 } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
+import { useData } from '../contexts/DataContext';
 import { initializeDraft, submitDraftPick, toggleAutoDraftStatus } from '../services/leagueService';
 import { fetchDraftEligiblePlayers } from '../services/pwhlService';
 
 export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const { currentUser } = useAuth();
   const { activeSeasonId, getSimulatedDate, simulationState } = useTimeTravel();
+  const { seasons, seasonsLoading } = useData();
 
   const [leagueData, setLeagueData] = useState(null);
   const [teams, setTeams] = useState([]);
@@ -48,17 +51,23 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const [lobbySecondsLeft, setLobbySecondsLeft] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Refs to hold current state to prevent stale closures inside timer loop
+  // Refs to hold current state to prevent stale closures inside timer loop.
+  // Assigned in an effect rather than during render: writing to a ref while
+  // rendering is impure (react-hooks/refs). The timer callbacks read these
+  // asynchronously, always after commit, so effect timing is equivalent here.
   const draftStateRef = useRef(null);
-  draftStateRef.current = draftState;
   const allPlayersRef = useRef([]);
-  allPlayersRef.current = allPlayers;
   const leagueDataRef = useRef(null);
-  leagueDataRef.current = leagueData;
   const isSubmittingRef = useRef(false);
-  isSubmittingRef.current = isSubmitting;
   const pwhlTeamsRef = useRef({});
-  pwhlTeamsRef.current = pwhlTeams;
+
+  useEffect(() => {
+    draftStateRef.current = draftState;
+    allPlayersRef.current = allPlayers;
+    leagueDataRef.current = leagueData;
+    isSubmittingRef.current = isSubmitting;
+    pwhlTeamsRef.current = pwhlTeams;
+  }, [draftState, allPlayers, leagueData, isSubmitting, pwhlTeams]);
 
   // Team branding helper for player card modal
   const getTeamBranding = (teamCode) => {
@@ -75,6 +84,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
 
   // 1. Fetch PWHL Player Universe using centralized service (fixes team resolution)
   useEffect(() => {
+    if (seasonsLoading) return;
     const loadPlayersAndTeams = async () => {
       setPlayersLoading(true);
       try {
@@ -83,8 +93,6 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
 
         // Resolve prevSeasonId if not yet set
         if (!prevSeasonId) {
-          const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
-          const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
           const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
           const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
           const prevRegularSeasons = seasons.filter(s => {
@@ -137,7 +145,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     };
 
     loadPlayersAndTeams();
-  }, [activeSeasonId, statViewMode, prevSeasonId]);
+  }, [activeSeasonId, statViewMode, prevSeasonId, seasons, seasonsLoading]);
 
   // 2. Fetch main league details and teams list
   useEffect(() => {
@@ -570,8 +578,8 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
           </button>
         </div>
         
-        <div className="w-20 h-20 rounded-3xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-4xl mb-6 shadow-inner animate-pulse">
-          ⏱️
+        <div className="w-20 h-20 rounded-3xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-4xl mb-6 shadow-inner animate-pulse">
+          <Timer className="w-10 h-10 text-indigo-400" />
         </div>
         
         <h1 className="font-sports text-3xl font-black text-gray-900 tracking-tight">
@@ -1179,9 +1187,9 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                 <button
                   onClick={handleLMForceAutoPick}
                   disabled={isSubmitting}
-                  className="px-5 py-3.5 bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-black uppercase tracking-wider rounded-2xl active:scale-95 transition-all shadow-md shadow-slate-800/10"
+                  className="px-5 py-3.5 bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-black uppercase tracking-wider rounded-2xl active:scale-95 transition-all shadow-md shadow-slate-800/10 cursor-pointer flex items-center gap-2"
                 >
-                  ⚡ Force Auto-Pick for turn
+                  <Zap className="w-4 h-4 text-amber-400" /> Force Auto-Pick for turn
                 </button>
               </div>
             )}

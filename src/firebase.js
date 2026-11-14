@@ -1,7 +1,7 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, connectFirestoreEmulator } from "firebase/firestore";
-import { getAuth, connectAuthEmulator } from "firebase/auth";
-import { getStorage, connectStorageEmulator } from "firebase/storage";
+import { getFirestore } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
+import { getStorage } from "firebase/storage";
 import { getFunctions, connectFunctionsEmulator } from "firebase/functions";
 
 const firebaseConfig = {
@@ -15,25 +15,21 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-// 1. Delete local Firestore IndexedDB database natively before initializing the Firestore instance
-if (typeof window !== 'undefined' && window.indexedDB) {
-  try {
-    // Delete both potential default names
-    window.indexedDB.deleteDatabase("firestore/[DEFAULT]/pwhl-fantasy-mobile-26/main");
-    window.indexedDB.deleteDatabase("firestore/[DEFAULT]/pwhl-fantasy-mobile-26/offline");
-    console.log("🧹 Cleaned native local Firestore IndexedDB databases.");
-  } catch (e) {
-    console.warn("Failed to delete local IndexedDB:", e);
-  }
-}
+// Note: Clean up of local Firestore IndexedDB databases is handled in main.jsx
+// before importing/initializing the App to prevent connection timeouts/emulator caching races.
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 export const functions = getFunctions(app);
 
-// Connect to Local Functions Emulator when running on localhost
+// Connect to Local Functions Emulator when running on localhost AND 'useEmulator' is set in query params or localStorage.
+// Otherwise, call deployed production functions to match the database configuration.
 if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-  console.log("🔌 Connecting to Local Functions Emulator...");
-  connectFunctionsEmulator(functions, "127.0.0.1", 5001);
+  const useEmulator = window.location.search.includes('useEmulator') || localStorage.getItem('useEmulator') === 'true';
+  if (useEmulator) {
+    console.log("🔌 Connecting to Local Functions Emulator...");
+    connectFunctionsEmulator(functions, "127.0.0.1", 5001);
+  }
 }
+

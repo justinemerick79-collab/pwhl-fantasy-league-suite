@@ -1,6 +1,5 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, getDocs, limit, query } from "firebase/firestore";
-import fs from 'fs';
 
 const firebaseConfig = {
   projectId: "pwhl-fantasy-mobile-26",

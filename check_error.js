@@ -15,7 +15,7 @@ import puppeteer from 'puppeteer';
   });
 
   try {
-    await page.goto('http://localhost:5173', { waitUntil: 'networkidle0', timeout: 5000 });
+    await page.goto('http://localhost:5174', { waitUntil: 'networkidle0', timeout: 5000 });
   } catch (err) {
     console.log('Navigation failed:', err.message);
   }
