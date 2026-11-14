@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Timer, Zap, Trophy, Shield, Calendar, Users, Activity, Lock, ArrowLeft } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Timer, Zap } from 'lucide-react';
 import { db } from '../firebase.js';
 import { 
   doc, 

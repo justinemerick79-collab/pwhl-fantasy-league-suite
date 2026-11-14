@@ -17,9 +17,8 @@ import {
   setDoc, 
   deleteDoc,
   collection,
-  getDocs,
-  Timestamp 
-} from "firebase/firestore";
+  getDocs
+  } from "firebase/firestore";
 import { 
   submitAddDrop,
   submitWaiverClaim,

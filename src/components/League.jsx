@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
-  Trophy, Shield, Settings, Users, Calendar, Award, Zap, RotateCw, Trash2, Check, Lock, ChevronRight, Activity, Wrench, Clock, ArrowRightLeft, Send, X, AlertCircle, CheckCircle2, User, Plus
+  Trophy, Shield, Settings, Zap, Trash2, Lock, Clock, ArrowRightLeft, Send, X, AlertCircle, Plus
 } from 'lucide-react';
 import { db } from '../firebase.js';
 import { doc, getDoc, updateDoc, collection, getDocs, deleteDoc } from 'firebase/firestore';

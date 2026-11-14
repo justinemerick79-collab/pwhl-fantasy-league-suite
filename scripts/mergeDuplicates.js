@@ -7,9 +7,8 @@ import {
   getDoc, 
   setDoc, 
   updateDoc, 
-  deleteDoc, 
-  writeBatch 
-} from "firebase/firestore";
+  deleteDoc 
+  } from "firebase/firestore";
 import { 
   getAuth, 
   signInWithEmailAndPassword, 

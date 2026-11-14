@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { User, X, AlertCircle, Trophy, Activity, Calendar, Shield, ArrowRightLeft } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { User, X, AlertCircle, Shield, ArrowRightLeft } from 'lucide-react';
 import { db } from '../firebase';
 import { doc, getDoc, collection, getDocs } from 'firebase/firestore';
 import { useTimeTravel } from '../contexts/TimeTravelContext';

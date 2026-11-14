@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { db, functions } from '../firebase';
 import { collection, getDocs, doc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { runFullSync, autoGenerateMissingWeeks, generateSeasonProjectionsClient } from '../services/pwhlService';

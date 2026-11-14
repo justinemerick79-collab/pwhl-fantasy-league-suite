@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
-  Trophy, Users, Calendar, Zap, RotateCw, LogOut, Shield, Activity, 
-  ChevronDown, User, Check, Copy, Plus, Ticket, Play, ArrowRight, Search, SlidersHorizontal, Layers, ChevronLeft, ChevronRight, Moon
+  Trophy, Users, Calendar, Zap, Shield, Copy, ChevronLeft, ChevronRight, Moon
 } from 'lucide-react';
 import { db } from '../firebase.js';
-import { doc, getDoc, collection, getDocs, query, where, updateDoc, onSnapshot } from 'firebase/firestore';
+import { doc, collection, getDocs, query, where, updateDoc, onSnapshot } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { useData } from '../contexts/DataContext';

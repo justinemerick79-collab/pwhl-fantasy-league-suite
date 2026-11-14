@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
-  Trophy, Users, Calendar, Zap, RotateCw, LogOut, Shield, Activity, 
-  ChevronDown, User, Check, Copy, Plus, Ticket, Play, ArrowRight, Search, SlidersHorizontal, Layers, Filter, UserPlus, UserMinus, UserCheck, ArrowUpDown, Clock, Lock, AlertTriangle, ArrowRightLeft
+  Shield, Search, UserPlus, Clock, Lock, AlertTriangle, ArrowRightLeft
 } from 'lucide-react';
 import { db } from '../firebase.js';
 import { doc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';

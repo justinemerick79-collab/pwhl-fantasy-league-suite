@@ -1,5 +1,4 @@
-import React from 'react';
-import { Trophy, Award, Shield, Moon, Zap, X } from 'lucide-react';
+import { Trophy, Award, Shield, Moon, X } from 'lucide-react';
 
 export default function MatchupResultModal({ isOpen, onClose, matchup, myTeam, oppTeam, weekNum, isByeWeek }) {
   if (!isOpen || !myTeam) return null;

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
-import { collection, query, where, getDocs, doc, getDoc, orderBy } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { fetchGameSummary } from '../services/pwhlService';
 import { fetchAggregatedStats } from '../services/statsEngine';
 import { useTimeTravel } from '../contexts/TimeTravelContext';

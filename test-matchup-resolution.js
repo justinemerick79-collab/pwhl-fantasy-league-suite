@@ -20,16 +20,13 @@ import {
   getAuth, 
   connectAuthEmulator, 
   signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  deleteUser 
-} from "firebase/auth";
+  createUserWithEmailAndPassword 
+  } from "firebase/auth";
 import { 
   getFirestore, 
   connectFirestoreEmulator, 
   doc, 
   getDoc, 
-  getDocs,
-  collection, 
   deleteDoc, 
   setDoc 
 } from "firebase/firestore";

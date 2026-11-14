@@ -27,8 +27,6 @@ import {
   connectFirestoreEmulator, 
   doc, 
   getDoc, 
-  getDocs, 
-  collection, 
   deleteDoc, 
   setDoc,
   Timestamp 

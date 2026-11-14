@@ -1,5 +1,5 @@
 import { db } from '../firebase.js';
-import { collection, doc, setDoc, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
 /**
  * Creates an in-app notification for a user and logs a simulated email dispatch.

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase.js';
 import { 
   collection, 
@@ -8,7 +8,6 @@ import {
   updateDoc, 
   doc, 
   getDoc, 
-  arrayUnion, 
   serverTimestamp,
   addDoc
 } from 'firebase/firestore';

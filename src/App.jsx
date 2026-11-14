@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   Trophy, Users, Calendar, Zap, RotateCw, LogOut, Shield, Activity, 
-  ChevronDown, User, Check, Copy, Plus, Ticket, Play, ArrowRight, Search, SlidersHorizontal, Layers, Home, Settings
+  ChevronDown, Check, Plus, Ticket, Play, Home, Settings
 } from 'lucide-react';
 import './index.css';
 import AuthModal from './components/AuthModal';
