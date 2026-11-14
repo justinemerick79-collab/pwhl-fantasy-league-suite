@@ -370,7 +370,7 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
   const undroppableList = leagueData?.undroppable_players || [];
 
   const processedPlayers = playersList.map(player => {
-    let statsObj = {};
+    let statsObj;
     if (effectiveStatViewMode === 'projections') {
       statsObj = player.projections || {};
     } else if (effectiveStatViewMode === 'lastSeason') {

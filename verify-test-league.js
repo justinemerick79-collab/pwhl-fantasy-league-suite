@@ -117,7 +117,7 @@ async function authenticateAndSetAdmin() {
 
 async function runVerification() {
   let testUser = null;
-  let activeLeagueId = null;
+  let activeLeagueId;
 
   try {
     // 1. Authenticate & grant admin role

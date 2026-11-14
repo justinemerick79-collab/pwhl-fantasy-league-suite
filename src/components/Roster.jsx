@@ -287,7 +287,7 @@ export default function Roster({ activeLeagueId }) {
             String(g.visiting_team) === actualTeamId
           );
           
-          let statsStr = '';
+          let statsStr;
           if (hasGame) {
             if (statsObj) {
               statsStr = getActiveStatsText({ ...p, pos: normPos }, statsObj) || 'No stats obtained';

@@ -57,7 +57,7 @@ async function authenticateAndSetAdmin() {
 }
 
 async function runTest() {
-  let testUser = null;
+  let testUser;
   const leagueId = "daily_test_league_" + Math.random().toString(36).substring(2, 6);
   const teamId = "team_user";
   const createdDocs = [];

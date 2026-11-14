@@ -1631,7 +1631,7 @@ async function generateDailyLineupsForAllTeams(leagueId, dateStr, rosterSettings
 
     // Check if this team already has a lineup for this date
     const existingSnap = await lineupRef.get();
-    let isAutoEmpty = false;
+    let isAutoEmpty;
     if (existingSnap.exists) {
       const existingData = existingSnap.data();
       const existingLineup = existingData?.activeLineup || {};
