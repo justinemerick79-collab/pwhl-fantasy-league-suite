@@ -316,7 +316,7 @@ function App() {
     fetchUserLeagues();
   }, [currentUser, activeLeagueId]);
 
-  const handleSetActiveLeague = async (id, name) => {
+  async function handleSetActiveLeague(id, name) {
     setActiveLeagueId(id);
     // Sync per-league simulation context
     if (setTimeTravelLeagueId) setTimeTravelLeagueId(id);
@@ -340,7 +340,7 @@ function App() {
       setActiveLeagueData(null);
     }
     setIsSwitchMenuOpen(false);
-  };
+  }
 
   const handleSignOut = async () => {
     await logout();

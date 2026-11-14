@@ -235,53 +235,6 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     return () => clearInterval(interval);
   }, [leagueData, draftState, getSimulatedDate, activeLeagueId]);
 
-  // 4. Timer Loop & Auto-pick triggers
-  // Uses Date.now() to match the deadline's real-clock basis (set by leagueService via Date.now() + 60000).
-  // Any connected client can trigger auto-picks for whoever is on the clock — not limited to the current user.
-  useEffect(() => {
-    if (!draftState || draftState.status !== 'active') return;
-
-    const updateTimer = async () => {
-      const deadline = draftStateRef.current?.pickDeadline;
-      if (!deadline) return;
-
-      const now = Date.now();
-      const deadlineMs = deadline.seconds * 1000 + Math.floor((deadline.nanoseconds || 0) / 1000000);
-      const diffSecs = Math.max(0, Math.floor((deadlineMs - now) / 1000));
-      setSecondsLeft(diffSecs);
-
-      // Auto-pick: any connected client triggers for whoever is on the clock
-      if (draftStateRef.current?.status === 'active' && !isSubmittingRef.current) {
-        const pickerUid = draftStateRef.current?.currentTeamOnClock;
-        const isUserAutoDraftOn = draftStateRef.current?.autoDraftUsers?.[pickerUid] === true;
-        
-        if (pickerUid && (diffSecs === 0 || (isUserAutoDraftOn && diffSecs <= 57))) {
-          console.log(`[Draft Room] Triggering Auto-Pick for ${pickerUid}...`);
-          triggerAutoPickForUser(pickerUid, diffSecs === 0);
-        }
-      }
-    };
-
-    updateTimer();
-    const interval = setInterval(updateTimer, 1000);
-    return () => clearInterval(interval);
-  }, [draftState]);
-
-  // Helper to compile drafted player IDs
-  const getDraftedPlayerIds = () => {
-    if (!draftState) return new Set();
-    const picks = draftState.picks || [];
-    const set = new Set();
-    picks.forEach(p => {
-      if (p.playerId) set.add(p.playerId);
-    });
-    return set;
-  };
-
-  const draftedSet = getDraftedPlayerIds();
-
-  // Find the top available player for Auto-Pick, sorted by projected fantasy points,
-  // respecting position limits of the picker's roster.
   const getTopAvailablePlayer = (pickerUid) => {
     if (!pickerUid) return null;
     const currentDraftState = draftStateRef.current;
@@ -397,8 +350,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     return available[0];
   };
 
-  // Auto-pick for any user whose clock has expired or who has auto-draft enabled
-  const triggerAutoPickForUser = async (pickerUid, timedOut = false) => {
+  async function triggerAutoPickForUser(pickerUid, timedOut = false) {
     if (isSubmittingRef.current) return;
     const topPlayer = getTopAvailablePlayer(pickerUid);
     if (!topPlayer) return;
@@ -413,7 +365,57 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  // 4. Timer Loop & Auto-pick triggers
+  // Uses Date.now() to match the deadline's real-clock basis (set by leagueService via Date.now() + 60000).
+  // Any connected client can trigger auto-picks for whoever is on the clock — not limited to the current user.
+  useEffect(() => {
+    if (!draftState || draftState.status !== 'active') return;
+
+    const updateTimer = async () => {
+      const deadline = draftStateRef.current?.pickDeadline;
+      if (!deadline) return;
+
+      const now = Date.now();
+      const deadlineMs = deadline.seconds * 1000 + Math.floor((deadline.nanoseconds || 0) / 1000000);
+      const diffSecs = Math.max(0, Math.floor((deadlineMs - now) / 1000));
+      setSecondsLeft(diffSecs);
+
+      // Auto-pick: any connected client triggers for whoever is on the clock
+      if (draftStateRef.current?.status === 'active' && !isSubmittingRef.current) {
+        const pickerUid = draftStateRef.current?.currentTeamOnClock;
+        const isUserAutoDraftOn = draftStateRef.current?.autoDraftUsers?.[pickerUid] === true;
+        
+        if (pickerUid && (diffSecs === 0 || (isUserAutoDraftOn && diffSecs <= 57))) {
+          console.log(`[Draft Room] Triggering Auto-Pick for ${pickerUid}...`);
+          triggerAutoPickForUser(pickerUid, diffSecs === 0);
+        }
+      }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [draftState]);
+
+  // Helper to compile drafted player IDs
+  const getDraftedPlayerIds = () => {
+    if (!draftState) return new Set();
+    const picks = draftState.picks || [];
+    const set = new Set();
+    picks.forEach(p => {
+      if (p.playerId) set.add(p.playerId);
+    });
+    return set;
   };
+
+  const draftedSet = getDraftedPlayerIds();
+
+  // Find the top available player for Auto-Pick, sorted by projected fantasy points,
+  // respecting position limits of the picker's roster.
+
+  // Auto-pick for any user whose clock has expired or who has auto-draft enabled
 
 
   const handleSelectPlayer = async (playerId) => {
