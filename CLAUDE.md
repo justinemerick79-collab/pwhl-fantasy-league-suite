@@ -14,7 +14,7 @@ Note `package.json` is still named `temp_web` and `README.md` is the stock Vite 
 ```bash
 npm run dev        # Vite dev server — REQUIRED for any live PWHL API work (see API proxy below)
 npm run build      # Vite build to dist/
-npm run lint       # eslint (currently ~415 pre-existing problems — see Linting below)
+npm run lint       # eslint (~236 pre-existing findings in app code — see Linting below)
 ```
 
 Deploys (Firebase CLI is authenticated; `pwhl-fantasy-mobile-26` is the active project, set via local
@@ -191,11 +191,28 @@ so no custom config or `@apply`.
 
 ### Linting
 
-`npm run lint` reports ~415 pre-existing problems and is not currently a useful signal. `eslint.config.js`
-applies **browser globals to every `.js`/`.jsx` file** and only ignores `dist`, so it also lints the
-gitignored `scratch/` directory (~42 files), the Node-based root test scripts, `functions/`, and `scripts/` —
-producing a flood of spurious `'process' is not defined`. `src/` alone has ~20 affected files. Judge new code
-on its own diff rather than on the total count.
+`eslint.config.js` defines four environments; match new files to the right one:
+
+| Pattern | Environment |
+|---|---|
+| `src/**/*.{js,jsx}` | browser globals, ESM, JSX, React hooks + refresh rules |
+| `*.js` (root), `scripts/**/*.js` | Node globals, ESM — run under `npx tsx` / `node` |
+| `functions/**/*.js`, `**/*.cjs` | Node globals, **CommonJS** |
+| `dist`, `dist-ssr`, `scratch`, `node_modules` | ignored |
+
+Getting this wrong is what previously made lint unusable: browser globals were applied to every file, so the
+Node scripts produced a flood of spurious `'process' is not defined`. `no-unused-vars` is tuned project-wide
+to allow an unused `catch (e)` binding and `_`-prefixed parameters.
+
+`npm run lint` still reports ~236 **genuine** pre-existing findings, so it is not yet a clean gate — judge new
+code on its own diff. The bulk is ~172 `no-unused-vars` (mostly unused imports, e.g. leftover `lucide-react`
+icons and the no-longer-needed React 19 default import). More serious clusters worth fixing deliberately:
+9 `react-hooks/rules-of-hooks`, 13 `react-hooks/set-state-in-effect`, and 13 `react-hooks/exhaustive-deps`.
+
+**`no-undef` in `src/` indicates a real `ReferenceError`, not lint noise.** There are 4 known ones: missing
+imports of `useMemo` (`LeagueHub.jsx:102`), `updateDoc` (`leagueService.js:659`), and
+`generateSeasonProjectionsClient` (`AdminPanel.jsx:230`), plus undefined `handleProposeTrade` /
+`submittingTrade` in `League.jsx`'s propose-trade modal (~line 1582). Treat any `no-undef` here as a bug.
 
 ### Scripts
 
