@@ -75,6 +75,7 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
   const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
 
   const [statViewMode, setStatViewMode] = useState('projections');
+  const [prevStatViewMode, setPrevStatViewMode] = useState('projections');
   const [lastSeasonStats, setLastSeasonStats] = useState([]);
 
   // Fetch league status details
@@ -200,7 +201,11 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
     isFallbackUniverse
   ]);
 
-  useEffect(() => {
+  // Reset the sort whenever the stat view changes. Done during render rather
+  // than in an effect so the new sort is applied in the same pass, with no
+  // intermediate paint using the previous view's sort column.
+  if (statViewMode !== prevStatViewMode) {
+    setPrevStatViewMode(statViewMode);
     if (statViewMode === 'projections') {
       setSortColumn('overallRank');
       setSortDirection('asc');
@@ -208,7 +213,7 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
       setSortColumn('points');
       setSortDirection('desc');
     }
-  }, [statViewMode]);
+  }
 
   let isPreseason = true;
   if (leagueData && leagueData.status !== 'pending' && leagueData.status !== 'drafting') {

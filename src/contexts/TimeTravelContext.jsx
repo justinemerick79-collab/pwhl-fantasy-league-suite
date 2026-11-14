@@ -1,7 +1,9 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { db } from '../firebase';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { processWaivers, processAcceptedTrades } from '../services/leagueService';
+
+const EMPTY_LEAGUE_SIM = { isSimulation: false, simulatedDate: null, leagueId: null };
 
 const TimeTravelContext = createContext();
 
@@ -17,12 +19,9 @@ export function TimeTravelProvider({ children }) {
     active_test_league_id: ''
   });
 
-  // Per-league simulation state (new architecture)
-  const [leagueSimState, setLeagueSimState] = useState({
-    isSimulation: false,
-    simulatedDate: null,
-    leagueId: null
-  });
+  // Per-league simulation state (new architecture). Held raw and stamped with the
+  // league it came from; `leagueSimState` below narrows it to the active league.
+  const [rawLeagueSimState, setRawLeagueSimState] = useState(EMPTY_LEAGUE_SIM);
 
   const [activeSeasonId, setActiveSeasonId] = useState('5');
   const [activeSeasonName, setActiveSeasonName] = useState('2024-25 Regular Season');
@@ -62,23 +61,20 @@ export function TimeTravelProvider({ children }) {
 
   // Per-league simulation listener: watches the active league doc for simulation fields
   useEffect(() => {
-    if (!activeLeagueId) {
-      setLeagueSimState({ isSimulation: false, simulatedDate: null, leagueId: null });
-      return;
-    }
+    if (!activeLeagueId) return;
 
     const leagueRef = doc(db, 'fantasy_leagues', activeLeagueId);
     const unsubscribe = onSnapshot(leagueRef, (snap) => {
       if (snap.exists()) {
         const data = snap.data();
         if (data.isSimulation) {
-          setLeagueSimState({
+          setRawLeagueSimState({
             isSimulation: true,
             simulatedDate: data.simulatedDate || null,
             leagueId: activeLeagueId
           });
         } else {
-          setLeagueSimState({ isSimulation: false, simulatedDate: null, leagueId: activeLeagueId });
+          setRawLeagueSimState({ isSimulation: false, simulatedDate: null, leagueId: activeLeagueId });
         }
         processWaivers(activeLeagueId).catch(console.error);
         processAcceptedTrades(activeLeagueId).catch(console.error);
@@ -89,6 +85,16 @@ export function TimeTravelProvider({ children }) {
 
     return () => unsubscribe();
   }, [activeLeagueId]);
+
+  // Only trust simulation state that belongs to the currently active league.
+  // Switching leagues leaves the previous league's snapshot in state until the
+  // new subscription delivers, and serving that stale value would make
+  // getSimulatedDate() report the old league's simulated clock.
+  const leagueSimState = useMemo(() => (
+    activeLeagueId && rawLeagueSimState.leagueId === activeLeagueId
+      ? rawLeagueSimState
+      : EMPTY_LEAGUE_SIM
+  ), [activeLeagueId, rawLeagueSimState]);
 
   /**
    * Returns the current simulated date as a Date object.

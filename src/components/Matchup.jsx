@@ -155,7 +155,15 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     return map;
   }, [playersList, pwhlTeams]);
 
-  const [seasonWeeks, setSeasonWeeks] = useState([]);
+  // Derived straight from the season doc rather than mirrored into state by an
+  // effect. Mirroring left seasonWeeks one render behind `seasons`, which is the
+  // class of race this screen has been bitten by before. Reuses the `seasonId`
+  // computed above, which already prefers leagueData.season_id.
+  const seasonWeeks = useMemo(() => {
+    if (!activeLeagueId || !leagueData || seasonsLoading || seasonDataLoading) return [];
+    const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
+    return currentSeasonDoc?.weeks || [];
+  }, [activeLeagueId, leagueData, seasons, seasonId, seasonsLoading, seasonDataLoading]);
 
   // Matchup Result Modal states
   const [showResultModal, setShowResultModal] = useState(false);
@@ -344,23 +352,6 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
     return () => unsubscribe();
   }, [activeLeagueId]);
-
-  // Load dynamic season weeks list from context
-  useEffect(() => {
-    if (!activeLeagueId || !leagueData || seasonsLoading || seasonDataLoading) return;
-    
-    const seasonId = leagueData?.season_id 
-      ? String(leagueData.season_id) 
-      : (activeSeasonId ? String(activeSeasonId) : '5');
-      
-    // Find season doc to get weeks array
-    const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
-    if (currentSeasonDoc && currentSeasonDoc.weeks) {
-      setSeasonWeeks(currentSeasonDoc.weeks);
-    } else {
-      setSeasonWeeks([]);
-    }
-  }, [activeLeagueId, activeSeasonId, leagueData, seasons, seasonsLoading, seasonDataLoading]);
 
   // Fetch matchups and player stats when leagueData updates
   useEffect(() => {
