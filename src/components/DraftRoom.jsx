@@ -415,11 +415,6 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     }
   };
 
-  // Keep the old triggerAutoPick for the LM force-pick button
-  const triggerAutoPick = async () => {
-    const pickerUid = draftStateRef.current?.currentTeamOnClock || currentUser?.uid;
-    await triggerAutoPickForUser(pickerUid, false);
-  };
 
   const handleSelectPlayer = async (playerId) => {
     if (isSubmitting || !draftState) return;

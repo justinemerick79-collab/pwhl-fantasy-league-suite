@@ -2,8 +2,11 @@ import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { X, Shield } from 'lucide-react';
 
-export default function AuthModal({ isOpen, onClose }) {
-  const [isLogin, setIsLogin] = useState(true);
+export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
+  // Seeded from the caller's requested mode. The caller remounts this component
+  // on each open (via key), so this also clears any previously typed credentials
+  // and prevents the mode leaking between opens.
+  const [isLogin, setIsLogin] = useState(initialMode !== 'signup');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');

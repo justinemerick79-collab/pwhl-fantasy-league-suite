@@ -412,19 +412,14 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
   };
 
   // Dynamic titles and subtitles
-  let tabTitle = "League Central";
   let tabSub = "Manage weekly standings, playoff trees, and commissioner configurations.";
   if (initialTab === 'standings') {
-    tabTitle = "Standings & Playoffs";
     tabSub = "Track leaderboard rankings and playoff tree qualifiers.";
   } else if (initialTab === 'transactions') {
-    tabTitle = "Waivers & Trades Central";
     tabSub = "Track dynamic rolling waiver priority, active claims, and trade proposals.";
   } else if (initialTab === 'schedule') {
-    tabTitle = "Settings & Team";
     tabSub = "Customize your team profile and review active league rules.";
   } else if (initialTab === 'manager') {
-    tabTitle = "LM Toolset";
     tabSub = "Commissioner controls for drafts, settings, and recruitment.";
   }
 

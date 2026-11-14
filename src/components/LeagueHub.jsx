@@ -38,7 +38,10 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   
   // Database States
   const [myLeagues, setMyLeagues] = useState([]);
-  const [userMap, setUserMap] = useState({});
+  // Value intentionally unread: nothing renders userMap today. The block that
+  // builds it does one Firestore read per league member, so it is a candidate
+  // for removal along with this state.
+  const [, setUserMap] = useState({});
   const [loading, setLoading] = useState(true);
   // League detail is stamped with the league it was fetched for. The derived
   // values below discard detail belonging to a previously active league, so
@@ -78,21 +81,20 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
     pwhlTeams
     } = activeSeasonData;
 
-  const seasonDataLoading = loadingStates[seasonId] === true;
 
   // Form States - Create
   const [createName, setCreateName] = useState('');
   const [createMaxTeams, setCreateMaxTeams] = useState(6);
-  const [matchupDuration, setMatchupDuration] = useState(1);
-  const [playoffTeams, setPlayoffTeams] = useState(4);
-  const [playoffDuration, setPlayoffDuration] = useState(1);
+  const matchupDuration = 1;
+  const playoffTeams = 4;
+  const playoffDuration = 1;
   const [createLoading, setCreateLoading] = useState(false);
-  const [rosterLimits, setRosterLimits] = useState({
+  const rosterLimits = {
     forwards: { starters: 6, max: 10 },
     defense: { starters: 4, max: 8 },
     goalies: { starters: 1, max: 3 },
     bench: 4
-  });
+  };
 
   // Form States - Join
   const [joinCode, setJoinCode] = useState('');

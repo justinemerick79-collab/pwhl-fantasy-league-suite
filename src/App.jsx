@@ -721,6 +721,8 @@ function App() {
 
       {/* Authentication Dialog */}
       <AuthModal 
+        key={`${authModalMode}-${isAuthModalOpen}`}
+        initialMode={authModalMode}
         isOpen={isAuthModalOpen} 
         onClose={() => { setIsAuthModalOpen(false); fetchUserLeagues(); }} 
       />
