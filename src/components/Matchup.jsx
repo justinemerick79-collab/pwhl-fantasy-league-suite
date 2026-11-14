@@ -545,7 +545,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     calculateTimeLeft();
     const interval = setInterval(calculateTimeLeft, 1000);
     return () => clearInterval(interval);
-  }, [leagueData]);
+  }, [leagueData, getSimulatedDate]);
 
 
 

@@ -184,7 +184,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     };
 
     getLeague();
-  }, [activeLeagueId]);
+  }, [activeLeagueId, getSimulatedDate]);
 
   // 3. Listen to real-time draft state shifts
   useEffect(() => {
