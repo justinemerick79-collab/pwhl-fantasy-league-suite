@@ -12,6 +12,17 @@ import {
   setDoc
 } from 'firebase/firestore';
 import { normalizePosition } from './pwhlService';
+import { notifyTradeEvent } from './notificationService';
+
+// Safe date parser: avoids UTC midnight shift for bare "YYYY-MM-DD" strings
+function parseDateSafe(dateStr) {
+  if (!dateStr) return new Date();
+  const s = String(dateStr);
+  if (s.includes('T') || s.includes(' ')) return new Date(s);
+  const parts = s.split('-').map(Number);
+  if (parts.length === 3) return new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
+  return new Date(s);
+}
 
 /**
  * Generates a random 6-character invite code.
@@ -607,12 +618,65 @@ export async function getSimulatedSystemDate() {
 /**
  * Performs an atomic Add/Drop Free Agency swap.
  * Validates roster limits and places dropped player on a 48-hour waiver.
+/**
+ * Calculates the top 50 athletes in the league based on total fantasy points
+ * and updates the league's undroppable_players list in Firestore.
+ */
+export async function updateWeeklyTop50Undroppable(leagueId) {
+  try {
+    const leagueRef = doc(db, "fantasy_leagues", leagueId);
+    const leagueSnap = await getDoc(leagueRef);
+    if (!leagueSnap.exists()) return [];
+
+    const leagueData = leagueSnap.data();
+    const seasonId = leagueData.season_id ? String(leagueData.season_id) : '5';
+
+    // Fetch all players for this season
+    const playersSnap = await getDocs(collection(db, "pwhl_players"));
+    const playersList = [];
+
+    playersSnap.forEach(pDoc => {
+      const pData = pDoc.data();
+      const id = pData.player_id || pData.id || pDoc.id.split('_')[1];
+      const stats = pData.stats?.[seasonId] || {};
+      const fpts = pData.fpts || stats.points || stats.fpts || 0;
+      playersList.push({
+        id: String(id),
+        name: pData.name || `${pData.first_name || ''} ${pData.last_name || ''}`.trim(),
+        fpts: Number(fpts) || 0,
+        rank: pData.overallRank || 999
+      });
+    });
+
+    // Sort by FPTS descending (or overallRank ascending if FPTS is 0 during preseason)
+    playersList.sort((a, b) => {
+      if (b.fpts !== a.fpts) return b.fpts - a.fpts;
+      return a.rank - b.rank;
+    });
+
+    const top50Ids = playersList.slice(0, 50).map(p => p.id);
+
+    await updateDoc(leagueRef, {
+      undroppable_players: top50Ids,
+      undroppable_updated_at: serverTimestamp()
+    });
+
+    console.log(`Updated Top 50 Undroppable list for league ${leagueId}. Count: ${top50Ids.length}`);
+    return top50Ids;
+  } catch (err) {
+    console.error(`Error updating undroppable list for league ${leagueId}:`, err);
+    return [];
+  }
+}
+
+/**
+ * Performs an atomic Add/Drop Free Agency swap.
+ * Validates roster limits, checks Undroppable Top 50 list, and places dropped player on a 48-hour waiver.
  */
 export async function submitAddDrop(leagueId, teamId, userId, addPlayerId, dropPlayerId) {
   const leagueRef = doc(db, "fantasy_leagues", leagueId);
   const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, teamId);
 
-  // We fetch simulated time outside transaction (calls inside transaction must be synchronous/reads first)
   const simulatedDate = await getSimulatedSystemDate();
 
   await runTransaction(db, async (transaction) => {
@@ -622,6 +686,9 @@ export async function submitAddDrop(leagueId, teamId, userId, addPlayerId, dropP
     if (!leagueSnap.exists() || !teamSnap.exists()) {
       throw new Error("League or team not found.");
     }
+
+    const leagueData = leagueSnap.data();
+    const undroppableList = leagueData.undroppable_players || [];
 
     const teamData = teamSnap.data();
     if (teamData.ownerId !== userId) {
@@ -633,6 +700,11 @@ export async function submitAddDrop(leagueId, teamId, userId, addPlayerId, dropP
     // Verify drop player is owned
     if (dropPlayerId && !currentRoster.includes(dropPlayerId)) {
       throw new Error(`Player ${dropPlayerId} is not on your roster.`);
+    }
+
+    // Verify drop player is NOT on the Undroppable Top 50 list
+    if (dropPlayerId && undroppableList.includes(dropPlayerId)) {
+      throw new Error(`This player is on the league Top 50 Undroppable List and cannot be dropped to free agency.`);
     }
 
     // Verify add player is a Free Agent (not owned by anyone in this league)
@@ -654,11 +726,16 @@ export async function submitAddDrop(leagueId, teamId, userId, addPlayerId, dropP
     }
 
     // Validate Roster Limits
-    const rosterSettings = leagueSnap.data().rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+    const rosterSettings = leagueData.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
     const maxRosterSize = (rosterSettings.bench ?? 4) + 
                           (rosterSettings.forwards?.starters ?? 6) + 
                           (rosterSettings.defense?.starters ?? 4) + 
                           (rosterSettings.goalies?.starters ?? 1);
+
+    // If current roster is full and adding a player, a drop is MANDATORY
+    if (currentRoster.length >= maxRosterSize && addPlayerId && !dropPlayerId) {
+      throw new Error(`Your roster is full (${currentRoster.length}/${maxRosterSize}). You must select a player to drop to complete this transaction.`);
+    }
 
     // Compute new roster size
     let updatedRoster = [...currentRoster];
@@ -697,26 +774,47 @@ export async function submitAddDrop(leagueId, teamId, userId, addPlayerId, dropP
  * Submits a waiver claim for a player currently on waivers.
  */
 export async function submitWaiverClaim(leagueId, teamId, userId, playerId, dropPlayerId) {
+  const leagueRef = doc(db, "fantasy_leagues", leagueId);
   const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, teamId);
   const waiverRef = doc(db, `fantasy_leagues/${leagueId}/waivers`, playerId);
   
   const simulatedDate = await getSimulatedSystemDate();
 
   await runTransaction(db, async (transaction) => {
+    const leagueSnap = await transaction.get(leagueRef);
     const teamSnap = await transaction.get(teamRef);
     const waiverSnap = await transaction.get(waiverRef);
 
-    if (!teamSnap.exists() || !waiverSnap.exists()) {
-      throw new Error("Team or waiver player not found.");
+    if (!leagueSnap.exists() || !teamSnap.exists() || !waiverSnap.exists()) {
+      throw new Error("League, team, or waiver player not found.");
     }
+
+    const leagueData = leagueSnap.data();
+    const undroppableList = leagueData.undroppable_players || [];
 
     const teamData = teamSnap.data();
     if (teamData.ownerId !== userId) {
       throw new Error("Unauthorized: You do not own this team.");
     }
 
-    if (dropPlayerId && !(teamData.players || []).includes(dropPlayerId)) {
+    const currentRoster = teamData.players || [];
+
+    if (dropPlayerId && !currentRoster.includes(dropPlayerId)) {
       throw new Error(`Designated drop player ${dropPlayerId} is not on your roster.`);
+    }
+
+    if (dropPlayerId && undroppableList.includes(dropPlayerId)) {
+      throw new Error(`Designated drop player is on the Top 50 Undroppable List and cannot be dropped.`);
+    }
+
+    const rosterSettings = leagueData.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+    const maxRosterSize = (rosterSettings.bench ?? 4) + 
+                          (rosterSettings.forwards?.starters ?? 6) + 
+                          (rosterSettings.defense?.starters ?? 4) + 
+                          (rosterSettings.goalies?.starters ?? 1);
+
+    if (currentRoster.length >= maxRosterSize && !dropPlayerId) {
+      throw new Error(`Your roster is full (${currentRoster.length}/${maxRosterSize}). You must designate a player to drop for this waiver claim.`);
     }
 
     const claimId = `${teamId}_${playerId}`;
@@ -726,7 +824,7 @@ export async function submitWaiverClaim(leagueId, teamId, userId, playerId, drop
       teamId,
       userId,
       playerId,
-      dropPlayerId,
+      dropPlayerId: dropPlayerId || null,
       createdAt: Timestamp.fromDate(simulatedDate)
     });
   });
@@ -734,6 +832,8 @@ export async function submitWaiverClaim(leagueId, teamId, userId, playerId, drop
 
 /**
  * Processes all expired waiver claims based on the league's rolling waiver priority queue.
+ * Handles execution-time validation per claim in priority order, bypassing invalid claims
+ * and falling back to the next highest priority manager who claimed the player.
  */
 export async function processWaivers(leagueId) {
   const leagueRef = doc(db, "fantasy_leagues", leagueId);
@@ -747,6 +847,13 @@ export async function processWaivers(leagueId) {
 
     const leagueData = leagueSnap.data();
     const waiverOrder = leagueData.waiverOrder || [];
+    const undroppableList = new Set(leagueData.undroppable_players || []);
+
+    const rosterSettings = leagueData.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+    const maxRosterSize = (rosterSettings.bench ?? 4) + 
+                          (rosterSettings.forwards?.starters ?? 6) + 
+                          (rosterSettings.defense?.starters ?? 4) + 
+                          (rosterSettings.goalies?.starters ?? 1);
 
     // Fetch all expired waivers
     const waiversSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/waivers`));
@@ -781,73 +888,92 @@ export async function processWaivers(leagueId) {
     for (const waiver of expiredWaivers) {
       const playerId = waiver.playerId;
       const claims = claimsByPlayer[playerId] || [];
-
       const waiverDocRef = doc(db, `fantasy_leagues/${leagueId}/waivers`, playerId);
 
       if (claims.length === 0) {
-        // No claims: player becomes free agent
+        // No claims submitted: player becomes Free Agent
         transaction.delete(waiverDocRef);
         console.log(`Waiver expired for player ${playerId}. Player is now a Free Agent.`);
         continue;
       }
 
-      // Find the winning claim based on the rolling waiver priority queue
-      let winningClaim = null;
-      let winningPriorityIndex = Infinity;
-
-      claims.forEach(claim => {
-        const priorityIndex = currentWaiverOrder.indexOf(claim.teamId);
-        if (priorityIndex !== -1 && priorityIndex < winningPriorityIndex) {
-          winningPriorityIndex = priorityIndex;
-          winningClaim = claim;
-        }
+      // Sort claims strictly by claiming team's position in currentWaiverOrder
+      const sortedClaims = [...claims].sort((a, b) => {
+        let idxA = currentWaiverOrder.indexOf(a.teamId);
+        let idxB = currentWaiverOrder.indexOf(b.teamId);
+        if (idxA === -1) idxA = 999;
+        if (idxB === -1) idxB = 999;
+        return idxA - idxB;
       });
 
-      // If no claiming team is in the waiverOrder array, fallback to oldest claim
-      if (!winningClaim && claims.length > 0) {
-        winningClaim = claims[0];
-      }
+      let successfulClaim = null;
 
-      if (winningClaim) {
-        const winningTeamId = winningClaim.teamId;
-        const dropPlayerId = winningClaim.dropPlayerId;
+      // Iterate through claims in priority order; fallback to next highest if invalid!
+      for (const claim of sortedClaims) {
+        const claimingTeamId = claim.teamId;
+        const dropPlayerId = claim.dropPlayerId;
 
-        const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, winningTeamId);
+        const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, claimingTeamId);
         const teamSnap = await transaction.get(teamRef);
 
-        if (teamSnap.exists()) {
-          const teamData = teamSnap.data();
-          let roster = teamData.players || [];
-
-          // Perform atomic swap
-          if (dropPlayerId) {
-            roster = roster.filter(pid => pid !== dropPlayerId);
-            
-            // Generate a waiver document for the dropped player
-            const nextWaiverDeadline = new Date(simulatedDate.getTime() + 48 * 60 * 60 * 1000);
-            const dropWaiverRef = doc(db, `fantasy_leagues/${leagueId}/waivers`, dropPlayerId);
-            transaction.set(dropWaiverRef, {
-              playerId: dropPlayerId,
-              droppedByTeamId: winningTeamId,
-              waiverDeadline: Timestamp.fromDate(nextWaiverDeadline),
-              createdAt: Timestamp.fromDate(simulatedDate)
-            });
-          }
-          
-          roster.push(playerId);
-
-          // Update winning team roster
-          transaction.update(teamRef, { players: roster });
-
-          // Rotate priority: Move winning team to the bottom of the roll queue
-          currentWaiverOrder = currentWaiverOrder.filter(id => id !== winningTeamId);
-          currentWaiverOrder.push(winningTeamId);
-
-          console.log(`Waiver Claim Successful! Player ${playerId} assigned to team ${winningTeamId}.`);
+        if (!teamSnap.exists()) {
+          console.log(`Waiver Claim by ${claimingTeamId} invalid: Team not found.`);
+          continue;
         }
+
+        const teamData = teamSnap.data();
+        let roster = [...(teamData.players || [])];
+
+        // Execution-Time Validation 1: Verify dropPlayerId if specified
+        if (dropPlayerId) {
+          if (!roster.includes(dropPlayerId)) {
+            console.log(`Waiver Claim by ${claimingTeamId} invalid: Drop player ${dropPlayerId} is no longer on team roster.`);
+            continue;
+          }
+          if (undroppableList.has(dropPlayerId)) {
+            console.log(`Waiver Claim by ${claimingTeamId} invalid: Drop player ${dropPlayerId} is on Undroppable List.`);
+            continue;
+          }
+        }
+
+        // Execution-Time Validation 2: Verify roster limits
+        const tempRoster = dropPlayerId ? roster.filter(id => id !== dropPlayerId) : roster;
+        if (tempRoster.length + 1 > maxRosterSize) {
+          console.log(`Waiver Claim by ${claimingTeamId} invalid: Post-transaction roster size (${tempRoster.length + 1}) exceeds max limit of ${maxRosterSize}.`);
+          continue;
+        }
+
+        // Claim is VALID! Execute atomic transaction
+        let updatedRoster = tempRoster;
+        updatedRoster.push(playerId);
+
+        transaction.update(teamRef, { players: updatedRoster });
+
+        if (dropPlayerId) {
+          const nextWaiverDeadline = new Date(simulatedDate.getTime() + 48 * 60 * 60 * 1000);
+          const dropWaiverRef = doc(db, `fantasy_leagues/${leagueId}/waivers`, dropPlayerId);
+          transaction.set(dropWaiverRef, {
+            playerId: dropPlayerId,
+            droppedByTeamId: claimingTeamId,
+            waiverDeadline: Timestamp.fromDate(nextWaiverDeadline),
+            createdAt: Timestamp.fromDate(simulatedDate)
+          });
+        }
+
+        // Rotate priority: Move winning team to bottom of rolling queue
+        currentWaiverOrder = currentWaiverOrder.filter(id => id !== claimingTeamId);
+        currentWaiverOrder.push(claimingTeamId);
+
+        successfulClaim = claim;
+        console.log(`Waiver Claim Successful! Player ${playerId} assigned to team ${claimingTeamId}.`);
+        break; // Stop evaluating claims for this player once successfully executed
       }
 
-      // Cleanup processed waiver and delete claims
+      if (!successfulClaim) {
+        console.log(`All submitted waiver claims for player ${playerId} were invalid at execution time. Player is now a Free Agent.`);
+      }
+
+      // Cleanup processed waiver document & delete claims
       transaction.delete(waiverDocRef);
       claims.forEach(claim => {
         const claimId = `${claim.teamId}_${playerId}`;
@@ -855,7 +981,7 @@ export async function processWaivers(leagueId) {
       });
     }
 
-    // Write updated rolling waiver order queue back to the league
+    // Write updated rolling waiver order queue back to the league document
     transaction.update(leagueRef, {
       waiverOrder: currentWaiverOrder
     });
@@ -865,20 +991,34 @@ export async function processWaivers(leagueId) {
 /**
  * Submits a trade proposal between two teams.
  */
-export async function submitTradeProposal(leagueId, proposerTeamId, receiverTeamId, proposerSends, receiverSends) {
+export async function submitTradeProposal(leagueId, proposerTeamId, receiverTeamId, proposerSends, receiverSends, proposerDrops = [], receiverDrops = []) {
   const simulatedDate = await getSimulatedSystemDate();
   const tradeId = doc(collection(db, `fantasy_leagues/${leagueId}/trades`)).id;
   const tradeRef = doc(db, `fantasy_leagues/${leagueId}/trades`, tradeId);
 
-  await setDoc(tradeRef, {
+  const tradeData = {
     tradeId,
     proposerTeamId,
     receiverTeamId,
     proposerSends,
     receiverSends,
+    proposerDrops,
+    receiverDrops,
     status: 'pending',
+    vetoes: [],
     proposalDate: Timestamp.fromDate(simulatedDate)
-  });
+  };
+
+  await setDoc(tradeRef, tradeData);
+
+  try {
+    const teamsSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/teams`));
+    const teamsMap = {};
+    teamsSnap.forEach(tDoc => teamsMap[tDoc.id] = { id: tDoc.id, ...tDoc.data() });
+    await notifyTradeEvent('proposed', leagueId, tradeData, { proposerTeamId, receiverTeamId, teamsMap });
+  } catch (nErr) {
+    console.error("Notification dispatch error:", nErr);
+  }
   
   return tradeId;
 }
@@ -886,14 +1026,17 @@ export async function submitTradeProposal(leagueId, proposerTeamId, receiverTeam
 /**
  * Responds to a trade proposal (Accept or Reject).
  */
-export async function respondToTrade(leagueId, tradeId, userId, response) {
+export async function respondToTrade(leagueId, tradeId, userId, response, receiverDrops = []) {
   const tradeRef = doc(db, `fantasy_leagues/${leagueId}/trades`, tradeId);
+  const leagueRef = doc(db, "fantasy_leagues", leagueId);
   const simulatedDate = await getSimulatedSystemDate();
 
   await runTransaction(db, async (transaction) => {
     const tradeSnap = await transaction.get(tradeRef);
-    if (!tradeSnap.exists()) {
-      throw new Error("Trade proposal not found.");
+    const leagueSnap = await transaction.get(leagueRef);
+
+    if (!tradeSnap.exists() || !leagueSnap.exists()) {
+      throw new Error("Trade proposal or league not found.");
     }
 
     const tradeData = tradeSnap.data();
@@ -909,13 +1052,22 @@ export async function respondToTrade(leagueId, tradeId, userId, response) {
     }
 
     if (response === 'accept') {
-      const processDeadline = new Date(simulatedDate.getTime() + 24 * 60 * 60 * 1000); // 24-hour review
-      transaction.update(tradeRef, {
-        status: 'accepted',
+      const tradeSettings = leagueSnap.data().tradeSettings || { tradeReviewHours: 48, enableVetoes: true, vetoThreshold: 3, notifyAcceptedTrades: true };
+      const reviewHours = Number(tradeSettings.tradeReviewHours ?? 48);
+      const enableVetoes = tradeSettings.enableVetoes !== false;
+
+      const processDeadline = new Date(simulatedDate.getTime() + reviewHours * 60 * 60 * 1000);
+
+      const updates = {
+        receiverDrops,
+        status: (reviewHours > 0 && enableVetoes) ? 'accepted' : 'accepted_immediate',
         acceptedDate: Timestamp.fromDate(simulatedDate),
-        processDeadline: Timestamp.fromDate(processDeadline)
-      });
-      console.log("Trade accepted. Moving to 24-hour veto review window.");
+        processDeadline: Timestamp.fromDate(processDeadline),
+        vetoes: []
+      };
+
+      transaction.update(tradeRef, updates);
+      console.log(`Trade accepted. Review window: ${reviewHours} hours (Vetoes enabled: ${enableVetoes}).`);
     } else {
       transaction.update(tradeRef, {
         status: 'rejected'
@@ -923,64 +1075,249 @@ export async function respondToTrade(leagueId, tradeId, userId, response) {
       console.log("Trade proposal rejected.");
     }
   });
+
+  try {
+    const teamsSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/teams`));
+    const teamsMap = {};
+    teamsSnap.forEach(tDoc => teamsMap[tDoc.id] = { id: tDoc.id, ...tDoc.data() });
+    const tradeSnap = await getDoc(tradeRef);
+    if (response === 'accept' && tradeSnap.exists()) {
+      await notifyTradeEvent('accepted', leagueId, { tradeId, ...tradeSnap.data() }, {
+        proposerTeamId: tradeSnap.data().proposerTeamId,
+        receiverTeamId: tradeSnap.data().receiverTeamId,
+        teamsMap
+      });
+
+      const status = tradeSnap.data().status;
+      if (status === 'accepted_immediate') {
+        await processAcceptedTrades(leagueId);
+      }
+    }
+  } catch (nErr) {
+    console.error("Trade acceptance notification error:", nErr);
+  }
 }
 
 /**
- * Processes all accepted trades that have completed their 24-hour review period.
+ * Allows a non-involved league manager to cast a veto vote against an accepted trade.
+ */
+export async function vetoTrade(leagueId, tradeId, userId) {
+  const tradeRef = doc(db, `fantasy_leagues/${leagueId}/trades`, tradeId);
+  const leagueRef = doc(db, "fantasy_leagues", leagueId);
+
+  await runTransaction(db, async (transaction) => {
+    const tradeSnap = await transaction.get(tradeRef);
+    const leagueSnap = await transaction.get(leagueRef);
+    if (!tradeSnap.exists() || !leagueSnap.exists()) {
+      throw new Error("Trade or league not found.");
+    }
+
+    const tradeData = tradeSnap.data();
+    const tradeSettings = leagueSnap.data().tradeSettings || { vetoThreshold: 3 };
+    const vetoThreshold = Number(tradeSettings.vetoThreshold ?? 3);
+
+    if (tradeData.status !== 'accepted') {
+      throw new Error("Only trades currently under review can be vetoed.");
+    }
+
+    const proposerTeamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, tradeData.proposerTeamId);
+    const receiverTeamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, tradeData.receiverTeamId);
+    const pSnap = await transaction.get(proposerTeamRef);
+    const rSnap = await transaction.get(receiverTeamRef);
+
+    if ((pSnap.exists() && pSnap.data().ownerId === userId) || (rSnap.exists() && rSnap.data().ownerId === userId)) {
+      throw new Error("You cannot veto a trade involving your own team.");
+    }
+
+    const vetoes = new Set(tradeData.vetoes || []);
+    if (vetoes.has(userId)) {
+      throw new Error("You have already cast a veto vote for this trade.");
+    }
+
+    vetoes.add(userId);
+    const updatedVetoes = Array.from(vetoes);
+
+    const isVetoed = updatedVetoes.length >= vetoThreshold;
+
+    transaction.update(tradeRef, {
+      vetoes: updatedVetoes,
+      status: isVetoed ? 'vetoed' : 'accepted'
+    });
+
+    console.log(`Veto vote cast by user ${userId}. Total vetoes: ${updatedVetoes.length}/${vetoThreshold}`);
+  });
+}
+
+/**
+ * Cancels an outgoing trade proposal.
+ */
+export async function cancelTradeProposal(leagueId, tradeId, userId) {
+  const tradeRef = doc(db, `fantasy_leagues/${leagueId}/trades`, tradeId);
+  await runTransaction(db, async (transaction) => {
+    const tradeSnap = await transaction.get(tradeRef);
+    if (!tradeSnap.exists()) {
+      throw new Error("Trade proposal not found.");
+    }
+    const tradeData = tradeSnap.data();
+    const proposerTeamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, tradeData.proposerTeamId);
+    const proposerSnap = await transaction.get(proposerTeamRef);
+    
+    if (!proposerSnap.exists() || proposerSnap.data().ownerId !== userId) {
+      throw new Error("Unauthorized: Only the proposer co-owner can cancel this proposal.");
+    }
+
+    if (tradeData.status !== 'pending') {
+      throw new Error(`Only pending trade proposals can be cancelled. Status: ${tradeData.status}`);
+    }
+
+    transaction.update(tradeRef, { status: 'cancelled' });
+  });
+}
+
+/**
+ * Cancels a pending waiver claim.
+ */
+export async function cancelWaiverClaim(leagueId, teamId, userId, playerId) {
+  const teamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, teamId);
+  const claimId = `${teamId}_${playerId}`;
+
+  await runTransaction(db, async (transaction) => {
+    const teamSnap = await transaction.get(teamRef);
+    if (!teamSnap.exists() || teamSnap.data().ownerId !== userId) {
+      throw new Error("Unauthorized: You do not own this team.");
+    }
+
+    const docSnap = await transaction.get(doc(db, `fantasy_leagues/${leagueId}/waiver_claims`, claimId));
+    if (docSnap.exists()) {
+      transaction.delete(doc(db, `fantasy_leagues/${leagueId}/waiver_claims`, claimId));
+    }
+  });
+}
+
+/**
+ * Processes all accepted trades that have completed their review period.
+ * Validates veto counts, asset ownership, designated drop players, and resulting roster limits.
  */
 export async function processAcceptedTrades(leagueId) {
   const simulatedDate = await getSimulatedSystemDate();
+  const leagueRef = doc(db, "fantasy_leagues", leagueId);
+  const leagueSnap = await getDoc(leagueRef);
+  if (!leagueSnap.exists()) return;
+
+  const leagueData = leagueSnap.data();
+  const tradeSettings = leagueData.tradeSettings || { vetoThreshold: 3 };
+  const vetoThreshold = Number(tradeSettings.vetoThreshold ?? 3);
+  const undroppableList = new Set(leagueData.undroppable_players || []);
+
+  const rosterSettings = leagueData.rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
+  const maxRosterSize = (rosterSettings.bench ?? 4) + 
+                        (rosterSettings.forwards?.starters ?? 6) + 
+                        (rosterSettings.defense?.starters ?? 4) + 
+                        (rosterSettings.goalies?.starters ?? 1);
+
   const tradesSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/trades`));
 
-  const acceptedTrades = [];
+  const eligibleTrades = [];
   tradesSnap.forEach(tDoc => {
     const data = tDoc.data();
-    if (data.status === 'accepted' && data.processDeadline.toDate() <= simulatedDate) {
-      acceptedTrades.push(data);
+    const isAccepted = data.status === 'accepted' || data.status === 'accepted_immediate';
+    const isExpiredDeadline = data.processDeadline ? data.processDeadline.toDate() <= simulatedDate : true;
+    if (isAccepted && (isExpiredDeadline || data.status === 'accepted_immediate')) {
+      eligibleTrades.push(data);
     }
   });
 
-  if (acceptedTrades.length === 0) {
-    console.log("No pending accepted trades to process.");
+  if (eligibleTrades.length === 0) {
+    console.log("No pending accepted trades ready to process.");
     return;
   }
 
-  for (const trade of acceptedTrades) {
+  for (const trade of eligibleTrades) {
     const tradeRef = doc(db, `fantasy_leagues/${leagueId}/trades`, trade.tradeId);
     const teamProposerRef = doc(db, `fantasy_leagues/${leagueId}/teams`, trade.proposerTeamId);
     const teamReceiverRef = doc(db, `fantasy_leagues/${leagueId}/teams`, trade.receiverTeamId);
 
     await runTransaction(db, async (transaction) => {
+      // 1. Check veto threshold
+      const vetoes = trade.vetoes || [];
+      if (vetoes.length >= vetoThreshold) {
+        transaction.update(tradeRef, { status: 'vetoed' });
+        console.log(`Trade ${trade.tradeId} vetoed: Veto threshold of ${vetoThreshold} reached.`);
+        return;
+      }
+
       const proposerSnap = await transaction.get(teamProposerRef);
       const receiverSnap = await transaction.get(teamReceiverRef);
 
       if (!proposerSnap.exists() || !receiverSnap.exists()) {
-        throw new Error("Proposer or receiver team no longer exists.");
+        transaction.update(tradeRef, { status: 'voided' });
+        console.log(`Trade ${trade.tradeId} voided: Team no longer exists.`);
+        return;
       }
 
       const pData = proposerSnap.data();
       const rData = receiverSnap.data();
 
-      let pRoster = pData.players || [];
-      let rRoster = rData.players || [];
+      let pRoster = [...(pData.players || [])];
+      let rRoster = [...(rData.players || [])];
 
-      // Verify all assets are still owned by their respective teams
-      const hasAllProposerAssets = trade.proposerSends.every(pId => pRoster.includes(pId));
-      const hasAllReceiverAssets = trade.receiverSends.every(pId => rRoster.includes(pId));
+      const proposerSends = trade.proposerSends || [];
+      const receiverSends = trade.receiverSends || [];
+      const proposerDrops = trade.proposerDrops || [];
+      const receiverDrops = trade.receiverDrops || [];
+
+      // 2. Verify all traded assets are still owned
+      const hasAllProposerAssets = proposerSends.every(pId => pRoster.includes(pId));
+      const hasAllReceiverAssets = receiverSends.every(pId => rRoster.includes(pId));
 
       if (!hasAllProposerAssets || !hasAllReceiverAssets) {
         transaction.update(tradeRef, { status: 'voided' });
-        console.log(`Trade ${trade.tradeId} voided due to missing assets.`);
+        console.log(`Trade ${trade.tradeId} voided: Traded assets no longer owned by respective teams.`);
         return;
       }
 
-      // Perform exchange swaps
-      pRoster = pRoster.filter(pid => !trade.proposerSends.includes(pid)).concat(trade.receiverSends);
-      rRoster = rRoster.filter(pid => !trade.receiverSends.includes(pid)).concat(trade.proposerSends);
+      // 3. Verify drops if specified
+      for (const dId of proposerDrops) {
+        if (!pRoster.includes(dId) || undroppableList.has(dId)) {
+          transaction.update(tradeRef, { status: 'voided' });
+          console.log(`Trade ${trade.tradeId} voided: Proposer drop player ${dId} is invalid or undroppable.`);
+          return;
+        }
+      }
+      for (const dId of receiverDrops) {
+        if (!rRoster.includes(dId) || undroppableList.has(dId)) {
+          transaction.update(tradeRef, { status: 'voided' });
+          console.log(`Trade ${trade.tradeId} voided: Receiver drop player ${dId} is invalid or undroppable.`);
+          return;
+        }
+      }
 
-      transaction.update(teamProposerRef, { players: pRoster });
-      transaction.update(teamReceiverRef, { players: rRoster });
+      // 4. Calculate resulting roster sizes
+      let finalPRoster = pRoster.filter(id => !proposerSends.includes(id) && !proposerDrops.includes(id)).concat(receiverSends);
+      let finalRRoster = rRoster.filter(id => !receiverSends.includes(id) && !receiverDrops.includes(id)).concat(proposerSends);
+
+      if (finalPRoster.length > maxRosterSize || finalRRoster.length > maxRosterSize) {
+        transaction.update(tradeRef, { status: 'voided' });
+        console.log(`Trade ${trade.tradeId} voided: Resulting roster size exceeds max limit of ${maxRosterSize}.`);
+        return;
+      }
+
+      // 5. Execute atomic swaps & drops
+      transaction.update(teamProposerRef, { players: finalPRoster });
+      transaction.update(teamReceiverRef, { players: finalRRoster });
       transaction.update(tradeRef, { status: 'processed' });
+
+      // Place any dropped players on waivers for 48 hours
+      const allDrops = [...proposerDrops, ...receiverDrops];
+      for (const dropId of allDrops) {
+        const nextWaiverDeadline = new Date(simulatedDate.getTime() + 48 * 60 * 60 * 1000);
+        const dropWaiverRef = doc(db, `fantasy_leagues/${leagueId}/waivers`, dropId);
+        transaction.set(dropWaiverRef, {
+          playerId: dropId,
+          waiverDeadline: Timestamp.fromDate(nextWaiverDeadline),
+          createdAt: Timestamp.fromDate(simulatedDate)
+        });
+      }
 
       console.log(`Trade ${trade.tradeId} processed successfully! Rosters updated.`);
     });
@@ -1067,6 +1404,26 @@ export function getLocalDateStr(date) {
 }
 
 /**
+ * Timezone-safe helper that formats an ISO date string or Date object
+ * to a YYYY-MM-DD string in America/Los_Angeles (Pacific Time) timezone.
+ */
+export function getPSTDateStr(date) {
+  if (!date) return '';
+  const d = typeof date === 'string' ? new Date(date) : date;
+  try {
+    return new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(d);
+  } catch {
+    const s = typeof date === 'string' ? date : date.toISOString();
+    return s.split('T')[0].split(' ')[0];
+  }
+}
+
+/**
  * Atomic transaction to save daily lineup for a team.
  * Enforces roster rules and time-based slot locking.
  */
@@ -1102,7 +1459,7 @@ export async function saveDailyLineup(leagueId, teamId, dateStr, activeLineup, b
   const dailyGames = gamesSnap.docs.map(d => d.data()).filter(g => {
     const gDateStr = g.date_played || g.date;
     if (!gDateStr) return false;
-    return getLocalDateStr(new Date(gDateStr)) === dateStr;
+    return (gDateStr || '').split('T')[0].split(' ')[0] === dateStr;
   });
 
   await runTransaction(db, async (transaction) => {
@@ -1244,7 +1601,7 @@ export async function saveDailyLineup(leagueId, teamId, dateStr, activeLineup, b
         });
 
         if (playerGame) {
-          const gameStart = new Date(playerGame.date_played || playerGame.date);
+          const gameStart = parseDateSafe(playerGame.GameDateISO8601 || playerGame.date_time_played || playerGame.date_played || playerGame.date);
           if (simDateObj >= gameStart) {
             throw new Error(`Cannot swap ${info.name}. Their game has already started.`);
           }
@@ -1278,10 +1635,94 @@ export async function getDailyLineup(leagueId, teamId, dateStr) {
   const dailyLineupSnap = await getDoc(dailyLineupRef);
   if (dailyLineupSnap.exists()) {
     const data = dailyLineupSnap.data();
+    const activeLineup = data.activeLineup || {};
+    const bench = data.bench || [];
+
+    // Load league to get seasonId
+    const leagueRef = doc(db, "fantasy_leagues", leagueId);
+    let seasonId = "1";
+    try {
+      const leagueSnap = await getDoc(leagueRef);
+      if (leagueSnap.exists()) {
+        seasonId = leagueSnap.data().season_id || "1";
+      }
+    } catch (err) {
+      console.warn("[getDailyLineup] Failed to fetch league details, defaulting to season 1:", err);
+    }
+
+    // Fetch player positions in parallel with try-catch blocks to prevent permission denied crashes
+    const activeEntries = Object.entries(activeLineup).filter(([_, pId]) => !!pId);
+    const playerPositions = {};
+    
+    await Promise.all(
+      activeEntries.map(async ([_, pId]) => {
+        let pos = 'F';
+        try {
+          const pSnap = await getDoc(doc(db, "pwhl_players", `${seasonId}_${pId}`));
+          if (pSnap.exists()) {
+            pos = normalizePosition(pSnap.data().position);
+          } else {
+            const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
+            if (!isNaN(numId)) {
+              if (numId >= 12 && numId <= 14) pos = "G";
+              else if (numId >= 8 && numId <= 11) pos = "D";
+            }
+          }
+        } catch (err) {
+          console.warn(`[getDailyLineup] Failed to fetch player ${pId} details, falling back:`, err);
+          const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
+          if (!isNaN(numId)) {
+            if (numId >= 12 && numId <= 14) pos = "G";
+            else if (numId >= 8 && numId <= 11) pos = "D";
+          }
+        }
+        playerPositions[String(pId)] = pos;
+      })
+    );
+
+    let needsUpdate = false;
+    const cleanedActive = {};
+    const cleanedBench = [...bench];
+
+    for (const [slot, pId] of Object.entries(activeLineup)) {
+      if (!pId) continue;
+      const pos = playerPositions[String(pId)] || 'F';
+
+      const isEligible = (slot.startsWith('F') && pos === 'F') ||
+                         (slot.startsWith('D') && pos === 'D') ||
+                         (slot.startsWith('G') && pos === 'G');
+
+      if (isEligible) {
+        cleanedActive[slot] = pId;
+      } else {
+        needsUpdate = true;
+        if (!cleanedBench.includes(String(pId))) {
+          cleanedBench.push(String(pId));
+        }
+      }
+    }
+
+    if (needsUpdate) {
+      console.log(`[Roster Migration] Stale lineup detected for team ${teamId} on ${dateStr}. Moving ineligible players to bench.`);
+      try {
+        await setDoc(dailyLineupRef, {
+          activeLineup: cleanedActive,
+          bench: cleanedBench
+        }, { merge: true });
+      } catch (err) {
+        console.warn("Failed to auto-update daily lineup:", err);
+      }
+      return {
+        date: dateStr,
+        activeLineup: cleanedActive,
+        bench: cleanedBench
+      };
+    }
+
     return {
       date: dateStr,
-      activeLineup: data.activeLineup || {},
-      bench: data.bench || []
+      activeLineup,
+      bench
     };
   }
 

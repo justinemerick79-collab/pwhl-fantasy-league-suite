@@ -14,6 +14,7 @@ import {
 } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
+import { useData } from '../contexts/DataContext';
 import { submitAddDrop } from '../services/leagueService.js';
 
 const GENERIC_TEAM_NAMES = [
@@ -25,6 +26,8 @@ const GENERIC_TEAM_NAMES = [
 
 export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const { currentUser } = useAuth();
+  const { activeSeasonId } = useTimeTravel();
+  const { seasons, seasonsLoading, seasonCache, loadingStates, loadSeasonData } = useData();
   
   // Outer Launcher Tab: 'my-leagues' | 'create' | 'join'
   const [launcherTab, setLauncherTab] = useState('my-leagues');
@@ -37,6 +40,36 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const [userMap, setUserMap] = useState({});
   const [loading, setLoading] = useState(true);
   const [activeLeague, setActiveLeague] = useState(null);
+
+  // Season data from DataContext — must be after activeLeague declaration
+  const seasonId = activeLeague?.season_id 
+    ? String(activeLeague.season_id) 
+    : (activeSeasonId ? String(activeSeasonId) : '5');
+
+  useEffect(() => {
+    if (seasonId && !seasonsLoading) {
+      loadSeasonData(seasonId);
+    }
+  }, [seasonId, seasonsLoading, loadSeasonData]);
+
+  const activeSeasonData = seasonCache[seasonId] || {
+    playersList: [],
+    pwhlTeams: {},
+    projectionsList: [],
+    gamesList: [],
+    resolvedSeasonId: seasonId,
+    isFallbackUniverse: false
+  };
+
+  const {
+    playersList,
+    pwhlTeams,
+    gamesList,
+    resolvedSeasonId,
+    isFallbackUniverse
+  } = activeSeasonData;
+
+  const seasonDataLoading = loadingStates[seasonId] === true;
   const [activeLeagueTeams, setActiveLeagueTeams] = useState([]);
   const [myTeam, setMyTeam] = useState(null);
 
@@ -66,76 +99,21 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const [marketSearch, setMarketSearch] = useState('');
   const [marketFilter, setMarketFilter] = useState('ALL');
 
-  const { activeSeasonId } = useTimeTravel();
-  const [playersPool, setPlayersPool] = useState([]);
+  const playersPool = useMemo(() => {
+    return playersList.map(p => {
+      const pId = p.player_id || p.id;
+      const rating = p.rating || (p.position === 'G' || p.pos === 'G' ? 85 : (p.position === 'D' || p.pos === 'D' ? 82 : 84));
+      return {
+        id: String(pId),
+        name: p.name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unknown Player',
+        pos: p.position || p.pos || 'F',
+        team: pwhlTeams[p.current_team_id || p.team_id]?.code || p.team_name || 'FA',
+        rating
+      };
+    });
+  }, [playersList, pwhlTeams]);
 
-  // Load dynamic players pool from Firestore
-  useEffect(() => {
-    if (!activeLeagueId) return;
-    
-    async function loadMarketPlayers() {
-      try {
-        const seasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
-        const seasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        
-        const seasonId = activeSeasonId ? String(activeSeasonId) : '5';
-        
-        const qActive = query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonId, Number(seasonId)]));
-        const snapActive = await getDocs(qActive);
-        
-        let resolvedSeasonId = seasonId;
-        let rawPlayers = snapActive.docs.map(d => d.data());
-        
-        if (rawPlayers.length === 0 && seasons.length > 0) {
-          const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(seasonId));
-          const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
-          const prevRegularSeasons = seasons.filter(s => {
-            const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
-            const startsBefore = new Date(s.start_date) < currentStartDate;
-            return isRegular && startsBefore;
-          });
-          
-          if (prevRegularSeasons.length > 0) {
-            prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
-            const prevRegSeason = prevRegularSeasons[0];
-            resolvedSeasonId = prevRegSeason.season_id.toString();
-            
-            const qPrev = query(collection(db, 'pwhl_players'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
-            const snapPrev = await getDocs(qPrev);
-            rawPlayers = snapPrev.docs.map(d => d.data());
-          }
-        }
-        
-        const teamsQuery = query(collection(db, 'pwhl_teams'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
-        const teamsSnap = await getDocs(teamsQuery);
-        const teamsMap = {};
-        teamsSnap.forEach(d => {
-          const t = d.data();
-          teamsMap[String(t.id)] = t.code || t.name || t.id;
-        });
-        
-        const pool = rawPlayers.map(p => {
-          const pId = p.player_id || p.id;
-          const rating = p.rating || (p.position === 'G' ? 85 : (p.position === 'D' ? 82 : 84));
-          return {
-            id: String(pId),
-            name: p.name || `${p.first_name || ''} ${p.last_name || ''}`.trim() || 'Unknown Player',
-            pos: p.position || 'F',
-            team: teamsMap[p.current_team_id || p.team_id] || p.team_name || 'FA',
-            rating
-          };
-        });
-        
-        setPlayersPool(pool);
-      } catch (err) {
-        console.error("Error loading market players in LeagueHub:", err);
-      }
-    }
-    
-    loadMarketPlayers();
-  }, [activeLeagueId, activeSeasonId]);
-
-  // Load user leagues list
+  // Load user leagues list and members user maps (parallelized)
   useEffect(() => {
     if (!currentUser) return;
     async function fetchLeagues() {
@@ -149,15 +127,17 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
         const uids = new Set();
         leagues.forEach(l => l.members.forEach(m => uids.add(m)));
         if (uids.size > 0) {
+          const uidArray = Array.from(uids);
+          const userSnaps = await Promise.all(uidArray.map(uid => getDoc(doc(db, 'users', uid))));
           const map = {};
-          for (const uid of Array.from(uids)) {
-             const userSnap = await getDoc(doc(db, 'users', uid));
-             if (userSnap.exists()) {
-               map[uid] = userSnap.data().email || userSnap.data().username || uid;
-             } else {
-               map[uid] = uid.substring(0, 6);
-             }
-          }
+          userSnaps.forEach((userSnap, i) => {
+            const uid = uidArray[i];
+            if (userSnap.exists()) {
+              map[uid] = userSnap.data().email || userSnap.data().username || uid;
+            } else {
+              map[uid] = uid.substring(0, 6);
+            }
+          });
           setUserMap(map);
         }
       } catch (err) {
@@ -169,7 +149,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
     fetchLeagues();
   }, [currentUser, launcherTab, activeLeagueId]);
 
-  // Load active league details, teams, and current user team
+  // Load active league details, teams, and current user team in parallel
   useEffect(() => {
     if (!activeLeagueId || !currentUser) {
       setActiveLeague(null);
@@ -179,12 +159,15 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
     }
     async function fetchActiveLeagueDetails() {
       try {
-        const lSnap = await getDoc(doc(db, 'fantasy_leagues', activeLeagueId));
+        const [lSnap, tSnap] = await Promise.all([
+          getDoc(doc(db, 'fantasy_leagues', activeLeagueId)),
+          getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/teams`))
+        ]);
+
         if (lSnap.exists()) {
           setActiveLeague({ id: lSnap.id, ...lSnap.data() });
         }
 
-        const tSnap = await getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/teams`));
         const teams = tSnap.docs.map(d => ({ id: d.id, ...d.data() }));
         setActiveLeagueTeams(teams);
 
@@ -403,11 +386,11 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
                         <div className="flex justify-between items-start">
                           <div>
                             <h3 className="text-base font-black text-white leading-tight">{league.name}</h3>
-                            <span className="inline-flex text-[9px] uppercase font-black text-indigo-400 bg-indigo-500/10 px-2.5 py-0.5 rounded-full border border-indigo-500/15 mt-2">
+                            <span className="inline-flex text-[9px] uppercase font-black text-indigo-400 bg-indigo-500/10 px-2.5 py-0.5 rounded-lg border border-indigo-500/15 mt-2">
                               {league.members.length} / {league.maxTeams} Teams
                             </span>
                           </div>
-                          <span className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-xs font-black">➜</span>
+                          <span className="w-8 h-8 rounded-xl bg-white/5 flex items-center justify-center text-xs font-black">➜</span>
                         </div>
                       </div>
                     ))}
@@ -492,7 +475,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
           {/* Active League Title Banner */}
           <div className="px-4 pt-6 pb-2 bg-gradient-to-b from-white/[0.02] to-transparent border-b border-white/5 flex justify-between items-center">
             <div>
-              <span className="text-[9px] uppercase font-extrabold tracking-widest text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/15">
+              <span className="text-[9px] uppercase font-extrabold tracking-widest text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded-lg border border-indigo-500/15">
                 Active League Hub
               </span>
               <h2 className="text-lg font-black text-white mt-1 leading-tight">{activeLeague.name}</h2>
@@ -528,17 +511,30 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
                       <div className="p-8 text-center text-xs text-gray-500">No teams found in standings.</div>
                     ) : (
                       [...activeLeagueTeams]
-                        .sort((a,b) => (b.points || 0) - (a.points || 0))
+                        .sort((a, b) => {
+                          const gamesA = (a.wins || 0) + (a.losses || 0) + (a.ties || 0);
+                          const gamesB = (b.wins || 0) + (b.losses || 0) + (b.ties || 0);
+                          const winPctA = gamesA > 0 ? ((a.wins || 0) + 0.5 * (a.ties || 0)) / gamesA : 0;
+                          const winPctB = gamesB > 0 ? ((b.wins || 0) + 0.5 * (b.ties || 0)) / gamesB : 0;
+                          if (winPctB !== winPctA) {
+                            return winPctB - winPctA;
+                          }
+                          return (b.points || 0) - (a.points || 0);
+                        })
                         .map((team, idx) => (
                           <div key={team.id} className="grid grid-cols-12 p-4 text-xs items-center">
                             <div className="col-span-2 font-black text-gray-400">{idx + 1}</div>
                             <div className="col-span-6 font-bold text-white flex items-center gap-2">
-                              <span>{idx === 0 ? '🐍' : idx === 1 ? '❄️' : '🏒'}</span>
+                              <span className="text-lg shrink-0">{team.avatar || '🏒'}</span>
                               <span className="truncate">{team.teamName}</span>
                               {team.ownerId === currentUser.uid && <span className="text-[8px] bg-indigo-500/20 text-indigo-400 px-1 py-0.2 rounded font-black">YOU</span>}
                             </div>
-                            <div className="col-span-2 text-right font-medium text-gray-400">0-0</div>
-                            <div className="col-span-2 text-right font-black text-white">0.0</div>
+                            <div className="col-span-2 text-right font-medium text-gray-400">
+                              {team.wins || 0}-{team.losses || 0}-{team.ties || 0}
+                            </div>
+                            <div className="col-span-2 text-right font-black text-white">
+                              {team.points !== undefined ? Number(team.points).toFixed(1) : '0.0'}
+                            </div>
                           </div>
                         ))
                     )}

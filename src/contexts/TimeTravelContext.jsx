@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { db } from '../firebase';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { processWaivers, processAcceptedTrades } from '../services/leagueService';
 
 const TimeTravelContext = createContext();
 
@@ -79,6 +80,8 @@ export function TimeTravelProvider({ children }) {
         } else {
           setLeagueSimState({ isSimulation: false, simulatedDate: null, leagueId: activeLeagueId });
         }
+        processWaivers(activeLeagueId).catch(console.error);
+        processAcceptedTrades(activeLeagueId).catch(console.error);
       }
     }, (error) => {
       console.warn("TimeTravelContext league sim onSnapshot error:", error);

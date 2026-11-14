@@ -1851,6 +1851,21 @@ function getLocalDateStr(date) {
   return `${year}-${month}-${day}`;
 }
 
+function getPSTDateStr(date) {
+  if (!date) return "";
+  const d = typeof date === "string" ? new Date(date) : date;
+  try {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "America/Los_Angeles",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(d);
+  } catch (e) {
+    return getLocalDateStr(d);
+  }
+}
+
 /**
  * Safe date parser: avoids UTC midnight shift when parsing bare "YYYY-MM-DD" strings.
  * Parses them as local noon instead.
@@ -1894,9 +1909,24 @@ async function buildWeeklyDailyPoints(leagueId, startBound, endBound, scoringRul
     return dailyPoints;
   }
 
-  const summariesSnap = await db.collection("pwhl_game_summaries").get();
-  summariesSnap.forEach(sDoc => {
-    if (!gameIds.includes(sDoc.id)) return;
+  const allSummaries = [];
+  if (gameIds.length > 0) {
+    const chunks = [];
+    for (let i = 0; i < gameIds.length; i += 30) {
+      chunks.push(gameIds.slice(i, i + 30));
+    }
+    for (const chunk of chunks) {
+      const refs = chunk.map(id => db.collection("pwhl_game_summaries").doc(id));
+      const snaps = await db.getAll(...refs);
+      snaps.forEach(snap => {
+        if (snap.exists) {
+          allSummaries.push(snap);
+        }
+      });
+    }
+  }
+
+  allSummaries.forEach(sDoc => {
     const summary = sDoc.data();
     const dStr = gameDateMap[sDoc.id];
     if (!dStr) return;
@@ -2089,11 +2119,39 @@ exports.onSimulationStateWritten = onDocumentWritten({
     allGames.push({ id: doc.id, ...doc.data() });
   });
 
-  const summariesSnap = await db.collection("pwhl_game_summaries").get();
-  const allSummaries = {};
-  summariesSnap.forEach(doc => {
-    allSummaries[doc.id] = doc.data();
+  // Pre-fetch only game summaries in a 4-week window around the simulation dates to avoid OOM
+  const gameIdsNeeded = new Set();
+  const minStartDate = new Date(oldDate);
+  minStartDate.setDate(minStartDate.getDate() - 14);
+  const maxEndDate = new Date(newDate);
+  maxEndDate.setDate(maxEndDate.getDate() + 14);
+
+  allGames.forEach(game => {
+    const gDateStr = game.date_played || game.date;
+    if (!gDateStr) return;
+    const gDate = parseDateSafe(gDateStr);
+    if (gDate >= minStartDate && gDate <= maxEndDate) {
+      gameIdsNeeded.add(String(game.game_id || game.id));
+    }
   });
+
+  const allSummaries = {};
+  if (gameIdsNeeded.size > 0) {
+    const gameIdsArray = Array.from(gameIdsNeeded);
+    const chunks = [];
+    for (let i = 0; i < gameIdsArray.length; i += 30) {
+      chunks.push(gameIdsArray.slice(i, i + 30));
+    }
+    for (const chunk of chunks) {
+      const refs = chunk.map(id => db.collection("pwhl_game_summaries").doc(id));
+      const snaps = await db.getAll(...refs);
+      snaps.forEach(snap => {
+        if (snap.exists) {
+          allSummaries[snap.id] = snap.data();
+        }
+      });
+    }
+  }
 
   // Collect unique season IDs from active leagues
   const activeSeasonIds = new Set();
@@ -2371,6 +2429,169 @@ exports.onSimulationStateWritten = onDocumentWritten({
 });
 
 /**
+ * Finalizes matchup scores, team standings/records, and increments currentWeek for a league.
+ * Called by both simulated date advancement and scheduled production crons.
+ */
+async function finalizeLeagueWeek(leagueId, weekInfo) {
+  console.log(`[Finalizer] Finalizing Week ${weekInfo.week} for league ${leagueId}`);
+
+  // Fetch teams
+  const teamsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("teams").get();
+  const teams = teamsSnap.docs.map(tDoc => ({ id: tDoc.id, ...tDoc.data() }));
+
+  // Calculate scores for each team using daily_game_stats
+  const dailyPointsCache = {};
+  const lineupCache = {};
+  const teamScores = {};
+
+  for (const team of teams) {
+    const result = await calculateTeamWeekScore(
+      leagueId, team.id,
+      new Date(weekInfo.start), new Date(weekInfo.end),
+      { dailyPointsCache, lineupCache }
+    );
+    teamScores[team.id] = result.totalScore;
+  }
+
+  // Update matchups
+  const matchupsSnap = await db.collection("fantasy_leagues").doc(leagueId)
+    .collection("matchups").where("week", "==", weekInfo.week).get();
+
+  const teamRecordsUpdates = {};
+  const getRecordObj = (id) => {
+    if (!teamRecordsUpdates[id]) {
+      const t = teams.find(team => team.id === id) || {};
+      teamRecordsUpdates[id] = {
+        wins: t.wins || 0, losses: t.losses || 0,
+        ties: t.ties || 0, points: t.points || 0
+      };
+    }
+    return teamRecordsUpdates[id];
+  };
+
+  const txBatch = db.batch();
+
+  for (const mDoc of matchupsSnap.docs) {
+    const matchup = mDoc.data();
+    const homeScore = teamScores[matchup.homeTeamId] || 0.0;
+    const awayScore = teamScores[matchup.awayTeamId] || 0.0;
+
+    let homeWin = false, awayWin = false;
+    if (homeScore > awayScore) homeWin = true;
+    else if (awayScore > homeScore) awayWin = true;
+
+    const rHome = getRecordObj(matchup.homeTeamId);
+    const rAway = getRecordObj(matchup.awayTeamId);
+
+    rHome.points += homeScore;
+    rAway.points += awayScore;
+
+    if (homeWin) { rHome.wins++; rAway.losses++; }
+    else if (awayWin) { rAway.wins++; rHome.losses++; }
+    else { rHome.ties++; rAway.ties++; }
+
+    txBatch.update(mDoc.ref, {
+      homeScore, awayScore,
+      status: "completed",
+      winnerId: homeWin ? matchup.homeTeamId : (awayWin ? matchup.awayTeamId : "TIE"),
+      updatedAt: Timestamp.fromMillis(Date.now())
+    });
+  }
+
+  for (const [tId, rec] of Object.entries(teamRecordsUpdates)) {
+    const teamRef = db.collection("fantasy_leagues").doc(leagueId).collection("teams").doc(tId);
+    txBatch.update(teamRef, {
+      wins: rec.wins, losses: rec.losses,
+      ties: rec.ties, points: Math.round(rec.points * 100) / 100
+    });
+  }
+
+  // Update currentWeek on the league doc inside the same batch
+  const leagueRef = db.collection("fantasy_leagues").doc(leagueId);
+  txBatch.update(leagueRef, {
+    currentWeek: weekInfo.week + 1
+  });
+
+  await txBatch.commit();
+  console.log(`[Finalizer] Successfully finalized Week ${weekInfo.week} for league ${leagueId}.`);
+}
+
+/**
+ * Scheduled function to settle matchup weeks for all active production leagues.
+ * Runs every Monday at 6:00 AM EST (America/New_York).
+ */
+exports.settleMatchupWeeksScheduled = functions.pubsub
+  .schedule("0 6 * * 1")
+  .timeZone("America/New_York")
+  .onRun(async (context) => {
+    console.log("[Scheduler] Weekly matchup settlement started...");
+
+    const leaguesSnap = await db.collection("fantasy_leagues")
+      .where("status", "in", ["active", "active_full"])
+      .get();
+
+    if (leaguesSnap.empty) {
+      console.log("[Scheduler] No active leagues to settle.");
+      return null;
+    }
+
+    console.log(`[Scheduler] Found ${leaguesSnap.size} leagues to inspect.`);
+    const now = new Date();
+
+    for (const leagueDoc of leaguesSnap.docs) {
+      const leagueId = leagueDoc.id;
+      const leagueData = leagueDoc.data();
+
+      // Skip simulation leagues in the scheduled cron (settled via simulatedDate triggers)
+      if (leagueData.isSimulation) {
+        console.log(`[Scheduler] Skipping simulation league ${leagueId}.`);
+        continue;
+      }
+
+      const currentWeek = leagueData.currentWeek || 1;
+      const seasonId = leagueData.season_id ? String(leagueData.season_id) : '5';
+
+      let weeks = [];
+      try {
+        const seasonSnap = await db.collection("pwhl_seasons").doc(seasonId).get();
+        if (seasonSnap.exists && seasonSnap.data().weeks) {
+          weeks = seasonSnap.data().weeks;
+        }
+      } catch (err) {
+        console.error(`[Scheduler] Error loading weeks for season ${seasonId}:`, err);
+        continue;
+      }
+
+      const weekInfo = weeks.find(w => w.week === currentWeek);
+      if (!weekInfo) {
+        console.log(`[Scheduler] No week info found for Week ${currentWeek} in league ${leagueId}.`);
+        continue;
+      }
+
+      const weekEnd = new Date(weekInfo.end);
+      if (now.getTime() > weekEnd.getTime()) {
+        try {
+          if (weekInfo.isOffWeek) {
+            console.log(`[Scheduler] Week ${currentWeek} is an Off Week for league ${leagueId}. Advancing currentWeek.`);
+            await db.collection("fantasy_leagues").doc(leagueId).update({
+              currentWeek: currentWeek + 1
+            });
+          } else {
+            await finalizeLeagueWeek(leagueId, weekInfo);
+          }
+        } catch (err) {
+          console.error(`[Scheduler] Failed to settle Week ${currentWeek} for league ${leagueId}:`, err);
+        }
+      } else {
+        console.log(`[Scheduler] Week ${currentWeek} for league ${leagueId} has not ended yet. Week end: ${weekEnd.toISOString()}`);
+      }
+    }
+
+    console.log("[Scheduler] Weekly matchup settlement complete.");
+    return null;
+  });
+
+/**
  * Per-league simulation trigger.
  * Fires when a fantasy_leagues document changes, and processes simulation
  * date advancement if the league is a simulation league.
@@ -2426,9 +2647,48 @@ exports.onLeagueSimulatedDateWritten = onDocumentWritten({
   const allGames = [];
   gamesSnap.forEach(doc => allGames.push({ id: doc.id, ...doc.data() }));
 
-  const summariesSnap = await db.collection("pwhl_game_summaries").get();
+  // Pre-fetch only game summaries needed for the simulation date range (saves memory/prevents OOM)
+  const gameIdsNeeded = new Set();
+  const getGamesForDateStr = (dStr) => {
+    return allGames.filter(game => {
+      const gDateStr = game.date_played || game.date;
+      if (!gDateStr) return false;
+      const gDate = parseDateSafe(gDateStr);
+      const matchesDate = getLocalDateStr(gDate) === dStr;
+      const matchesSeason = String(game.season_id) === String(seasonId);
+      return matchesDate && (game.status === "4" || game.status === "3") && matchesSeason;
+    });
+  };
+
+  const processDateCollector = new Date(oldDate);
+  processDateCollector.setDate(processDateCollector.getDate() + 1);
+  while (processDateCollector <= newDate) {
+    const dStr = getLocalDateStr(processDateCollector);
+    getGamesForDateStr(dStr).forEach(g => gameIdsNeeded.add(String(g.game_id || g.id)));
+    processDateCollector.setDate(processDateCollector.getDate() + 1);
+  }
+
+  if (statusChanged) {
+    getGamesForDateStr(newDateStr).forEach(g => gameIdsNeeded.add(String(g.game_id || g.id)));
+  }
+
   const allSummaries = {};
-  summariesSnap.forEach(doc => { allSummaries[doc.id] = doc.data(); });
+  if (gameIdsNeeded.size > 0) {
+    const gameIdsArray = Array.from(gameIdsNeeded);
+    const chunks = [];
+    for (let i = 0; i < gameIdsArray.length; i += 30) {
+      chunks.push(gameIdsArray.slice(i, i + 30));
+    }
+    for (const chunk of chunks) {
+      const refs = chunk.map(id => db.collection("pwhl_game_summaries").doc(id));
+      const snaps = await db.getAll(...refs);
+      snaps.forEach(snap => {
+        if (snap.exists) {
+          allSummaries[snap.id] = snap.data();
+        }
+      });
+    }
+  }
 
   const playersSnap = await db.collection("pwhl_players").get();
   const playersPosMap = {};
@@ -2495,88 +2755,19 @@ exports.onLeagueSimulatedDateWritten = onDocumentWritten({
       allGames, allSummaries, playersPosMap, seasonId, leagueId
     });
 
-    // Step 3: Check if we need to finalize a completed week
-    const weekInfo = getWeekForDate(processDate);
-    if (weekInfo && !weekInfo.isOffWeek) {
-      const weekEnd = new Date(weekInfo.end);
-      const isEndOfWeek = getLocalDateStr(processDate) === getLocalDateStr(weekEnd);
-
-      if (isEndOfWeek && weekInfo.week >= currentWeek) {
-        console.log(`[SimLoop] Finalizing Week ${weekInfo.week} for league ${leagueId}`);
-
-        // Fetch teams
-        const teamsSnap = await db.collection("fantasy_leagues").doc(leagueId).collection("teams").get();
-        const teams = teamsSnap.docs.map(tDoc => ({ id: tDoc.id, ...tDoc.data() }));
-
-        // Calculate scores for each team using daily_game_stats
-        const dailyPointsCache = {};
-        const lineupCache = {};
-        const teamScores = {};
-
-        for (const team of teams) {
-          const result = await calculateTeamWeekScore(
-            leagueId, team.id,
-            new Date(weekInfo.start), new Date(weekInfo.end),
-            { dailyPointsCache, lineupCache }
-          );
-          teamScores[team.id] = result.totalScore;
-        }
-
-        // Update matchups
-        const matchupsSnap = await db.collection("fantasy_leagues").doc(leagueId)
-          .collection("matchups").where("week", "==", weekInfo.week).get();
-
-        const teamRecordsUpdates = {};
-        const getRecordObj = (id) => {
-          if (!teamRecordsUpdates[id]) {
-            const t = teams.find(team => team.id === id) || {};
-            teamRecordsUpdates[id] = {
-              wins: t.wins || 0, losses: t.losses || 0,
-              ties: t.ties || 0, points: t.points || 0
-            };
-          }
-          return teamRecordsUpdates[id];
-        };
-
-        const txBatch = db.batch();
-
-        for (const mDoc of matchupsSnap.docs) {
-          const matchup = mDoc.data();
-          const homeScore = teamScores[matchup.homeTeamId] || 0.0;
-          const awayScore = teamScores[matchup.awayTeamId] || 0.0;
-
-          let homeWin = false, awayWin = false;
-          if (homeScore > awayScore) homeWin = true;
-          else if (awayScore > homeScore) awayWin = true;
-
-          const rHome = getRecordObj(matchup.homeTeamId);
-          const rAway = getRecordObj(matchup.awayTeamId);
-
-          rHome.points += homeScore;
-          rAway.points += awayScore;
-
-          if (homeWin) { rHome.wins++; rAway.losses++; }
-          else if (awayWin) { rAway.wins++; rHome.losses++; }
-          else { rHome.ties++; rAway.ties++; }
-
-          txBatch.update(mDoc.ref, {
-            homeScore, awayScore,
-            status: "completed",
-            winnerId: homeWin ? matchup.homeTeamId : (awayWin ? matchup.awayTeamId : "TIE"),
-            updatedAt: Timestamp.fromMillis(Date.now())
+    // Step 3: Check if we need to finalize a completed week (trigger on Monday or later, strictly past week end)
+    let weekInfo = weeks.find(w => w.week === currentWeek);
+    if (weekInfo) {
+      if (dateStr > getPSTDateStr(weekInfo.end)) {
+        if (!weekInfo.isOffWeek) {
+          await finalizeLeagueWeek(leagueId, weekInfo);
+        } else {
+          console.log(`[SimLoop] Off-week ${currentWeek} ended. Advancing league currentWeek.`);
+          await db.collection("fantasy_leagues").doc(leagueId).update({
+            currentWeek: currentWeek + 1
           });
         }
-
-        for (const [tId, rec] of Object.entries(teamRecordsUpdates)) {
-          const teamRef = db.collection("fantasy_leagues").doc(leagueId).collection("teams").doc(tId);
-          txBatch.update(teamRef, {
-            wins: rec.wins, losses: rec.losses,
-            ties: rec.ties, points: Math.round(rec.points * 100) / 100
-          });
-        }
-
-        await txBatch.commit();
-        currentWeek = weekInfo.week + 1;
+        currentWeek = currentWeek + 1;
       }
     }
 
@@ -2716,20 +2907,7 @@ exports.generateSeasonProjections = functions.https.onCall(async (data, context)
       });
     }
 
-    // 4. Fetch all player records for the target season
-    const playersSnap = await db.collection("pwhl_players")
-      .where("season_id", "in", [seasonIdStr, Number(seasonIdStr)])
-      .get();
-    const allPlayers = playersSnap.docs.map(doc => ({
-      id: doc.id,
-      data: doc.data()
-    }));
-
-    // Goalie weight and team distribution setup (Pass 1)
-    const goalieWeights = {};
-    const goalieTeams = {};
-    const teamGoalieWeights = {};
-
+    // 4. Identify previous regular season ID for fallback
     const prevRegularSeasons = [];
     allSeasonsSnap.forEach(sDoc => {
       const s = sDoc.data();
@@ -2743,6 +2921,32 @@ exports.generateSeasonProjections = functions.https.onCall(async (data, context)
     });
     prevRegularSeasons.sort((a, b) => b.startDate - a.startDate);
     const prevSeasonId = prevRegularSeasons[0]?.id || "5";
+
+    // 5. Fetch all player records for the target season (with fallback to prevSeasonId if 0)
+    let playersSnap = await db.collection("pwhl_players")
+      .where("season_id", "in", [seasonIdStr, Number(seasonIdStr)])
+      .get();
+    let allPlayers = playersSnap.docs.map(doc => ({
+      id: doc.id,
+      data: doc.data()
+    }));
+
+    if (allPlayers.length === 0 && prevSeasonId) {
+      console.log(`[Projections] Target season ${seasonIdStr} has 0 rostered players in pwhl_players. Falling back to previous regular season ${prevSeasonId} player pool...`);
+      const prevPlayersSnap = await db.collection("pwhl_players")
+        .where("season_id", "in", [prevSeasonId.toString(), Number(prevSeasonId)])
+        .get();
+      allPlayers = prevPlayersSnap.docs.map(doc => ({
+        id: doc.id,
+        data: doc.data()
+      }));
+    }
+
+    // Goalie weight and team distribution setup (Pass 1)
+    const goalieWeights = {};
+    const goalieTeams = {};
+    const teamGoalieWeights = {};
+
 
     for (const playerDoc of allPlayers) {
       const pData = playerDoc.data;

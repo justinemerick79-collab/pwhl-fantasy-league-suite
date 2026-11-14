@@ -1,6 +1,35 @@
-import { db } from '../firebase';
+import { db } from '../firebase.js';
 import { collection, getDocs, query, where, doc, getDoc } from 'firebase/firestore';
-import { normalizePosition } from './pwhlService';
+function normalizePosition(pos) {
+  if (!pos) return 'F';
+  const up = String(pos).toUpperCase().trim();
+  if (
+    ['F', 'FORWARD', 'FORWARDS', 'C', 'CENTER', 'CENTRE', 'LW', 'LEFT WING', 'LEFTWING', 'RW', 'RIGHT WING', 'RIGHTWING'].includes(up) ||
+    up.includes('WING') ||
+    up.includes('FORWARD') ||
+    up.includes('CENTER') ||
+    up.includes('CENTRE')
+  ) {
+    return 'F';
+  }
+  if (
+    ['D', 'RD', 'LD', 'DEFENSE', 'DEFENCE', 'DEFENDER', 'DEFENDERS', 'DEFENSEMAN', 'DEFENSEMEN', 'DEFENSMAN', 'RIGHT DEFENSE', 'RIGHT DEFENCE', 'LEFT DEFENSE', 'LEFT DEFENCE'].includes(up) ||
+    up.includes('DEFENSE') ||
+    up.includes('DEFENCE') ||
+    up.includes('DEFENDER') ||
+    up.includes('DEFENSEMAN') ||
+    up.includes('DEFENSEMEN')
+  ) {
+    return 'D';
+  }
+  if (
+    ['G', 'GOALIE', 'GOALIES', 'GOALTENDER', 'GOALTENDERS'].includes(up) ||
+    up.includes('GOAL')
+  ) {
+    return 'G';
+  }
+  return 'F';
+}
 
 
 // Safe date parser: avoids UTC midnight shift for bare "YYYY-MM-DD" strings
@@ -11,6 +40,51 @@ function parseDateSafe(dateStr) {
   const parts = s.split('-').map(Number);
   if (parts.length === 3) return new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
   return new Date(s);
+}
+function getPSTDateStr(date) {
+  if (!date) return '';
+  const d = typeof date === 'string' ? new Date(date) : date;
+  try {
+    return new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(d);
+  } catch (e) {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+}
+
+function getGameDatePSTStr(gDateStr) {
+  if (!gDateStr) return '';
+  const s = String(gDateStr);
+  if (s.length >= 10 && s.charAt(4) === '-' && s.charAt(7) === '-') {
+    return s.slice(0, 10);
+  }
+  return getPSTDateStr(new Date(s));
+}
+
+async function checkIsSimulation() {
+  try {
+    const simDoc = await getDoc(doc(db, "admin_settings", "simulation_state"));
+    if (simDoc.exists() && simDoc.data().testModeActive) {
+      return true;
+    }
+    const activeLeagueId = localStorage.getItem('pwhl_active_league');
+    if (activeLeagueId) {
+      const leagueDoc = await getDoc(doc(db, 'fantasy_leagues', activeLeagueId));
+      if (leagueDoc.exists() && leagueDoc.data().isSimulation) {
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn("[StatsEngine] Error checking simulation state:", e);
+  }
+  return false;
 }
 
 /**
@@ -47,17 +121,35 @@ export async function fetchAggregatedStats(seasonId, cutoffDate, startDate = nul
   const gamesQuery = query(collection(db, 'pwhl_games'), where('season_id', 'in', [seasonId, Number(seasonId)]));
   const gamesSnap = await getDocsWithTimeout(gamesQuery, 5000);
 
+  const isSimulation = await checkIsSimulation();
+
+  // Extend the cutoff date to the end of the day so that games played on the simulated date are included.
+  const adjustedCutoff = cutoffDate ? new Date(cutoffDate) : new Date();
+  if (cutoffDate) {
+    adjustedCutoff.setHours(23, 59, 59, 999);
+  }
+
   const pastGameIds = new Set();
   gamesSnap.forEach(docSnap => {
     const game = docSnap.data();
     // status '4' = Final in PWHL schedule feed
-    const isFinal = game.status === '4' || game.status === '3';
-    if (!isFinal) return;
+    let isFinal = game.status === '4' || game.status === '3';
 
     const gDateStr = game.date_played || game.date;
     if (!gDateStr) return;
     const gameDate = parseDateSafe(gDateStr);
-    if (gameDate < cutoffDate && (!startDate || gameDate >= startDate)) {
+
+    if (isSimulation) {
+      const gamePST = getGameDatePSTStr(gDateStr);
+      const simPST = getPSTDateStr(cutoffDate || new Date());
+      if (gamePST <= simPST) {
+        isFinal = true;
+      }
+    }
+
+    if (!isFinal) return;
+
+    if (gameDate < adjustedCutoff && (!startDate || gameDate >= startDate)) {
       pastGameIds.add(game.game_id.toString());
     }
   });
@@ -276,20 +368,36 @@ export async function fetchWeeklyPlayerPoints(seasonId, weekStart, weekEnd, simu
   let effectiveEnd = new Date(weekEnd);
   effectiveEnd.setHours(23, 59, 59, 999);
   
-  if (simulatedDate && simulatedDate < effectiveEnd) {
-    effectiveEnd = simulatedDate;
+  if (simulatedDate) {
+    const adjustedSim = new Date(simulatedDate);
+    adjustedSim.setHours(23, 59, 59, 999);
+    if (adjustedSim < effectiveEnd) {
+      effectiveEnd = adjustedSim;
+    }
   }
 
   // Start bound is weekStart beginning of day
   const effectiveStart = new Date(weekStart);
   effectiveStart.setHours(0, 0, 0, 0);
 
-  // If the week hasn't even started in our simulation yet, return 0 points instantly
+  // If the week hasn't even started in our simulation yet, return empty instantly
   if (effectiveStart >= effectiveEnd) {
-    return {};
+    return { pointsMap: {}, skaters: {}, goalies: {} };
   }
 
   const { skaters, goalies } = await fetchAggregatedStats(seasonId, effectiveEnd, effectiveStart);
+  
+  // Resolve player positions to accurately apply defensePoints bonus
+  const playersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonId, Number(seasonId)]));
+  const playersSnap = await getDocs(playersQuery);
+  const playerPosMap = {};
+  playersSnap.forEach(pDoc => {
+    const p = pDoc.data();
+    const pId = p.player_id || p.id;
+    if (pId) {
+      playerPosMap[String(pId)] = normalizePosition(p.position);
+    }
+  });
   
   const defaultScoring = {
     skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
@@ -313,10 +421,13 @@ export async function fetchWeeklyPlayerPoints(seasonId, weekStart, weekEnd, simu
     pts += s.shotsOnGoal * (skaterMatrix.sog || 0);
     pts += s.hits * (skaterMatrix.hits || 0);
     pts += s.blockedShots * (skaterMatrix.blocks || 0);
-    // Defense points are handled via position lookup in Roster/Matchup. 
-    // Here we can't reliably know if player is a Defenseman. The caller will add defensePoints if needed.
-    // However, if we must, we can leave the base points here, and callers add defense points.
-    // For simplicity, we just return the base skater points.
+    
+    // Add defenseman defensePoints bonus dynamically
+    const pos = playerPosMap[id] || 'F';
+    if (pos === 'D') {
+      pts += (s.goals + s.assists) * (skaterMatrix.defensePoints || 0);
+    }
+    
     pointsMap[id] = pts;
   }
 
@@ -350,14 +461,18 @@ function getLocalDateStr(date) {
 export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd, simulatedDate, scoringSettings) {
   let effectiveEnd = new Date(weekEnd);
   effectiveEnd.setHours(23, 59, 59, 999);
-  if (simulatedDate && simulatedDate < effectiveEnd) {
-    effectiveEnd = simulatedDate;
+  if (simulatedDate) {
+    const adjustedSim = new Date(simulatedDate);
+    adjustedSim.setHours(23, 59, 59, 999);
+    if (adjustedSim < effectiveEnd) {
+      effectiveEnd = adjustedSim;
+    }
   }
   const effectiveStart = new Date(weekStart);
   effectiveStart.setHours(0, 0, 0, 0);
 
   if (effectiveStart >= effectiveEnd) {
-    return {};
+    return { pointsMap: {}, statsMap: {} };
   }
 
   const gamesQuery = query(collection(db, 'pwhl_games'), where('season_id', 'in', [seasonId, Number(seasonId)]));
@@ -366,15 +481,26 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
   const gameDateMap = {};
   const finalGameIds = new Set();
 
+  const isSimulation = await checkIsSimulation();
+
   gamesSnap.forEach(docSnap => {
     const game = docSnap.data();
-    const isFinal = game.status === '4' || game.status === '3';
-    if (!isFinal) return;
+    let isFinal = game.status === '4' || game.status === '3';
 
     const gDateStr = game.date_played || game.date;
     if (!gDateStr) return;
     const gameDate = parseDateSafe(gDateStr);
-    
+
+    if (isSimulation) {
+      const gamePST = getGameDatePSTStr(gDateStr);
+      const simPST = getPSTDateStr(simulatedDate || new Date());
+      if (gamePST <= simPST) {
+        isFinal = true;
+      }
+    }
+
+    if (!isFinal) return;
+
     if (gameDate >= effectiveStart && gameDate <= effectiveEnd) {
       const gId = String(game.game_id);
       finalGameIds.add(gId);
@@ -383,7 +509,7 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
   });
 
   if (finalGameIds.size === 0) {
-    return {};
+    return { pointsMap: {}, statsMap: {} };
   }
 
   // 2. Fetch all players to get positions
@@ -410,8 +536,9 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
   const skaterMatrix = scoring.skaters || defaultScoring.skaters;
   const goalieMatrix = scoring.goalies || defaultScoring.goalies;
 
-  // We want to calculate points per player per day
-  const dailyPoints = {};
+  // We want to calculate points and stats per player per day
+  const pointsMap = {};
+  const statsMap = {};
 
   summariesSnap.forEach(docSnap => {
     const gameId = String(docSnap.id);
@@ -420,10 +547,12 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
     const dateStr = gameDateMap[gameId];
     if (!dateStr) return;
 
-    if (!dailyPoints[dateStr]) {
-      dailyPoints[dateStr] = {};
+    if (!pointsMap[dateStr]) {
+      pointsMap[dateStr] = {};
+      statsMap[dateStr] = {};
     }
-    const dayMap = dailyPoints[dateStr];
+    const dayPoints = pointsMap[dateStr];
+    const dayStats = statsMap[dateStr];
 
     const summary = docSnap.data();
 
@@ -502,7 +631,21 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
           pts += (goals + assists) * (skaterMatrix.defensePoints || 0);
         }
 
-        dayMap[id] = (dayMap[id] || 0) + pts;
+        dayPoints[id] = (dayPoints[id] || 0) + pts;
+
+        if (!dayStats[id]) {
+          dayStats[id] = { goals: 0, assists: 0, plusMinus: 0, ppp: 0, shp: 0, sog: 0, hits: 0, blocks: 0, pim: 0 };
+        }
+        const ds = dayStats[id];
+        ds.goals += goals;
+        ds.assists += assists;
+        ds.plusMinus += plusMinus;
+        ds.ppp += ppPoints;
+        ds.shp += shPoints;
+        ds.sog += shots;
+        ds.hits += hits;
+        ds.blocks += blocks;
+        ds.pim += pim;
       });
     };
 
@@ -552,7 +695,18 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
           pts += stats.saves * (goalieMatrix.saves || 0);
           pts += stats.shutouts * (goalieMatrix.shutouts || 0);
 
-          dayMap[id] = (dayMap[id] || 0) + pts;
+          dayPoints[id] = (dayPoints[id] || 0) + pts;
+
+          if (!dayStats[id]) {
+            dayStats[id] = { wins: 0, losses: 0, overtimeLosses: 0, goalsAgainst: 0, saves: 0, shutouts: 0, timeOnIce: 0 };
+          }
+          const ds = dayStats[id];
+          ds.wins += stats.wins;
+          ds.overtimeLosses += stats.overtimeLosses;
+          ds.goalsAgainst += stats.goalsAgainst;
+          ds.saves += stats.saves;
+          ds.shutouts += stats.shutouts;
+          ds.timeOnIce += stats.timeOnIce;
         }
       }
     };
@@ -563,7 +717,15 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
     }
   });
 
-  return dailyPoints;
+  // Round all points in pointsMap
+  for (const dateStr of Object.keys(pointsMap)) {
+    const dayMap = pointsMap[dateStr];
+    for (const id of Object.keys(dayMap)) {
+      dayMap[id] = Math.round(dayMap[id] * 100) / 100;
+    }
+  }
+
+  return { pointsMap, statsMap };
 }
 
 /**
@@ -580,22 +742,27 @@ export async function fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd
  * @param {Date} simulatedDate - The current simulation cutoff date
  * @param {Object} scoringSettings - Fantasy points matrix (used for fallback only)
  * @param {string} [leagueId] - Optional league ID for per-league scoring lookup
- * @returns {Object} { "YYYY-MM-DD": { playerId: fantasyPoints } }
+ * @returns {Object} { pointsMap: { "YYYY-MM-DD": { playerId: fantasyPoints } }, statsMap: { "YYYY-MM-DD": { playerId: stats } } }
  */
 export async function fetchDailyPlayerPointsFromSnapshot(seasonId, weekStart, weekEnd, simulatedDate, scoringSettings, leagueId = null) {
   let effectiveEnd = new Date(weekEnd);
   effectiveEnd.setHours(23, 59, 59, 999);
-  if (simulatedDate && simulatedDate < effectiveEnd) {
-    effectiveEnd = simulatedDate;
+  if (simulatedDate) {
+    const adjustedSim = new Date(simulatedDate);
+    adjustedSim.setHours(23, 59, 59, 999);
+    if (adjustedSim < effectiveEnd) {
+      effectiveEnd = adjustedSim;
+    }
   }
   const effectiveStart = new Date(weekStart);
   effectiveStart.setHours(0, 0, 0, 0);
 
   if (effectiveStart >= effectiveEnd) {
-    return {};
+    return { pointsMap: {}, statsMap: {} };
   }
 
-  const dailyPoints = {};
+  const pointsMap = {};
+  const statsMap = {};
   let usedSnapshot = false;
   let snapshotMissCount = 0;
 
@@ -603,6 +770,8 @@ export async function fetchDailyPlayerPointsFromSnapshot(seasonId, weekStart, we
   const current = new Date(effectiveStart);
   while (current <= effectiveEnd) {
     const dateStr = getLocalDateStr(current);
+    pointsMap[dateStr] = {};
+    statsMap[dateStr] = {};
     
     try {
       const docRef = doc(db, 'daily_game_stats', dateStr);
@@ -612,9 +781,18 @@ export async function fetchDailyPlayerPointsFromSnapshot(seasonId, weekStart, we
         usedSnapshot = true;
         const data = docSnap.data();
         
-        // Use per-league scoring if available
+        // 1. Get stats map for the day from global playerPoints
+        if (data.playerPoints) {
+          for (const [playerId, entry] of Object.entries(data.playerPoints)) {
+            if (typeof entry === 'object' && entry.stats) {
+              statsMap[dateStr][playerId] = entry.stats;
+            }
+          }
+        }
+        
+        // 2. Get points map (use per-league custom scoring if available)
         if (leagueId && data.leaguePoints && data.leaguePoints[leagueId]) {
-          dailyPoints[dateStr] = data.leaguePoints[leagueId];
+          pointsMap[dateStr] = data.leaguePoints[leagueId];
         } else if (data.playerPoints) {
           // Extract just fantasyPoints from global playerPoints
           const dayMap = {};
@@ -625,18 +803,14 @@ export async function fetchDailyPlayerPointsFromSnapshot(seasonId, weekStart, we
               dayMap[playerId] = entry; // Backward compat if stored as flat number
             }
           }
-          dailyPoints[dateStr] = dayMap;
-        } else {
-          dailyPoints[dateStr] = {};
+          pointsMap[dateStr] = dayMap;
         }
       } else {
         snapshotMissCount++;
-        dailyPoints[dateStr] = {};
       }
     } catch (err) {
       console.warn(`[StatsEngine] Error reading daily_game_stats/${dateStr}:`, err);
       snapshotMissCount++;
-      dailyPoints[dateStr] = {};
     }
 
     current.setDate(current.getDate() + 1);
@@ -648,5 +822,5 @@ export async function fetchDailyPlayerPointsFromSnapshot(seasonId, weekStart, we
     return fetchDailyPlayerPointsForWeek(seasonId, weekStart, weekEnd, simulatedDate, scoringSettings);
   }
 
-  return dailyPoints;
+  return { pointsMap, statsMap };
 }

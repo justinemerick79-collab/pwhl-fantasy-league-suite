@@ -1,14 +1,37 @@
-import { db } from '../firebase';
-import { doc, writeBatch, collection, getDocs, query, where } from 'firebase/firestore';
+import { db } from '../firebase.js';
+import { doc, writeBatch, collection, getDocs, query, where, getDoc } from 'firebase/firestore';
 
 export const normalizePosition = (posStr) => {
   if (!posStr) return 'F';
   const up = String(posStr).toUpperCase().trim();
-  if (['C', 'RW', 'LW', 'F', 'FORWARD'].includes(up)) return 'F';
-  if (['D', 'RD', 'LD', 'DEFENSE', 'DEFENSEMAN'].includes(up)) return 'D';
-  if (['G', 'GOALIE', 'GOALTENDER'].includes(up)) return 'G';
+  if (
+    ['F', 'FORWARD', 'FORWARDS', 'C', 'CENTER', 'CENTRE', 'LW', 'LEFT WING', 'LEFTWING', 'RW', 'RIGHT WING', 'RIGHTWING'].includes(up) ||
+    up.includes('WING') ||
+    up.includes('FORWARD') ||
+    up.includes('CENTER') ||
+    up.includes('CENTRE')
+  ) {
+    return 'F';
+  }
+  if (
+    ['D', 'RD', 'LD', 'DEFENSE', 'DEFENCE', 'DEFENDER', 'DEFENDERS', 'DEFENSEMAN', 'DEFENSEMEN', 'DEFENSMAN', 'RIGHT DEFENSE', 'RIGHT DEFENCE', 'LEFT DEFENSE', 'LEFT DEFENCE'].includes(up) ||
+    up.includes('DEFENSE') ||
+    up.includes('DEFENCE') ||
+    up.includes('DEFENDER') ||
+    up.includes('DEFENSEMAN') ||
+    up.includes('DEFENSEMEN')
+  ) {
+    return 'D';
+  }
+  if (
+    ['G', 'GOALIE', 'GOALIES', 'GOALTENDER', 'GOALTENDERS'].includes(up) ||
+    up.includes('GOAL')
+  ) {
+    return 'G';
+  }
   return 'F';
 };
+
 
 const API_KEY = '446521baf8c38984';
 const CLIENT_CODE = 'pwhl';
@@ -40,6 +63,51 @@ async function fetchFromApi(params) {
   
   return JSON.parse(jsonString);
 }
+function getPSTDateStr(date) {
+  if (!date) return '';
+  const d = typeof date === 'string' ? new Date(date) : date;
+  try {
+    return new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(d);
+  } catch (e) {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+}
+
+function getGameDatePSTStr(gDateStr) {
+  if (!gDateStr) return '';
+  const s = String(gDateStr);
+  if (s.length >= 10 && s.charAt(4) === '-' && s.charAt(7) === '-') {
+    return s.slice(0, 10);
+  }
+  return getPSTDateStr(new Date(s));
+}
+
+async function checkIsSimulation() {
+  try {
+    const simDoc = await getDoc(doc(db, "admin_settings", "simulation_state"));
+    if (simDoc.exists() && simDoc.data().testModeActive) {
+      return true;
+    }
+    const activeLeagueId = localStorage.getItem('pwhl_active_league');
+    if (activeLeagueId) {
+      const leagueDoc = await getDoc(doc(db, 'fantasy_leagues', activeLeagueId));
+      if (leagueDoc.exists() && leagueDoc.data().isSimulation) {
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn("[PwhlService] Error checking simulation state:", e);
+  }
+  return false;
+}
 
 export async function fetchPlayerGameHistory(playerId, pos, teamCode, seasonId, simulatedDate, scoringSettings) {
   try {
@@ -51,7 +119,10 @@ export async function fetchPlayerGameHistory(playerId, pos, teamCode, seasonId, 
     const summariesSnap = await getDocs(summariesQuery);
     const gameSummariesList = summariesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    const cutoff = simulatedDate || new Date();
+    const cutoff = simulatedDate ? new Date(simulatedDate) : new Date();
+    if (simulatedDate) {
+      cutoff.setHours(23, 59, 59, 999);
+    }
     const isGoalie = pos === 'G';
     const playerIdStr = String(playerId);
     const defaultScoring = {
@@ -62,16 +133,27 @@ export async function fetchPlayerGameHistory(playerId, pos, teamCode, seasonId, 
 
     const playerGames = [];
 
+    const isSimulation = await checkIsSimulation();
+
     gameSummariesList.forEach(summary => {
       const gameDoc = gamesList.find(g => String(g.game_id) === String(summary.id));
       if (!gameDoc) return;
 
-      const isFinal = gameDoc.status === '4' || gameDoc.status === '3';
-      if (!isFinal) return;
+      let isFinal = gameDoc.status === '4' || gameDoc.status === '3';
 
       const gDateStr = gameDoc.date_played || gameDoc.date;
       if (!gDateStr) return;
       const gameDate = new Date(gDateStr);
+
+      if (isSimulation) {
+        const gamePST = getGameDatePSTStr(gDateStr);
+        const simPST = getPSTDateStr(simulatedDate || new Date());
+        if (gamePST <= simPST) {
+          isFinal = true;
+        }
+      }
+
+      if (!isFinal) return;
       if (gameDate >= cutoff) return; // Skip future games
 
       let participated = false;
@@ -684,3 +766,347 @@ export async function fetchDraftEligiblePlayers(draftSeasonId, selectedSeasonId)
     };
   });
 }
+
+export async function generateSeasonProjectionsClient(seasonIdStr) {
+  if (!seasonIdStr) throw new Error("Missing seasonId parameter.");
+
+  const seasonSnap = await getDocs(query(collection(db, 'pwhl_seasons'), where('season_id', 'in', [seasonIdStr, Number(seasonIdStr)])));
+  if (seasonSnap.empty) throw new Error(`Season ${seasonIdStr} not found.`);
+  
+  const targetSeason = seasonSnap.docs[0].data();
+  const startDateStr = targetSeason.start_date;
+  if (!startDateStr) throw new Error(`Season ${seasonIdStr} is missing start_date.`);
+  const targetSeasonStart = new Date(startDateStr);
+  const gamesPerTeam = 30;
+
+  const allSeasonsSnap = await getDocs(collection(db, 'pwhl_seasons'));
+  const historicalSeasonIds = [];
+  const prevRegularSeasons = [];
+
+  allSeasonsSnap.forEach(sDoc => {
+    const s = sDoc.data();
+    const sId = String(s.season_id);
+    if (sId !== String(seasonIdStr) && s.start_date) {
+      const sStart = new Date(s.start_date);
+      if (sStart < targetSeasonStart) {
+        historicalSeasonIds.push(sId);
+        const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
+        if (isRegular) {
+          prevRegularSeasons.push({ id: sId, startDate: sStart });
+        }
+      }
+    }
+  });
+
+  prevRegularSeasons.sort((a, b) => b.startDate - a.startDate);
+  const prevSeasonId = prevRegularSeasons[0]?.id || "5";
+
+  const playerHistory = {};
+  if (historicalSeasonIds.length > 0) {
+    const statsSnap = await getDocs(query(collection(db, 'pwhl_player_stats'), where('season_id', 'in', historicalSeasonIds)));
+    statsSnap.forEach(docSnap => {
+      const docData = docSnap.data();
+      const pId = String(docData.player_id || docData.id || '');
+      const sId = String(docData.season_id || '');
+      if (!pId || !sId) return;
+
+      if (!playerHistory[pId]) playerHistory[pId] = {};
+
+      playerHistory[pId][sId] = {
+        seasonId: sId,
+        position: docData.position || "F",
+        stats: {
+          gamesPlayed: Number(docData.games_played || 0),
+          goals: Number(docData.goals || 0),
+          assists: Number(docData.assists || 0),
+          plusMinus: Number(docData.plus_minus || 0),
+          powerPlayGoals: Number(docData.power_play_goals || 0),
+          powerPlayAssists: Number(docData.power_play_assists || 0),
+          powerPlayPoints: Number(docData.power_play_points || 0),
+          shortHandedGoals: Number(docData.short_handed_goals || 0),
+          shortHandedAssists: Number(docData.short_handed_assists || 0),
+          shortHandedPoints: Number(docData.short_handed_points || 0),
+          pim: Number(docData.penalty_minutes || docData.pim || 0),
+          shotsOnGoal: Number(docData.shots || docData.shots_on || 0),
+          blockedShots: Number(docData.shots_blocked_by_player || 0),
+          hits: Number(docData.hits || 0),
+          timeOnIce: Number(docData.ice_time || 0),
+          wins: Number(docData.wins || 0),
+          losses: Number(docData.losses || docData.loss || 0),
+          overtimeLosses: Number(docData.ot_loss || docData.overtime_losses || 0),
+          goalsAgainst: Number(docData.goals_against || 0),
+          shotsSaved: Number(docData.saves || 0),
+          shutouts: Number(docData.shutouts || 0),
+        }
+      };
+    });
+  }
+
+  let playersSnap = await getDocs(query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonIdStr, Number(seasonIdStr)])));
+  let allPlayers = playersSnap.docs.map(d => ({ id: d.id, data: d.data() }));
+
+  if (allPlayers.length === 0 && prevSeasonId) {
+    console.log(`[Projections Client] Season ${seasonIdStr} has 0 rostered players. Falling back to previous regular season ${prevSeasonId} player pool...`);
+    const prevPlayersSnap = await getDocs(query(collection(db, 'pwhl_players'), where('season_id', 'in', [prevSeasonId.toString(), Number(prevSeasonId)])));
+    allPlayers = prevPlayersSnap.docs.map(d => ({ id: d.id, data: d.data() }));
+  }
+
+  if (allPlayers.length === 0) {
+    throw new Error("No player roster records found in database.");
+  }
+
+  const goalieWeights = {};
+  const goalieTeams = {};
+  const teamGoalieWeights = {};
+
+  for (const playerDoc of allPlayers) {
+    const pData = playerDoc.data;
+    const playerId = String(pData.player_id || pData.id || playerDoc.id.split("_")[1] || playerDoc.id);
+    if (!playerId) continue;
+
+    const rawPosition = String(pData.position || pData.pos || "F").trim().toUpperCase();
+    if (rawPosition.startsWith("G") || rawPosition.includes("GOALIE")) {
+      const teamId = String(pData.team_id || pData.current_team_id || pData.latest_team_id || "FA");
+      const gpLast = playerHistory[playerId]?.[prevSeasonId]?.stats?.gamesPlayed || 0;
+      const weight = Math.max(gpLast, 6);
+
+      goalieWeights[playerId] = weight;
+      goalieTeams[playerId] = teamId;
+      teamGoalieWeights[teamId] = (teamGoalieWeights[teamId] || 0) + weight;
+    }
+  }
+
+  const defaultScoring = {
+    skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
+    goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
+  };
+
+  const playerProjections = [];
+
+  for (const playerDoc of allPlayers) {
+    const pData = playerDoc.data;
+    const playerId = String(pData.player_id || pData.id || playerDoc.id.split("_")[1] || playerDoc.id);
+    if (!playerId) continue;
+
+    const rawPosition = String(pData.position || pData.pos || "F").trim().toUpperCase();
+    let position = "F";
+    if (rawPosition.startsWith("G") || rawPosition.includes("GOALIE")) position = "G";
+    else if (rawPosition.startsWith("D") || rawPosition.includes("DEFENSE") || rawPosition.includes("DEFENCE") || rawPosition === "LD" || rawPosition === "RD") position = "D";
+
+    const name = pData.name || `${pData.first_name || ""} ${pData.last_name || ""}`.trim() || "Unknown Player";
+
+    const history = playerHistory[playerId] || {};
+    const validSeasons = Object.values(history).filter(h => h.stats && h.stats.gamesPlayed >= 5);
+    validSeasons.sort((a, b) => new Date(allSeasonsSnap.docs.find(d => d.id === b.seasonId)?.data()?.start_date || 0) - new Date(allSeasonsSnap.docs.find(d => d.id === a.seasonId)?.data()?.start_date || 0));
+
+    const s1 = validSeasons[0];
+    const s2 = validSeasons[1];
+
+    let goalsRate = 0, assistsRate = 0, plusMinusRate = 0, powerPlayGoalsRate = 0, powerPlayAssistsRate = 0, powerPlayPointsRate = 0;
+    let shortHandedGoalsRate = 0, shortHandedAssistsRate = 0, shortHandedPointsRate = 0, pimRate = 0, shotsOnGoalRate = 0, blockedShotsRate = 0, hitsRate = 0, timeOnIceRate = 0;
+    let winsRate = 0, lossesRate = 0, overtimeLossesRate = 0, shotsSavedRate = 0, goalsAgainstRate = 0, shutoutsRate = 0;
+
+    const isVeteran = validSeasons.length > 0;
+    let expectedGamesPlayed = 30;
+
+    if (isVeteran) {
+      const getWeightedRate = (metric) => {
+        if (s1 && s2) {
+          const r1 = (s1.stats[metric] || 0) / s1.stats.gamesPlayed;
+          const r2 = (s2.stats[metric] || 0) / s2.stats.gamesPlayed;
+          return (0.5 * r1 + 0.3 * r2) / 0.8;
+        } else {
+          return (s1.stats[metric] || 0) / s1.stats.gamesPlayed;
+        }
+      };
+
+      if (position === "G") {
+        winsRate = getWeightedRate("wins");
+        lossesRate = getWeightedRate("losses");
+        overtimeLossesRate = getWeightedRate("overtimeLosses");
+        shotsSavedRate = getWeightedRate("shotsSaved");
+        goalsAgainstRate = getWeightedRate("goalsAgainst");
+        shutoutsRate = getWeightedRate("shutouts");
+        timeOnIceRate = getWeightedRate("timeOnIce");
+      } else {
+        goalsRate = getWeightedRate("goals");
+        assistsRate = getWeightedRate("assists");
+        plusMinusRate = getWeightedRate("plusMinus");
+        powerPlayGoalsRate = getWeightedRate("powerPlayGoals");
+        powerPlayAssistsRate = getWeightedRate("powerPlayAssists");
+        powerPlayPointsRate = getWeightedRate("powerPlayPoints");
+        shortHandedGoalsRate = getWeightedRate("shortHandedGoals");
+        shortHandedAssistsRate = getWeightedRate("shortHandedAssists");
+        shortHandedPointsRate = getWeightedRate("shortHandedPoints");
+        pimRate = getWeightedRate("pim");
+        shotsOnGoalRate = getWeightedRate("shotsOnGoal");
+        blockedShotsRate = getWeightedRate("blockedShots");
+        hitsRate = getWeightedRate("hits");
+        timeOnIceRate = getWeightedRate("timeOnIce");
+      }
+    } else {
+      if (position === "G") {
+        winsRate = 0.40; lossesRate = 0.50; overtimeLossesRate = 0.10;
+        shotsSavedRate = 25.3; goalsAgainstRate = 2.70; shutoutsRate = 0.03;
+        timeOnIceRate = 3600;
+      } else {
+        goalsRate = 0.25; assistsRate = 0.35; pimRate = 0.4; shotsOnGoalRate = 1.5; blockedShotsRate = 0.4; hitsRate = 0.6;
+        powerPlayPointsRate = 0.05; timeOnIceRate = 850;
+      }
+    }
+
+    if (position === "G") {
+      const teamId = goalieTeams[playerId] || "FA";
+      const totalWeight = teamGoalieWeights[teamId] || 6;
+      const myWeight = goalieWeights[playerId] || 6;
+      expectedGamesPlayed = 30 * (myWeight / totalWeight);
+    }
+
+    expectedGamesPlayed = Math.max(0, Math.min(expectedGamesPlayed, gamesPerTeam));
+
+    let projected_season_stats = {};
+    let projectedFPP = 0;
+
+    if (position === "G") {
+      projected_season_stats = {
+        gamesPlayed: Math.round(expectedGamesPlayed),
+        wins: Math.round(winsRate * expectedGamesPlayed * 100) / 100,
+        losses: Math.round(lossesRate * expectedGamesPlayed * 100) / 100,
+        overtimeLosses: Math.round(overtimeLossesRate * expectedGamesPlayed * 100) / 100,
+        shotsSaved: Math.round(shotsSavedRate * expectedGamesPlayed * 100) / 100,
+        goalsAgainst: Math.round(goalsAgainstRate * expectedGamesPlayed * 100) / 100,
+        shutouts: Math.round(shutoutsRate * expectedGamesPlayed * 100) / 100,
+        timeOnIce: Math.round(timeOnIceRate * expectedGamesPlayed)
+      };
+
+      const matrix = defaultScoring.goalies;
+      let fPoints = 0;
+      fPoints += projected_season_stats.wins * matrix.wins;
+      fPoints += projected_season_stats.overtimeLosses * matrix.otl;
+      fPoints += projected_season_stats.goalsAgainst * matrix.ga;
+      fPoints += projected_season_stats.shotsSaved * matrix.saves;
+      fPoints += projected_season_stats.shutouts * matrix.shutouts;
+      projectedFPP = Math.round(fPoints * 100) / 100;
+    } else {
+      projected_season_stats = {
+        gamesPlayed: Math.round(expectedGamesPlayed),
+        goals: Math.round(goalsRate * expectedGamesPlayed * 100) / 100,
+        assists: Math.round(assistsRate * expectedGamesPlayed * 100) / 100,
+        plusMinus: Math.round(plusMinusRate * expectedGamesPlayed * 100) / 100,
+        powerPlayGoals: Math.round(powerPlayGoalsRate * expectedGamesPlayed * 100) / 100,
+        powerPlayAssists: Math.round(powerPlayAssistsRate * expectedGamesPlayed * 100) / 100,
+        powerPlayPoints: Math.round(powerPlayPointsRate * expectedGamesPlayed * 100) / 100,
+        shortHandedGoals: Math.round(shortHandedGoalsRate * expectedGamesPlayed * 100) / 100,
+        shortHandedAssists: Math.round(shortHandedAssistsRate * expectedGamesPlayed * 100) / 100,
+        shortHandedPoints: Math.round(shortHandedPointsRate * expectedGamesPlayed * 100) / 100,
+        pim: Math.round(pimRate * expectedGamesPlayed * 100) / 100,
+        shotsOnGoal: Math.round(shotsOnGoalRate * expectedGamesPlayed * 100) / 100,
+        blockedShots: Math.round(blockedShotsRate * expectedGamesPlayed * 100) / 100,
+        hits: Math.round(hitsRate * expectedGamesPlayed * 100) / 100,
+        timeOnIce: Math.round(timeOnIceRate * expectedGamesPlayed)
+      };
+
+      const matrix = defaultScoring.skaters;
+      let fPoints = 0;
+      fPoints += projected_season_stats.goals * matrix.goals;
+      fPoints += projected_season_stats.assists * matrix.assists;
+      fPoints += projected_season_stats.plusMinus * matrix.plusMinus;
+      const ppp = projected_season_stats.powerPlayPoints || (projected_season_stats.powerPlayGoals + projected_season_stats.powerPlayAssists);
+      fPoints += ppp * matrix.ppp;
+      const shp = projected_season_stats.shortHandedPoints || (projected_season_stats.shortHandedGoals + projected_season_stats.shortHandedAssists);
+      fPoints += shp * matrix.shp;
+      fPoints += projected_season_stats.shotsOnGoal * matrix.sog;
+      fPoints += projected_season_stats.hits * matrix.hits;
+      fPoints += projected_season_stats.blockedShots * matrix.blocks;
+
+      if (position === "D" || position === "Defense") {
+        fPoints += (projected_season_stats.goals + projected_season_stats.assists) * matrix.defensePoints;
+      }
+      projectedFPP = Math.round(fPoints * 100) / 100;
+    }
+
+    playerProjections.push({
+      playerId: String(playerId),
+      playerName: name,
+      position: position,
+      teamId: String(pData.team_id || pData.current_team_id || pData.latest_team_id || ''),
+      seasonId: seasonIdStr,
+      expectedGamesPlayed: Math.round(expectedGamesPlayed * 100) / 100,
+      projected_season_stats: projected_season_stats,
+      projectedFPP: projectedFPP
+    });
+  }
+
+  const forwardsList = playerProjections.filter(p => p.position === 'F');
+  const defensemenList = playerProjections.filter(p => p.position === 'D');
+  const goaliesList = playerProjections.filter(p => p.position === 'G');
+
+  forwardsList.sort((a, b) => b.projectedFPP - a.projectedFPP);
+  defensemenList.sort((a, b) => b.projectedFPP - a.projectedFPP);
+  goaliesList.sort((a, b) => b.projectedFPP - a.projectedFPP);
+
+  const forwardBaseline = forwardsList[Math.min(36, forwardsList.length - 1)]?.projectedFPP || 0;
+  const defenseBaseline = defensemenList[Math.min(24, defensemenList.length - 1)]?.projectedFPP || 0;
+  const goalieBaseline = goaliesList[Math.min(6, goaliesList.length - 1)]?.projectedFPP || 0;
+
+  for (const p of playerProjections) {
+    let baseline = p.position === 'F' ? forwardBaseline : p.position === 'D' ? defenseBaseline : goalieBaseline;
+    p.vorpScore = Math.round((p.projectedFPP - baseline) * 100) / 100;
+  }
+
+  playerProjections.sort((a, b) => b.vorpScore - a.vorpScore);
+  playerProjections.forEach((p, idx) => { p.overallRank = idx + 1; });
+  forwardsList.forEach((p, idx) => { p.positionalRank = idx + 1; });
+  defensemenList.forEach((p, idx) => { p.positionalRank = idx + 1; });
+  goaliesList.forEach((p, idx) => { p.positionalRank = idx + 1; });
+
+  let currentBatch = writeBatch(db);
+  let writeCount = 0;
+
+  for (const p of playerProjections) {
+    const docRef = doc(db, 'pwhl_projections', seasonIdStr, 'player_projections', p.playerId);
+    currentBatch.set(docRef, {
+      playerId: p.playerId,
+      playerName: p.playerName,
+      position: p.position,
+      seasonId: p.seasonId,
+      teamId: p.teamId,
+      expectedGamesPlayed: p.expectedGamesPlayed,
+      projected_season_stats: p.projected_season_stats,
+      projectedFPP: p.projectedFPP,
+      vorpScore: p.vorpScore,
+      overallRank: p.overallRank,
+      positionalRank: p.positionalRank
+    }, { merge: true });
+
+    const globalRef = doc(db, 'pwhl_season_player_stats', `${seasonIdStr}_global_${p.playerId}`);
+    currentBatch.set(globalRef, {
+      seasonId: seasonIdStr,
+      leagueId: 'global',
+      playerId: p.playerId,
+      playerName: p.playerName,
+      teamId: p.teamId,
+      position: p.position,
+      stats: p.projected_season_stats,
+      fantasyPoints: p.projectedFPP
+    }, { merge: true });
+
+    writeCount += 2;
+    if (writeCount >= 450) {
+      await currentBatch.commit();
+      currentBatch = writeBatch(db);
+      writeCount = 0;
+    }
+  }
+
+  if (writeCount > 0) {
+    await currentBatch.commit();
+  }
+
+  return {
+    success: true,
+    processedCount: playerProjections.length,
+    baselines: { forward: forwardBaseline, defense: defenseBaseline, goalie: goalieBaseline }
+  };
+}
+

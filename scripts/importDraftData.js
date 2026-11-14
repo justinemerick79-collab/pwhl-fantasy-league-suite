@@ -18,6 +18,56 @@ function cleanString(str) {
   return str ? str.replace(/^"|"$/g, '').trim() : '';
 }
 
+// Helper to normalize and strip accents/diacritics from a string
+function normalizeString(str) {
+  return str
+    ? str
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // remove diacritics
+        .toLowerCase()
+        .trim()
+    : "";
+}
+
+// Robust matcher for player names to check for nicknames, compound names, and accents
+function isPlayerMatch(draftName, dbPlayer) {
+  const normDraft = normalizeString(draftName);
+  const dbName = normalizeString(dbPlayer.name || "");
+  const dbFullName = normalizeString(`${dbPlayer.first_name || ""} ${dbPlayer.last_name || ""}`);
+  
+  if (dbName === normDraft || dbFullName === normDraft) {
+    return true;
+  }
+  
+  // Try matching parts
+  const draftParts = normDraft.split(/\s+/);
+  const dbFirst = normalizeString(dbPlayer.first_name || "");
+  const dbLast = normalizeString(dbPlayer.last_name || "");
+  
+  if (draftParts.length >= 2) {
+    const draftFirst = draftParts[0];
+    const draftLast = draftParts.slice(1).join(" ");
+    
+    // Check 1: Exact last name match, first names share first 2 letters
+    // E.g. "Jennifer Gardiner" (draftFirst="jennifer", draftLast="gardiner")
+    // vs "Jenn Gardiner" (dbFirst="jenn", dbLast="gardiner")
+    if (draftLast === dbLast && 
+        (draftFirst.startsWith(dbFirst) || dbFirst.startsWith(draftFirst) || 
+         (draftFirst.slice(0, 2) === dbFirst.slice(0, 2)))) {
+      return true;
+    }
+    
+    // Check 2: Compound last name (e.g. "Britta Curl" vs "Britta Curl-Salemme")
+    // If first names match, and one last name is a substring of the other
+    if ((draftFirst === dbFirst || draftFirst.slice(0, 3) === dbFirst.slice(0, 3)) && 
+        (dbLast.includes(draftLast) || draftLast.includes(dbLast))) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 async function run() {
   try {
     // 1. Resolve draft_results.txt path
@@ -121,16 +171,13 @@ async function run() {
         formerTeam: formerTeam
       };
 
-      // Match player case-insensitively by name field or first_name + last_name
-      const cleanedPlayerName = player.toLowerCase();
+      // Match player using robust, nickname and accent-insensitive matching
       const matchedPlayers = existingPlayers.filter(ep => {
         const epData = ep.data;
         // Skip orphans that we are deleting
         if (epData.draftInfo && !epData.season_id) return false;
         
-        const dbName = (epData.name || "").trim().toLowerCase();
-        const dbFullName = `${epData.first_name || ""} ${epData.last_name || ""}`.trim().toLowerCase();
-        return dbName === cleanedPlayerName || dbFullName === cleanedPlayerName;
+        return isPlayerMatch(player, epData);
       });
 
       if (matchedPlayers.length > 0) {
