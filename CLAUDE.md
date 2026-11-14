@@ -14,7 +14,7 @@ Note `package.json` is still named `temp_web` and `README.md` is the stock Vite 
 ```bash
 npm run dev        # Vite dev server — REQUIRED for any live PWHL API work (see API proxy below)
 npm run build      # Vite build to dist/
-npm run lint       # eslint (~220 pre-existing findings in app code — see Linting below)
+npm run lint       # eslint (~69 findings; see Linting below for which are accepted)
 ```
 
 Deploys (Firebase CLI is authenticated; `pwhl-fantasy-mobile-26` is the active project, set via local
@@ -204,11 +204,28 @@ Getting this wrong is what previously made lint unusable: browser globals were a
 Node scripts produced a flood of spurious `'process' is not defined`. `no-unused-vars` is tuned project-wide
 to allow an unused `catch (e)` binding and `_`-prefixed parameters.
 
-`npm run lint` still reports ~220 **genuine** pre-existing findings, so it is not yet a clean gate — judge new
-code on its own diff. The bulk is 172 `no-unused-vars` (mostly unused imports, e.g. leftover `lucide-react`
-icons and the no-longer-needed React 19 default import). Remaining clusters: 13 `react-hooks/exhaustive-deps`,
-11 `no-useless-assignment`, 9 `react-hooks/set-state-in-effect`, and 5 `react-hooks/refs`.
-`react-hooks/rules-of-hooks` is now at **zero — keep it there.**
+`npm run lint` reports ~69 findings, down from 415. These are at **zero and should stay there**, because a
+hit means a real bug: `no-undef` (a `ReferenceError` waiting to happen), `react-hooks/rules-of-hooks`
+(hook-order corruption), `react-hooks/refs` (impure render), and `no-useless-catch`.
+
+The remaining findings are known and triaged, not a backlog to clear blindly:
+
+| Count | Rule | Status |
+|---|---|---|
+| 32 | `no-unused-vars` | standalone `const x = expr` locals; removing them deletes the initialiser, so each needs a look |
+| 13 | `react-hooks/exhaustive-deps` | **not** safe to bulk-fix — most need the function wrapped in `useCallback` first, or adding the dep loops the effect |
+| 11 | `no-useless-assignment` | benign dead initialisers (`let x = {}` overwritten in every branch); "fixing" them removes a defensive default |
+| 8 | `react-hooks/set-state-in-effect` | **accepted** — see below |
+| 3 | `react-refresh/only-export-components` | the three context files export a hook beside the provider; HMR-only, no runtime effect |
+| 2 | `react-hooks/immutability` | a function is referenced in an effect above its `const` declaration; works at runtime, worth reordering |
+
+**The 8 `set-state-in-effect` findings are accepted, not outstanding.** They are all the fetch-in-effect
+pattern — setting a loading flag before an `await`, or calling a function that does. The rule's prescribed
+fix is to stop fetching in effects, which needs a data-fetching library (TanStack Query/SWR) or React 19
+`use()` + Suspense; there is no local edit that satisfies it. Do not scatter `eslint-disable` lines to
+lower the number, and do not "fix" one of these in isolation. If a fetching library is ever adopted, these
+are the call sites to migrate: `App.jsx` (2), `Matchup.jsx` (2), `Players.jsx` (2), `Roster.jsx`,
+`PlayerCardModal.jsx`.
 
 ### Mirroring Firestore data into state
 
@@ -224,23 +241,23 @@ Two things that shape carries with it, both handled in `LeagueHub`: write **ever
 selected-but-unloaded league needs its own loading state, distinct from "nothing selected".
 
 Prefer deriving over mirroring: `Matchup.jsx`'s `seasonWeeks` is a `useMemo` over the season doc, not an
-effect that copies into state. The 10 remaining `set-state-in-effect` findings are mostly the
-fetch-in-effect pattern (setting a loading flag before an `await`), whose real fix is a data-fetching
-library or React 19 `use()` + Suspense rather than a local edit.
+effect that copies into state. Similarly `Players.jsx` derives `effectiveStatViewMode` during render
+instead of correcting `statViewMode` in an effect.
 
 When a component needs to bail out early, the guard must sit **below every hook call**, with the effect
 itself bailing internally. `PlayerCardModal.jsx` is the worked example of this shape.
 
 **`no-undef` in `src/` indicates a real `ReferenceError`, not lint noise.** Treat any occurrence as a bug.
 
-One known case remains: `handleProposeTrade` and `submittingTrade` are referenced by the propose-trade
-modal's JSX in `League.jsx` (lines 1582-1650) but defined nowhere in the file, so rendering that modal
-throws. It looks like an unfinished refactor — the handler and its submitting state still need to be
-written. (Three earlier cases — missing `useMemo`, `updateDoc`, and `generateSeasonProjectionsClient`
-imports — have been fixed.)
+All known cases are fixed: three missing imports (`useMemo`, `updateDoc`,
+`generateSeasonProjectionsClient`), and `League.jsx`'s propose-trade modal, where the JSX referenced a
+non-existent `submittingTrade` (the state is `tradeSubmitting`) and called a `handleProposeTrade` that was
+never written.
 
 ### Scripts
 
-`scripts/importDraftData.js`, `scripts/mergeDuplicates.js`, `scripts/wipeLeagues.js` are one-off maintenance
-scripts. `functions/testDates.js` and `functions/checkRosterDateBug.js` are date-bug investigation scratch,
+`scripts/importDraftData.js` and `scripts/mergeDuplicates.js` are one-off maintenance scripts.
+`scripts/wipeLeagues.js` is an abandoned 12-line stub — it has no logic and carries a stale Firebase config
+from a different project (messagingSenderId `148303038668`, not this project's `502197146749`); it does
+nothing if run, and is a deletion candidate. `functions/testDates.js` and `functions/checkRosterDateBug.js` are date-bug investigation scratch,
 not part of the deployed bundle. `scratch/` is gitignored.
