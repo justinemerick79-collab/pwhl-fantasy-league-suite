@@ -91,6 +91,36 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
     }
   };
 
+  // Submits the trade built in the propose modal. receiverDrops is intentionally
+  // omitted: the receiving manager chooses their own drops when they accept,
+  // via the acceptTradeTarget / receiverDrops flow.
+  const handleProposeTrade = async () => {
+    if (!activeLeagueId || !myTeam || !tradePartnerId) return;
+
+    setTradeSubmitting(true);
+    try {
+      await submitTradeProposal(
+        activeLeagueId,
+        myTeam.id,
+        tradePartnerId,
+        tradeSends,
+        tradeReceives,
+        proposerDrops
+      );
+      alert("Trade proposal sent!");
+      setShowProposeModal(false);
+      setTradePartnerId('');
+      setTradeSends([]);
+      setTradeReceives([]);
+      setProposerDrops([]);
+      await fetchLeagueDetails();
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setTradeSubmitting(false);
+    }
+  };
+
   const fetchLeagueDetails = async () => {
     if (!activeLeagueId) return;
     setLoading(true);
@@ -1580,10 +1610,10 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
               </button>
               <button 
                 onClick={handleProposeTrade}
-                disabled={submittingTrade || !tradePartnerId || (tradeSends.length === 0 && tradeReceives.length === 0)}
+                disabled={tradeSubmitting || !tradePartnerId || (tradeSends.length === 0 && tradeReceives.length === 0)}
                 className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wider rounded-xl disabled:opacity-50 transition-all shadow-sm"
               >
-                {submittingTrade ? 'Submitting...' : 'Send Proposal'}
+                {tradeSubmitting ? 'Submitting...' : 'Send Proposal'}
               </button>
             </div>
           </div>
@@ -1647,7 +1677,7 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
                     alert(err.message);
                   }
                 }}
-                disabled={submittingTrade}
+                disabled={tradeSubmitting}
                 className="px-5 py-2 bg-indigo-600 text-white text-xs font-black uppercase tracking-wider rounded-xl hover:bg-indigo-500 shadow-sm"
               >
                 Confirm Acceptance

@@ -201,20 +201,6 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
     isFallbackUniverse
   ]);
 
-  // Reset the sort whenever the stat view changes. Done during render rather
-  // than in an effect so the new sort is applied in the same pass, with no
-  // intermediate paint using the previous view's sort column.
-  if (statViewMode !== prevStatViewMode) {
-    setPrevStatViewMode(statViewMode);
-    if (statViewMode === 'projections') {
-      setSortColumn('overallRank');
-      setSortDirection('asc');
-    } else {
-      setSortColumn('points');
-      setSortDirection('desc');
-    }
-  }
-
   let isPreseason = true;
   if (leagueData && leagueData.status !== 'pending' && leagueData.status !== 'drafting') {
     const validGames = gamesList.filter(g => g.date_played || g.date);
@@ -228,13 +214,29 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
     }
   }
 
-  useEffect(() => {
-    if (!isPreseason && statViewMode !== 'currentSeason') {
-      setStatViewMode('currentSeason');
-    } else if (isPreseason && statViewMode === 'currentSeason') {
-      setStatViewMode('projections');
+  // Once the season is under way, current-season stats are the only meaningful
+  // view, and the Projections / Last Season toggle is hidden accordingly. Derived
+  // rather than corrected inside an effect, so the very first render is already
+  // consistent instead of rendering the wrong view and then re-rendering.
+  // `statViewMode` remains the user's raw choice; everything downstream reads
+  // this value.
+  const effectiveStatViewMode = isPreseason
+    ? (statViewMode === 'currentSeason' ? 'projections' : statViewMode)
+    : 'currentSeason';
+
+  // Reset the sort whenever the effective stat view changes. Done during render
+  // rather than in an effect so the new sort applies in the same pass, with no
+  // intermediate paint using the previous view's sort column.
+  if (effectiveStatViewMode !== prevStatViewMode) {
+    setPrevStatViewMode(effectiveStatViewMode);
+    if (effectiveStatViewMode === 'projections') {
+      setSortColumn('overallRank');
+      setSortDirection('asc');
+    } else {
+      setSortColumn('points');
+      setSortDirection('desc');
     }
-  }, [isPreseason, statViewMode]);
+  }
 
   if (!activeLeagueId) {
     return (
@@ -330,7 +332,7 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
 
   // Compute fantasy points client-side
   const calculatePointsForMode = (player, statsObj) => {
-    if (statViewMode === 'currentSeason' && isFallbackUniverse) return 0.0;
+    if (effectiveStatViewMode === 'currentSeason' && isFallbackUniverse) return 0.0;
     
     const defaultScoring = {
       skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
@@ -371,9 +373,9 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
 
   const processedPlayers = playersList.map(player => {
     let statsObj = {};
-    if (statViewMode === 'projections') {
+    if (effectiveStatViewMode === 'projections') {
       statsObj = player.projections || {};
-    } else if (statViewMode === 'lastSeason') {
+    } else if (effectiveStatViewMode === 'lastSeason') {
       const pIdStr = String(player.id);
       const match = lastSeasonStats.find(s => String(s.player_id) === pIdStr);
       statsObj = match || {};
@@ -520,13 +522,13 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
         <div className="flex bg-white p-1 rounded-xl w-fit mb-6 border border-slate-200">
           <button 
             onClick={() => setStatViewMode('projections')}
-            className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${statViewMode === 'projections' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-800'}`}
+            className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${effectiveStatViewMode === 'projections' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-800'}`}
           >
             Projections
           </button>
           <button 
             onClick={() => setStatViewMode('lastSeason')}
-            className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${statViewMode === 'lastSeason' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-800'}`}
+            className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${effectiveStatViewMode === 'lastSeason' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:text-slate-800'}`}
           >
             Last Season
           </button>
@@ -721,7 +723,7 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
                                   </span>
                                 )}
                               </div>
-                              {statViewMode === 'projections' && player.overallRank && player.overallRank !== 999 && (
+                              {effectiveStatViewMode === 'projections' && player.overallRank && player.overallRank !== 999 && (
                                 <span className="text-[8px] font-black text-indigo-400 uppercase tracking-wide mt-0.5">
                                   VORP Rank #{player.overallRank}
                                 </span>
