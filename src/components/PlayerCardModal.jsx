@@ -215,7 +215,10 @@ export default function PlayerCardModal({ player: initialPlayer, playerId, onClo
     return () => {
       active = false;
     };
-  }, [pId, activeSeasonId, activeLeagueId]);
+  // initialPlayer is safe to track: every call site passes a state value
+  // (selectedCardPlayer), not an inline object, so its identity is stable
+  // between renders.
+  }, [pId, activeSeasonId, activeLeagueId, currentUser?.uid, getSimulatedDate, initialPlayer]);
 
   // Must stay below every hook: returning above them would change hook
   // order between renders (react-hooks/rules-of-hooks).

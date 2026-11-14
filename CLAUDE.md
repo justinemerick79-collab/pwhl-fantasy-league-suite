@@ -14,7 +14,7 @@ Note `package.json` is still named `temp_web` and `README.md` is the stock Vite 
 ```bash
 npm run dev        # Vite dev server — REQUIRED for any live PWHL API work (see API proxy below)
 npm run build      # Vite build to dist/
-npm run lint       # eslint (~69 findings; see Linting below for which are accepted)
+npm run lint       # eslint (8 findings, all accepted — see Linting below)
 ```
 
 Deploys (Firebase CLI is authenticated; `pwhl-fantasy-mobile-26` is the active project, set via local
@@ -196,6 +196,7 @@ so no custom config or `@apply`.
 | Pattern | Environment |
 |---|---|
 | `src/**/*.{js,jsx}` | browser globals, ESM, JSX, React hooks + refresh rules |
+| `src/contexts/**` | as above, but `react-refresh/only-export-components` off (see below) |
 | `*.js` (root), `scripts/**/*.js` | Node globals, ESM — run under `npx tsx` / `node` |
 | `functions/**/*.js`, `**/*.cjs` | Node globals, **CommonJS** |
 | `dist`, `dist-ssr`, `scratch`, `node_modules` | ignored |
@@ -204,20 +205,11 @@ Getting this wrong is what previously made lint unusable: browser globals were a
 Node scripts produced a flood of spurious `'process' is not defined`. `no-unused-vars` is tuned project-wide
 to allow an unused `catch (e)` binding and `_`-prefixed parameters.
 
-`npm run lint` reports ~69 findings, down from 415. These are at **zero and should stay there**, because a
-hit means a real bug: `no-undef` (a `ReferenceError` waiting to happen), `react-hooks/rules-of-hooks`
-(hook-order corruption), `react-hooks/refs` (impure render), and `no-useless-catch`.
-
-The remaining findings are known and triaged, not a backlog to clear blindly:
-
-| Count | Rule | Status |
-|---|---|---|
-| 32 | `no-unused-vars` | standalone `const x = expr` locals; removing them deletes the initialiser, so each needs a look |
-| 13 | `react-hooks/exhaustive-deps` | **not** safe to bulk-fix — most need the function wrapped in `useCallback` first, or adding the dep loops the effect |
-| 11 | `no-useless-assignment` | benign dead initialisers (`let x = {}` overwritten in every branch); "fixing" them removes a defensive default |
-| 8 | `react-hooks/set-state-in-effect` | **accepted** — see below |
-| 3 | `react-refresh/only-export-components` | the three context files export a hook beside the provider; HMR-only, no runtime effect |
-| 2 | `react-hooks/immutability` | a function is referenced in an effect above its `const` declaration; works at runtime, worth reordering |
+**`npm run lint` reports 8 findings, down from 415, and all 8 are accepted (below). Treat lint as a clean
+gate: any new finding is yours.** Every other rule is at zero, and several mean a real bug if they fire —
+`no-undef` (a `ReferenceError` waiting to happen), `react-hooks/rules-of-hooks` (hook-order corruption),
+`react-hooks/refs` (impure render), `react-hooks/immutability` (use before declaration),
+`react-hooks/exhaustive-deps` (stale closure).
 
 **The 8 `set-state-in-effect` findings are accepted, not outstanding.** They are all the fetch-in-effect
 pattern — setting a loading flag before an `await`, or calling a function that does. The rule's prescribed
@@ -226,6 +218,30 @@ fix is to stop fetching in effects, which needs a data-fetching library (TanStac
 lower the number, and do not "fix" one of these in isolation. If a fetching library is ever adopted, these
 are the call sites to migrate: `App.jsx` (2), `Matchup.jsx` (2), `Players.jsx` (2), `Roster.jsx`,
 `PlayerCardModal.jsx`.
+
+`react-refresh/only-export-components` is switched off for `src/contexts/**`. Those files pair a provider
+component with its consumer hook, which is the standard context idiom; the rule only affects Fast Refresh
+ergonomics in dev. Satisfying it properly would mean splitting each context into three files (context
+object / provider / hook) and updating 14 import sites.
+
+### Keeping exhaustive-deps at zero
+
+Effects that call a function defined in the component body need that function wrapped in `useCallback`,
+otherwise listing it as a dep re-runs the effect every render. `App.jsx`, `DraftRoom.jsx`, `League.jsx` and
+`Players.jsx` all follow this shape now.
+
+Two things that bit during that work, worth repeating:
+
+- **Let the rule report the closure set.** Wrap a new callback with `[]` first and read what the rule says
+  is missing, rather than inferring it. That caught `getTopAvailablePlayer` reading `activeSeasonId`, which
+  its own comment implied it did not.
+- **Order matters once a function becomes a `useCallback`.** A `const` cannot be referenced above its
+  declaration, so `handleSetActiveLeague` had to move above `fetchUserLeagues`. A hoisted `function`
+  declaration hides this until you convert it.
+
+Before adding a dep, check it cannot loop: either the effect never writes that value, or a guard stops the
+second pass. `Matchup.jsx`'s date-sync effect depends on `selectedMatchupDate`, which it sets — the
+`lastSimDateStrRef` / `lastLeagueIdRef` guards are what make that safe, so do not remove them.
 
 ### Mirroring Firestore data into state
 

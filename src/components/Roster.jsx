@@ -332,7 +332,11 @@ export default function Roster({ activeLeagueId }) {
     }
     
     loadDynamicPlayersAndStats();
-  }, [activeLeagueId, activeSeasonId, leagueData, selectedDateStr, myTeam?.id, playersList, pwhlTeams, gamesList, seasonsLoading, seasonDataLoading]);
+  // myTeam rather than myTeam?.id: the effect also branches on the object
+  // itself. It is set by the league-loading effect above, never here, so
+  // tracking its identity cannot loop.
+  }, [activeLeagueId, activeSeasonId, leagueData, selectedDateStr, myTeam, playersList, pwhlTeams,
+      gamesList, seasonsLoading, seasonDataLoading, getSimulatedDate, seasons]);
 
   if (!activeLeagueId) {
     return (

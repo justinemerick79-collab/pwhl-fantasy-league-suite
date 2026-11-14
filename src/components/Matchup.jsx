@@ -283,7 +283,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     } else {
       lastWeekRef.current = resolvedCurrentWeek;
     }
-  }, [activeLeagueId, leagueData, getSimulatedDate, seasonWeeks, seasonBounds]);
+  }, [activeLeagueId, leagueData, getSimulatedDate, seasonWeeks, seasonBounds,
+      selectedMatchupDate, resolvedCurrentWeek]);
 
   // Daily lineups scoring state
   const [homeLineupsState, setHomeLineupsState] = useState({});
@@ -473,7 +474,10 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     };
 
     loadMatchupData();
-  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam?.id, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading]);
+  // myTeam (not myTeam?.id): the effect passes the whole object to
+  // calcTeamScore. It is a useMemo, not state, and nothing here writes it,
+  // so tracking its identity cannot loop.
+  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading]);
 
   // Matchup Result Popup trigger (Listens in real-time to the completed week's matchup)
   useEffect(() => {
