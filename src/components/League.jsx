@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback} from 'react';
 import { 
   Trophy, Shield, Settings, Zap, Trash2, Lock, Clock, ArrowRightLeft, Send, X, AlertCircle, Plus
 } from 'lucide-react';
@@ -121,7 +121,7 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
     }
   };
 
-  const fetchLeagueDetails = async () => {
+  const fetchLeagueDetails = useCallback(async () => {
     if (!activeLeagueId) return;
     setLoading(true);
     try {
@@ -209,11 +209,11 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeLeagueId, currentUser]);
 
   useEffect(() => {
     fetchLeagueDetails();
-  }, [activeLeagueId, currentUser]);
+  }, [activeLeagueId, currentUser, fetchLeagueDetails]);
 
   if (!activeLeagueId) {
     return (

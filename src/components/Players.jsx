@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback} from 'react';
 import { 
   Shield, Search, UserPlus, Clock, Lock, AlertTriangle, ArrowRightLeft
 } from 'lucide-react';
@@ -92,7 +92,7 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
     });
   }, [activeLeagueId]);
 
-  const fetchScoutingData = async () => {
+  const fetchScoutingData = useCallback(async () => {
     if (!activeLeagueId || !currentUser || !resolvedSeasonId) return;
     setLoading(true);
     try {
@@ -183,7 +183,15 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [
+    activeLeagueId,
+    activeSeasonId,
+    currentUser,
+    getSimulatedDate,
+    isFallbackUniverse,
+    resolvedSeasonId,
+    seasons
+  ]);
 
   useEffect(() => {
     fetchScoutingData();
@@ -196,7 +204,8 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
     simulationState.testModeActive, 
     simulationState.current_simulated_date, 
     resolvedSeasonId, 
-    isFallbackUniverse
+    isFallbackUniverse,
+    fetchScoutingData
   ]);
 
   let isPreseason = true;

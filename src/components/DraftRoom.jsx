@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback} from 'react';
 import { Timer, Zap } from 'lucide-react';
 import { db } from '../firebase.js';
 import { 
@@ -235,7 +235,8 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     return () => clearInterval(interval);
   }, [leagueData, draftState, getSimulatedDate, activeLeagueId]);
 
-  const getTopAvailablePlayer = (pickerUid) => {
+  // Reads only refs, so it needs no deps and stays stable across renders.
+  const getTopAvailablePlayer = useCallback((pickerUid) => {
     if (!pickerUid) return null;
     const currentDraftState = draftStateRef.current;
     const currentAllPlayers = allPlayersRef.current;
@@ -348,9 +349,9 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     });
 
     return available[0];
-  };
+  }, [activeSeasonId]);
 
-  async function triggerAutoPickForUser(pickerUid, timedOut = false) {
+  const triggerAutoPickForUser = useCallback(async (pickerUid, timedOut = false) => {
     if (isSubmittingRef.current) return;
     const topPlayer = getTopAvailablePlayer(pickerUid);
     if (!topPlayer) return;
@@ -365,7 +366,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     } finally {
       setIsSubmitting(false);
     }
-  }
+  }, [activeLeagueId, getTopAvailablePlayer]);
 
   // 4. Timer Loop & Auto-pick triggers
   // Uses Date.now() to match the deadline's real-clock basis (set by leagueService via Date.now() + 60000).
@@ -397,7 +398,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
-  }, [draftState]);
+  }, [draftState, triggerAutoPickForUser]);
 
   // Helper to compile drafted player IDs
   const getDraftedPlayerIds = () => {
