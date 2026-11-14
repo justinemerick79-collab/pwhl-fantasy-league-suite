@@ -9,7 +9,6 @@ import { fetchAggregatedStats } from '../services/statsEngine';
 
 export default function PlayerCardModal({ player: initialPlayer, playerId, onClose, onProposeTrade }) {
   const pId = playerId || initialPlayer?.id || initialPlayer?.player_id;
-  if (!pId) return null;
 
   const { activeSeasonId, activeLeagueId, getSimulatedDate } = useTimeTravel();
   const { currentUser } = useAuth();
@@ -41,6 +40,10 @@ export default function PlayerCardModal({ player: initialPlayer, playerId, onClo
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    // Nothing to load without a player id. The null render is handled
+    // after the hooks, so this effect must still be registered.
+    if (!pId) return;
+
     let active = true;
 
     // Reset or initialize state when playerId/initialPlayer changes
@@ -213,6 +216,10 @@ export default function PlayerCardModal({ player: initialPlayer, playerId, onClo
       active = false;
     };
   }, [pId, activeSeasonId, activeLeagueId]);
+
+  // Must stay below every hook: returning above them would change hook
+  // order between renders (react-hooks/rules-of-hooks).
+  if (!pId) return null;
 
   if (loading) {
     return (
