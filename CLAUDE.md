@@ -14,7 +14,7 @@ Note `package.json` is still named `temp_web` and `README.md` is the stock Vite 
 ```bash
 npm run dev        # Vite dev server — REQUIRED for any live PWHL API work (see API proxy below)
 npm run build      # Vite build to dist/
-npm run lint       # eslint (~221 pre-existing findings in app code — see Linting below)
+npm run lint       # eslint (~220 pre-existing findings in app code — see Linting below)
 ```
 
 Deploys (Firebase CLI is authenticated; `pwhl-fantasy-mobile-26` is the active project, set via local
@@ -204,21 +204,24 @@ Getting this wrong is what previously made lint unusable: browser globals were a
 Node scripts produced a flood of spurious `'process' is not defined`. `no-unused-vars` is tuned project-wide
 to allow an unused `catch (e)` binding and `_`-prefixed parameters.
 
-`npm run lint` still reports ~221 **genuine** pre-existing findings, so it is not yet a clean gate — judge new
+`npm run lint` still reports ~220 **genuine** pre-existing findings, so it is not yet a clean gate — judge new
 code on its own diff. The bulk is 172 `no-unused-vars` (mostly unused imports, e.g. leftover `lucide-react`
 icons and the no-longer-needed React 19 default import). Remaining clusters: 13 `react-hooks/exhaustive-deps`,
-11 `no-useless-assignment`, 10 `react-hooks/set-state-in-effect`, and 5 `react-hooks/refs`.
+11 `no-useless-assignment`, 9 `react-hooks/set-state-in-effect`, and 5 `react-hooks/refs`.
 `react-hooks/rules-of-hooks` is now at **zero — keep it there.**
 
 ### Mirroring Firestore data into state
 
 Several screens have the same latent bug shape: state fetched for league A is still in state when
 `activeLeagueId` has already become B, so the UI serves the previous league's data until the new read
-lands — and if the new read finds nothing, it serves it indefinitely. `TimeTravelContext` stamps its
-snapshot with the league it came from and derives the exposed value, discarding anything that does not
+lands — and if the new read finds nothing, it serves it indefinitely. `TimeTravelContext` and `LeagueHub` both stamp the
+fetched data with the league it came from and derive the exposed values, discarding anything that does not
 match the active league; copy that shape rather than resetting state in a guard clause.
-**`LeagueHub.jsx` still has this bug** (`setActiveLeague`/`setMyTeam` at lines 168/176 are conditional, so
-a league where the user has no team keeps showing the previous league's team).
+
+Two things that shape carries with it, both handled in `LeagueHub`: write **every** field on each fetch
+(assigning only when found is what let a stale value persist indefinitely), and stamp the attempt in the
+`catch` too — otherwise a derived "still loading" flag never clears. Clearing stale data also means a
+selected-but-unloaded league needs its own loading state, distinct from "nothing selected".
 
 Prefer deriving over mirroring: `Matchup.jsx`'s `seasonWeeks` is a `useMemo` over the season doc, not an
 effect that copies into state. The 10 remaining `set-state-in-effect` findings are mostly the

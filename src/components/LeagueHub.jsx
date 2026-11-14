@@ -24,6 +24,8 @@ const GENERIC_TEAM_NAMES = [
   "Great Lakes Royals", "East Coast Rush", "North Star Pride", "Wave Athletic Club"
 ];
 
+const EMPTY_LEAGUE_DETAIL = { leagueId: null, league: null, teams: [], myTeam: null };
+
 export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const { currentUser } = useAuth();
   const { activeSeasonId } = useTimeTravel();
@@ -39,7 +41,18 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const [myLeagues, setMyLeagues] = useState([]);
   const [userMap, setUserMap] = useState({});
   const [loading, setLoading] = useState(true);
-  const [activeLeague, setActiveLeague] = useState(null);
+  // League detail is stamped with the league it was fetched for. The derived
+  // values below discard detail belonging to a previously active league, so
+  // switching leagues can never surface the old league's data — including the
+  // case where the new league has no team for this user.
+  const [leagueDetail, setLeagueDetail] = useState(EMPTY_LEAGUE_DETAIL);
+  const detailIsCurrent = leagueDetail.leagueId === activeLeagueId;
+  const activeLeague = detailIsCurrent ? leagueDetail.league : null;
+  const activeLeagueTeams = detailIsCurrent ? leagueDetail.teams : EMPTY_LEAGUE_DETAIL.teams;
+  const myTeam = detailIsCurrent ? leagueDetail.myTeam : null;
+  // A league is selected but its detail has not arrived yet. Distinguishes this
+  // from "no league selected", which renders the launcher.
+  const leagueDetailLoading = Boolean(activeLeagueId && currentUser && !detailIsCurrent);
 
   // Season data from DataContext — must be after activeLeague declaration
   const seasonId = activeLeague?.season_id 
@@ -70,8 +83,6 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   } = activeSeasonData;
 
   const seasonDataLoading = loadingStates[seasonId] === true;
-  const [activeLeagueTeams, setActiveLeagueTeams] = useState([]);
-  const [myTeam, setMyTeam] = useState(null);
 
   // Form States - Create
   const [createName, setCreateName] = useState('');
@@ -151,35 +162,43 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
 
   // Load active league details, teams, and current user team in parallel
   useEffect(() => {
-    if (!activeLeagueId || !currentUser) {
-      setActiveLeague(null);
-      setActiveLeagueTeams([]);
-      setMyTeam(null);
-      return;
-    }
+    if (!activeLeagueId || !currentUser) return;
+
+    let cancelled = false;
     async function fetchActiveLeagueDetails() {
       try {
         const [lSnap, tSnap] = await Promise.all([
           getDoc(doc(db, 'fantasy_leagues', activeLeagueId)),
           getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/teams`))
         ]);
-
-        if (lSnap.exists()) {
-          setActiveLeague({ id: lSnap.id, ...lSnap.data() });
-        }
+        if (cancelled) return;
 
         const teams = tSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setActiveLeagueTeams(teams);
 
-        const userTeam = teams.find(t => t.ownerId === currentUser.uid);
-        if (userTeam) {
-          setMyTeam(userTeam);
-        }
+        // Every field is written unconditionally and stamped with the league it
+        // describes. Previously `league` and `myTeam` were only assigned when
+        // found, so a league with no matching doc or no team for this user kept
+        // showing the previously selected league's values.
+        setLeagueDetail({
+          leagueId: activeLeagueId,
+          league: lSnap.exists() ? { id: lSnap.id, ...lSnap.data() } : null,
+          teams,
+          myTeam: teams.find(t => t.ownerId === currentUser.uid) || null
+        });
       } catch (err) {
         console.error("Error loading active league detail:", err);
+        // Still stamp the attempt, otherwise leagueDetailLoading stays true and
+        // the loading shell renders forever instead of falling back to the launcher.
+        if (!cancelled) {
+          setLeagueDetail({ leagueId: activeLeagueId, league: null, teams: [], myTeam: null });
+        }
       }
     }
     fetchActiveLeagueDetails();
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeLeagueId, currentUser, transactionLoading]);
 
   // Handlers
@@ -336,6 +355,17 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   const freeAgents = playersPool.filter(p => !allOwnedPlayerIds.has(p.id))
     .filter(p => p.name.toLowerCase().includes(marketSearch.toLowerCase()))
     .filter(p => marketFilter === 'ALL' || p.pos === marketFilter);
+
+  // Detail for the newly selected league is still in flight. Without this the
+  // launcher would flash between leagues, since activeLeague is intentionally
+  // null until the detail for the active league lands.
+  if (leagueDetailLoading) {
+    return (
+      <div className="min-h-screen bg-[#0f0f13] text-gray-100 font-sans antialiased pb-24">
+        <div className="py-20 text-center text-gray-500 text-xs font-semibold animate-pulse">Loading league...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0f0f13] text-gray-100 font-sans antialiased pb-24">
