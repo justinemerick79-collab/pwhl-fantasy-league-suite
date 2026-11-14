@@ -34,6 +34,17 @@ export default defineConfig([
     rules: { 'no-unused-vars': noUnusedVars },
   },
 
+  // Context files pair a provider component with its consumer hook in one file —
+  // the standard React context idiom. react-refresh/only-export-components objects
+  // to the non-component export, but it only affects Fast Refresh ergonomics in dev
+  // and has no runtime or correctness impact. Splitting each context into three
+  // files (context object / provider / hook) to satisfy it would churn 14 import
+  // sites for a dev-server nicety, so the rule is scoped off here instead.
+  {
+    files: ['src/contexts/**/*.{js,jsx}'],
+    rules: { 'react-refresh/only-export-components': 'off' },
+  },
+
   // Node ESM — root-level test/check scripts, maintenance scripts, and tool configs.
   // These run under `npx tsx` / `node`, not in the browser.
   {
