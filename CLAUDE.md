@@ -73,11 +73,22 @@ Current state when run against the emulator with the repo's own rules:
 | `test-time-machine.js` | **passes** |
 | `verify-test-league.js` | **passes** (all 4 assertions) |
 | `test-daily-lineups.js` | **passes** |
+| `test-matchup-resolution.js` | **passes** |
 | `test-bot-draft.js` | reaches assertions; fails on a stale expectation (below) |
-| `test-matchup-resolution.js` | reaches assertions; fails `Expected matchup status to be completed, got pending` |
 
-`test-matchup-resolution.js` is a real signal, not a setup failure: the weekly settlement path leaves the
-matchup `pending`.
+### Week boundaries come from the season document
+
+The game loop resolves weeks from `pwhl_seasons/{season_id}.weeks` (`getWeekBounds` in `functions/index.js`).
+When that array is missing it falls back to a **hardcoded epoch**, `baseTime = 2024-01-01`, and derives weeks
+as fixed 7-day blocks from there. Production never hits this because `generateWeeksList()` populates `weeks`,
+but any league whose season lacks the array silently gets 2024-based week maths — matchups then settle on the
+wrong dates, or never settle at all, with no error.
+
+That is what broke `test-matchup-resolution.js`: it never seeded the season, so Week 1 resolved to
+2024-01-01 → 2024-01-08, placing its 2024-01-02 warp *inside* Week 1 instead of past it. **Any fixture that
+exercises the game loop must seed `pwhl_seasons/{id}.weeks`.** The hardcoded fallback is worth replacing with
+a loud failure; it is the same shape of latent bug as the season-name filter that once lived in
+`syncDailyData`.
 
 ### The daily_lineups date comparison
 

@@ -121,6 +121,28 @@ async function runTest() {
     });
     createdDocs.push(leagueRef);
 
+    // 2b. Seed the season's week boundaries.
+    //
+    // The game loop resolves weeks from pwhl_seasons/{season_id}.weeks. Without
+    // that document it falls back to a hardcoded epoch (functions/index.js:
+    // baseTime = 2024-01-01), which would place Week 1 at 2024-01-01 -> 2024-01-08
+    // and leave this test's 2024-01-02 warp *inside* Week 1 — so nothing would
+    // ever settle. Production populates this via generateWeeksList(); the fixture
+    // has to do the same.
+    const seasonRef = doc(db, "pwhl_seasons", "1");
+    await setDoc(seasonRef, {
+      season_id: "1",
+      season_name: "Game Loop Test Season",
+      start_date: "2023-12-25",
+      end_date: "2024-02-05",
+      weeks: [
+        { week: 1, start: "2023-12-25T00:00:00-08:00", end: "2024-01-01T00:00:00-08:00" },
+        { week: 2, start: "2024-01-01T00:00:00-08:00", end: "2024-01-08T00:00:00-08:00" },
+        { week: 3, start: "2024-01-08T00:00:00-08:00", end: "2024-01-15T00:00:00-08:00" }
+      ]
+    });
+    createdDocs.push(seasonRef);
+
     // 3. Create Admin team sheet
     const adminTeamRef = doc(db, `fantasy_leagues/${leagueId}/teams`, adminTeamId);
     await setDoc(adminTeamRef, {
