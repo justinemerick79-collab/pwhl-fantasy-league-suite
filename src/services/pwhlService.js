@@ -51,7 +51,21 @@ async function fetchFromApi(params) {
   if (!response.ok) throw new Error(`API fetch failed: ${response.statusText}`);
   
   const text = await response.text();
-  
+
+  // BASE_URL is relative and reaches the PWHL feed through the Vite dev-server
+  // proxy (see vite.config.js). Firebase Hosting rewrites ** -> /index.html and
+  // has no /api rule, so on the deployed site this request is answered with the
+  // SPA's own HTML. Detect that here and say so, instead of failing further down
+  // with an opaque "Unexpected token '<'" from JSON.parse.
+  if (text.trimStart().startsWith('<')) {
+    throw new Error(
+      "PWHL feed unavailable: this request was answered with the app's own HTML rather than feed data. " +
+      "The feed is reachable only through the Vite dev-server proxy, so syncing from the deployed site " +
+      "is not supported — run the app locally with `npm run dev` to sync. Scheduled ingestion on the " +
+      "deployed site runs server-side via the syncDailyData Cloud Function."
+    );
+  }
+
   let jsonString = text;
   // Handle HockeyTech JSONP callback wrappers if present
   if (text.startsWith('typeof ') || text.indexOf('(') > -1) {
