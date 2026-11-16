@@ -14,7 +14,7 @@ Note `package.json` is still named `temp_web` and `README.md` is the stock Vite 
 ```bash
 npm run dev        # Vite dev server — REQUIRED for any live PWHL API work (see API proxy below)
 npm run build      # Vite build to dist/
-npm run lint       # eslint (8 findings, all accepted — see Linting below)
+npm run lint       # eslint (9 findings, all accepted — see Linting below)
 ```
 
 Deploys (Firebase CLI is authenticated; `pwhl-fantasy-mobile-26` is the active project, set via local
@@ -205,19 +205,23 @@ Getting this wrong is what previously made lint unusable: browser globals were a
 Node scripts produced a flood of spurious `'process' is not defined`. `no-unused-vars` is tuned project-wide
 to allow an unused `catch (e)` binding and `_`-prefixed parameters.
 
-**`npm run lint` reports 8 findings, down from 415, and all 8 are accepted (below). Treat lint as a clean
+**`npm run lint` reports 9 findings, down from 415, and all 9 are accepted (below). Treat lint as a clean
 gate: any new finding is yours.** Every other rule is at zero, and several mean a real bug if they fire —
 `no-undef` (a `ReferenceError` waiting to happen), `react-hooks/rules-of-hooks` (hook-order corruption),
 `react-hooks/refs` (impure render), `react-hooks/immutability` (use before declaration),
 `react-hooks/exhaustive-deps` (stale closure).
 
-**The 8 `set-state-in-effect` findings are accepted, not outstanding.** They are all the fetch-in-effect
+**The 9 `set-state-in-effect` findings are accepted, not outstanding.** They are all the fetch-in-effect
 pattern — setting a loading flag before an `await`, or calling a function that does. The rule's prescribed
 fix is to stop fetching in effects, which needs a data-fetching library (TanStack Query/SWR) or React 19
 `use()` + Suspense; there is no local edit that satisfies it. Do not scatter `eslint-disable` lines to
 lower the number, and do not "fix" one of these in isolation. If a fetching library is ever adopted, these
-are the call sites to migrate: `App.jsx` (2), `Matchup.jsx` (2), `Players.jsx` (2), `Roster.jsx`,
+are the call sites to migrate: `App.jsx` (2), `Matchup.jsx` (3), `Players.jsx` (2), `Roster.jsx`,
 `PlayerCardModal.jsx`.
+
+The count went 8 -> 9 when Matchup's `matchupsRefreshing` flag was added: it is the same loading-flag-before-
+an-await shape, so it joins the accepted group rather than counting as a regression. Adding to this group is
+a deliberate decision each time, not a default — anything else new is a real finding.
 
 `react-refresh/only-export-components` is switched off for `src/contexts/**`. Those files pair a provider
 component with its consumer hook, which is the standard context idiom; the rule only affects Fast Refresh

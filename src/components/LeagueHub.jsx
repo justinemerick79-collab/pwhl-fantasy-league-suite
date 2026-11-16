@@ -38,10 +38,6 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   
   // Database States
   const [myLeagues, setMyLeagues] = useState([]);
-  // Value intentionally unread: nothing renders userMap today. The block that
-  // builds it does one Firestore read per league member, so it is a candidate
-  // for removal along with this state.
-  const [, setUserMap] = useState({});
   const [loading, setLoading] = useState(true);
   // League detail is stamped with the league it was fetched for. The derived
   // values below discard detail belonging to a previously active league, so
@@ -122,7 +118,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
     });
   }, [playersList, pwhlTeams]);
 
-  // Load user leagues list and members user maps (parallelized)
+  // Load the user's league list.
   useEffect(() => {
     if (!currentUser) return;
     async function fetchLeagues() {
@@ -132,23 +128,6 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
         const snap = await getDocs(q);
         const leagues = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         setMyLeagues(leagues);
-
-        const uids = new Set();
-        leagues.forEach(l => l.members.forEach(m => uids.add(m)));
-        if (uids.size > 0) {
-          const uidArray = Array.from(uids);
-          const userSnaps = await Promise.all(uidArray.map(uid => getDoc(doc(db, 'users', uid))));
-          const map = {};
-          userSnaps.forEach((userSnap, i) => {
-            const uid = uidArray[i];
-            if (userSnap.exists()) {
-              map[uid] = userSnap.data().email || userSnap.data().username || uid;
-            } else {
-              map[uid] = uid.substring(0, 6);
-            }
-          });
-          setUserMap(map);
-        }
       } catch (err) {
         console.error("Error fetching leagues:", err);
       } finally {

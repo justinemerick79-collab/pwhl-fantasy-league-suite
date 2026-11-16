@@ -118,6 +118,10 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const seasonDataLoading = loadingStates[seasonId] === true;
   const [teams, setTeams] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Scoped to the matchup/stats fetch below. `loading` above gates the whole
+  // screen on first load; this one only signals a refresh in place, so moving
+  // between weeks and dates does not blank out the scoreboard.
+  const [matchupsRefreshing, setMatchupsRefreshing] = useState(false);
   const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0, seconds: 0, totalMs: 0 });
   const [isDraftDetailsOpen, setIsDraftDetailsOpen] = useState(false);
   const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
@@ -350,6 +354,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   useEffect(() => {
     if (!activeLeagueId || !leagueData || seasonsLoading || seasonDataLoading) return;
     
+    setMatchupsRefreshing(true);
     const loadMatchupData = async () => {
       try {
         const matchupsRef = collection(db, `fantasy_leagues/${activeLeagueId}/matchups`);
@@ -470,6 +475,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
       } catch (err) {
         console.error("Error loading matchup data / points:", err);
+      } finally {
+        setMatchupsRefreshing(false);
       }
     };
 
@@ -733,6 +740,12 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           </h1>
           <p className="text-xs text-slate-500 font-medium mt-0.5">{weekDateRange}</p>
         </div>
+        {matchupsRefreshing && (
+          <div className="flex items-center gap-2 text-slate-400 animate-fade-in">
+            <div className="w-3 h-3 rounded-full border-2 border-slate-300 border-t-slate-500 animate-spin"></div>
+            <span className="text-[10px] font-black uppercase tracking-wider">Updating</span>
+          </div>
+        )}
       </div>
 
       {/* ── 1. DRAFT STATUS BANNER/CARD AT THE TOP (Pre-Draft State) ── */}
