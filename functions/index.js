@@ -1431,32 +1431,54 @@ async function handleDraftStateChange(docSnap) {
   }
 }
 
-// 7. Subscribe to collection groups in real-time
-db.collectionGroup("draft").onSnapshot((snapshot) => {
-  console.log(`[DEBUG] draft collectionGroup snapshot triggered. Doc count: ${snapshot.size}`);
-  snapshot.docChanges().forEach((change) => {
-    if (change.type === "added" || change.type === "modified") {
-      handleDraftStateChange(change.doc).catch(err => {
-        console.error("[Draft Listener Error] draft collection change failed:", err);
-      });
-    }
-  });
-}, (err) => {
-  console.error("[Draft Listener Error] draft collection group subscription failed:", err);
-});
+// 7. Draft engine triggers.
+//
+// These replace two module-scope collectionGroup().onSnapshot() listeners. A
+// listener opened at module scope is unreliable here: it attaches to whichever
+// instance happens to be warm — production logs showed `deactivateSimulation`,
+// a callable unrelated to drafting, holding it and reading every draft document
+// — and 2nd Gen throttles CPU between requests and scales to zero, so there may
+// be no instance holding it when a pick needs processing. Every warm instance
+// also opened its own copy, and the processingDrafts guard is per-instance.
+//
+// An event trigger runs on the write itself, so delivery no longer depends on
+// an instance happening to be alive. Duplicate deliveries are safe: the handler
+// re-reads inside a transaction and returns unless status is still "active" and
+// the picker is unchanged.
+//
+// The former draft_state listener is not reproduced. Nothing in the codebase
+// reads or writes that collection, and production logs showed it at Doc count: 0.
+const draftTriggerOptions = {
+  region: "us-central1",
+  memory: "512MiB",
+  timeoutSeconds: 540,
+};
 
-db.collectionGroup("draft_state").onSnapshot((snapshot) => {
-  console.log(`[DEBUG] draft_state collectionGroup snapshot triggered. Doc count: ${snapshot.size}`);
-  snapshot.docChanges().forEach((change) => {
-    if (change.type === "added" || change.type === "modified") {
-      handleDraftStateChange(change.doc).catch(err => {
-        console.error("[Draft Listener Error] draft_state collection change failed:", err);
-      });
-    }
-  });
-}, (err) => {
-  console.error("[Draft Listener Error] draft_state collection group subscription failed:", err);
-});
+async function onDraftWritten(event) {
+  const after = event.data?.after;
+  // Deletions are ignored, matching the previous listener, which acted only on
+  // "added" and "modified" changes.
+  if (!after || !after.exists) return;
+  try {
+    await handleDraftStateChange(after);
+  } catch (err) {
+    console.error("[Draft Engine] draft write handler failed:", err);
+  }
+}
+
+exports.onDraftStateWritten = onDocumentWritten(
+  { ...draftTriggerOptions, document: "fantasy_leagues/{leagueId}/draft/{docId}" },
+  onDraftWritten
+);
+
+// Legacy path. `fantasy_leagues` is current, but the old collectionGroup
+// listener matched any parent and handleDraftStateChange still resolves the
+// parent collection from the document path, so this preserves that reach.
+// Safe to delete once no drafts remain under `leagues/`.
+exports.onLegacyDraftStateWritten = onDocumentWritten(
+  { ...draftTriggerOptions, document: "leagues/{leagueId}/draft/{docId}" },
+  onDraftWritten
+);
 
 /**
  * Computes fantasy points for all players from a single game summary and aggregates them into dayMap.
