@@ -2046,8 +2046,6 @@ exports.onSimulationStateWritten = onDocumentWritten({
   for (const sId of activeSeasonIds) {
     await crunchStatsAndFantasyPoints(sId, newDate);
   }
-  const baseTime = new Date("2024-01-01T03:00:00-08:00").getTime();
-  const weekMs = 7 * 24 * 60 * 60 * 1000;
 
   const defaultScoring = {
     skaters: {
@@ -2087,6 +2085,19 @@ exports.onSimulationStateWritten = onDocumentWritten({
       console.error(`Error loading weeks for season ${seasonId}:`, err);
     }
 
+    // Week boundaries are data, not something to guess at. This previously fell
+    // back to a hardcoded 2024-01-01 epoch with fixed 7-day blocks, so a season
+    // missing its week map produced confidently wrong dates — matchups settling
+    // on the wrong days, or never settling — with nothing logged. Skip the
+    // league loudly instead; generateWeeksList() is what populates this.
+    if (!Array.isArray(weeks) || weeks.length === 0) {
+      console.error(
+        `[Game Loop] League ${leagueId} skipped: season ${seasonId} has no \`weeks\` array ` +
+        `(pwhl_seasons/${seasonId}). Run the season sync so generateWeeksList() populates it.`
+      );
+      continue;
+    }
+
     const getWeekBounds = (weekNum) => {
       const wk = weeks.find(w => w.week === weekNum);
       if (wk) {
@@ -2096,16 +2107,16 @@ exports.onSimulationStateWritten = onDocumentWritten({
           isOffWeek: !!wk.isOffWeek
         };
       }
-      const ws = baseTime + (weekNum - 1) * weekMs;
-      const we = baseTime + weekNum * weekMs;
-      return {
-        start: new Date(ws),
-        end: new Date(we),
-        isOffWeek: false
-      };
+      // Unknown week: report it rather than inventing boundaries.
+      console.error(
+        `[Game Loop] League ${leagueId}: season ${seasonId} has no entry for week ${weekNum}. ` +
+        `Known weeks: ${weeks.map(x => x.week).join(", ") || "none"}.`
+      );
+      return null;
     };
 
     let bounds = getWeekBounds(currentWeek);
+    if (!bounds) continue;
 
     // A. Finalize past weeks sequentially
     while (newDate.getTime() >= bounds.end.getTime()) {
@@ -2233,11 +2244,14 @@ exports.onSimulationStateWritten = onDocumentWritten({
       });
 
       bounds = getWeekBounds(currentWeek);
+      // Past the last defined week — stop settling rather than guessing further.
+      if (!bounds) break;
     }
 
     // B. Calculate active week score up to cutoff
     const w = currentWeek;
     const liveBounds = getWeekBounds(w);
+    if (!liveBounds) continue;
 
     if (liveBounds.isOffWeek) {
       console.log(`[Game Loop] Current Week ${w} is an Off Week for league ${leagueId}. No live scores to update.`);
