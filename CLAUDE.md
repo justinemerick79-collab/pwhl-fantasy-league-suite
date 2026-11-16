@@ -15,6 +15,8 @@ Note `package.json` is still named `temp_web` and `README.md` is the stock Vite 
 npm run dev        # Vite dev server — REQUIRED for any live PWHL API work (see API proxy below)
 npm run build      # Vite build to dist/
 npm run lint       # eslint (8 findings, all accepted — see Linting below)
+
+node check-pwhl-feed.js   # upstream PWHL feed health check — read-only, no emulator needed
 ```
 
 Deploys (Firebase CLI is authenticated; `pwhl-fantasy-mobile-26` is the active project, set via local
@@ -229,6 +231,24 @@ the server-side counterpart to `getSimulatedDate()`.
 - **Server** (`functions/livePoller.js`): uses the absolute `https://lscluster.hockeytech.com/feed/index.php` and works anywhere.
 
 The feed sometimes wraps responses in a JSONP callback; `fetchFromApi` strips it with a regex before parsing.
+
+#### Checking the feed is still intact
+
+`node check-pwhl-feed.js` hits every endpoint this project consumes (`seasons`, `schedule`,
+`teamsbyseason`, `roster`, `statviewtype` for both skaters and goalies, and `gc/gamesummary`) and asserts the
+response shapes the ingestion actually depends on. It reads nothing from Firestore and needs no emulator, so
+it is safe to run any time; it exits non-zero on failure, so it also works as a pre-deploy gate.
+
+The point is the `gamesummary` check: it confirms `home_team_lineup.players[]`, `goalies.home[]`, the
+`goals[]` array and the per-skater scoring fields are all still present. Those are what `statsEngine`
+aggregates fantasy points from, and an upstream rename there would surface as quietly missing points rather
+than an error.
+
+**Season selection matters when reading the output.** Roster, stats and summaries only exist once a season is
+under way, so checking them against an upcoming season reports empty data as though the feed were broken. The
+script therefore runs structural checks against the newest season, data checks against the most recent season
+that has *started*, and walks back through seasons until it finds a genuinely completed game for the summary
+check. Empty `statviewtype` results are normal in pre-season and are not treated as failures.
 
 ### Firestore data model
 
