@@ -77,8 +77,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-daily-lineups.js` | **passes** |
 | `test-matchup-resolution.js` | **passes** |
 | `test-bot-draft.js` | **passes** |
+| `test-draft-roster-needs.js` | **passes** |
 
-All five pass.
+All six pass.
 
 ### Week boundaries come from the season document
 
@@ -114,6 +115,38 @@ is defence against a format the app already supports. The security property is u
 
 **Keep comparing dates to dates.** If another rule ever compares a document-id date against a stored
 timestamp, slice it the same way.
+
+### Auto-draft must never stall
+
+Bot picks are chosen in `functions/index.js` (`handleDraftStateChange`) and mirrored in
+`DraftRoom.jsx` (`getTopAvailablePlayer`) for the client-side auto-pick. **Keep the two in step.**
+
+Roster limits were originally only a *veto*: candidates that would breach a position maximum, or leave a
+starter minimum unreachable, were filtered out, and whatever scored highest among the survivors was taken.
+Nothing ever *preferred* a needed position. Late in a draft that veto can reject every single candidate —
+most easily when a position the bot still needs has been drained from the pool — and the engine then
+returned without picking, freezing the draft for every team with that bot on the clock.
+
+Selection now works in tiers, strictest first, and the last tier takes any undrafted player:
+
+1. position maximums respected **and** all starter minimums still reachable
+2. position maximums only
+3. anything undrafted
+
+Within the chosen tier, when `picksRemaining <= totalNeeded` there is no slack left, so the pick is
+restricted to positions still short of their starter minimum — deliberately taking a lower-ranked player to
+keep the roster completable. Falling past tier 1 logs a warning naming the counts and limits.
+
+**A stalled draft is worse than an imperfect roster.** Do not reintroduce a path that returns without
+picking while undrafted players remain.
+
+Position counts come from matching roster ids against `pwhl_players`, where doc ids are
+`<seasonId>_<playerId>` while rosters store the bare player id — so match on `player_id` first. An
+unresolved player used to be silently counted as a forward, skewing the very counts the veto depended on;
+it is now logged.
+
+`test-draft-roster-needs.js` covers both halves: a bot that needs a position no longer in the pool must
+still pick, and a bot with no slack must take a needed position over a far higher-scoring one.
 
 ### Bot draft ranking
 
