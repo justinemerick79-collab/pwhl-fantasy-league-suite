@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Trophy, Users, Calendar, Zap, RotateCw, LogOut, Shield, Activity, 
   ChevronDown, Check, Plus, Ticket, Play, Home, Settings
@@ -226,7 +226,7 @@ function App() {
     } else {
       setIsAdminView(false);
       const tabName = path.slice(1); // strip leading slash
-      const validTabs = ['matchup', 'roster', 'players', 'standings', 'transactions', 'settings', 'manager'];
+      const validTabs = ['matchup', 'roster', 'players', 'standings', 'transactions', 'settings', 'manager', 'draft_room'];
       if (validTabs.includes(tabName)) {
         setCurrentTab(tabName);
       } else {
@@ -316,21 +316,31 @@ function App() {
     updateUrl(isAdminView, currentTab, activeLeagueId);
   }, [isAdminView, currentTab, activeLeagueId, currentUser, updateUrl]);
 
-  // Handle URL path parsing on initial load and when dependencies change
+  // Hold the latest parser in a ref. parsePathAndSetState closes over currentTab,
+  // so depending on it directly re-ran URL parsing on every tab change — which
+  // re-read the URL and overwrote the tab the user had just navigated to. The URL
+  // is only ever parsed in response to the URL changing, or to auth/league
+  // changes, never in response to our own tab state.
+  const parsePathRef = useRef(parsePathAndSetState);
+  useEffect(() => {
+    parsePathRef.current = parsePathAndSetState;
+  }, [parsePathAndSetState]);
+
+  // Handle URL path parsing on initial load and when auth/league context changes
   useEffect(() => {
     if (currentUser) {
-      parsePathAndSetState(window.location.pathname);
+      parsePathRef.current(window.location.pathname);
     }
-  }, [currentUser, activeLeagueId, isAdmin, parsePathAndSetState]);
+  }, [currentUser, activeLeagueId, isAdmin]);
 
   // Listen for browser back/forward buttons (popstate)
   useEffect(() => {
     const handlePopState = () => {
-      parsePathAndSetState(window.location.pathname);
+      parsePathRef.current(window.location.pathname);
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [activeLeagueId, isAdmin, currentTab, parsePathAndSetState]);
+  }, []);
 
   // Sync activeLeagueId to Time Travel Context
   useEffect(() => {
