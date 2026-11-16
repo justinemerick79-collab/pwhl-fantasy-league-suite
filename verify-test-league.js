@@ -13,6 +13,7 @@
  */
 
 import { initializeApp } from "firebase/app";
+import { requireEmulator, createAdminFixtures } from "./test-support.js";
 import { 
   getAuth, 
   connectAuthEmulator, 
@@ -20,16 +21,6 @@ import {
   createUserWithEmailAndPassword, 
   deleteUser 
 } from "firebase/auth";
-import { 
-  getFirestore, 
-  connectFirestoreEmulator, 
-  doc, 
-  getDoc, 
-  getDocs, 
-  collection, 
-  deleteDoc, 
-  setDoc 
-} from "firebase/firestore";
 import { 
   getFunctions, 
   connectFunctionsEmulator, 
@@ -48,22 +39,17 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+
+requireEmulator("verify-test-league.js");
+const { doc, collection, setDoc, getDoc, getDocs, deleteDoc } =
+  createAdminFixtures(firebaseConfig.projectId, "verify-league");
+const db = null; // fixtures are addressed by path through the shim above
 const functions = getFunctions(app);
 
 // Connect to Emulators using standard environment detection or default local ports
-const firestoreHostEnv = process.env.FIRESTORE_EMULATOR_HOST;
 const authHostEnv = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 const functionsHostEnv = process.env.FIREBASE_FUNCTIONS_EMULATOR_HOST;
 
-if (firestoreHostEnv) {
-  const [host, port] = firestoreHostEnv.split(":");
-  connectFirestoreEmulator(db, host, parseInt(port, 10));
-  console.log(`Connected to Firestore Emulator: ${host}:${port}`);
-} else {
-  connectFirestoreEmulator(db, "127.0.0.1", 8080);
-  console.log("Connected to Firestore Emulator (default): 127.0.0.1:8080");
-}
 
 if (authHostEnv) {
   connectAuthEmulator(auth, `http://${authHostEnv}`);

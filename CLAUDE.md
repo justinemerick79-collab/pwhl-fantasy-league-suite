@@ -29,12 +29,64 @@ firebase deploy --only firestore:rules
 ### Integration tests
 
 There is no test runner and no `npm test`. The root `test-*.js` and `verify-test-league.js` files are
-standalone end-to-end scripts that drive the **Firebase emulator** (auth on `127.0.0.1:9099`). Run one at a time:
+standalone end-to-end scripts that drive the **Firebase emulator**. Run one at a time:
 
 ```bash
-firebase emulators:start          # separate terminal; firebase.json has no emulators block, so ports are CLI defaults
-npx tsx test-matchup-resolution.js
+firebase emulators:start --only functions,firestore,auth   # separate terminal
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 npx tsx test-bot-draft.js
 ```
+
+**The Firestore and Auth emulators need a Java runtime.** macOS ships only a `/usr/bin/java` stub, so
+without a real JDK every one of these tests fails at startup with "Unable to locate a Java Runtime". There
+is no Homebrew or usable `sudo` on this machine, so Temurin 21 is installed user-locally at
+`~/.local/java/jdk-21.0.13+9` with `java` symlinked into `~/.npm-global/bin` (already on PATH). The
+Functions emulator alone does not need Java, and is still useful on its own: it reports which trigger type
+each function registers as.
+
+**Pass the emulator host env vars explicitly.** The scripts seed fixtures with the Admin SDK, which talks to
+**production** when `FIRESTORE_EMULATOR_HOST` is unset. `test-bot-draft.js` refuses to run without it;
+the other scripts do not yet have that guard.
+
+#### Fixture setup goes through the Admin SDK, not the client SDK
+
+`firestore.rules` is strict on purpose: a user may only create their *own* `users/{uid}` document and only
+with `role: 'user'`, and only an existing admin may update one. Test fixtures need the opposite — writing
+another user's document (the bot) and granting `role: 'admin'` — so client-SDK seeding gets
+`PERMISSION_DENIED` at the first write.
+
+**Do not relax `firestore.rules` to make a test pass.** Permitting that seeding would let any user
+self-promote to admin and write other users' documents. Seed with the Admin SDK instead, which bypasses
+rules by design; rules are exercised by the app, not by fixture setup. `test-bot-draft.js` shows the shape:
+client SDK for authentication (to obtain a real uid), Admin SDK for all Firestore setup, assertions and
+teardown, behind a small shim so the call sites still read like the modular client API.
+
+All five scripts now seed this way via `test-support.js`, and all five **refuse to run** unless both
+`FIRESTORE_EMULATOR_HOST` and `FIREBASE_AUTH_EMULATOR_HOST` are set. That guard matters:
+`test-daily-lineups.js` previously connected no emulator at all, so running it created a real Auth user and
+wrote and deleted documents in **production**. It now also wires `src/firebase.js`'s client instances to the
+emulator, since `leagueService` writes through those and the web SDK ignores the env var.
+
+Current state when run against the emulator with the repo's own rules:
+
+| Script | Result |
+|---|---|
+| `test-time-machine.js` | **passes** |
+| `verify-test-league.js` | **passes** (all 4 assertions) |
+| `test-bot-draft.js` | reaches assertions; fails on a stale expectation (below) |
+| `test-matchup-resolution.js` | reaches assertions; fails `Expected matchup status to be completed, got pending` |
+| `test-daily-lineups.js` | reaches STEP 4; `PERMISSION_DENIED` on `daily_lineups` write (`firestore.rules` L109) |
+
+The last two are real signals, not setup failures. `test-daily-lineups.js` is denied by the rule requiring
+`teams/{teamId}.ownerId == request.auth.uid` plus `date >= simulation_state.current_simulated_date` — so
+either the fixture's `ownerId` does not match the authenticated test user, or the simulated-date comparison
+fails. Investigate the fixture or the app path; **do not loosen the rule.**
+
+`test-bot-draft.js` currently ends in a **stale assertion**, not a broken engine: it expects the bot to take
+`pwhl_1` (highest `rating`, 94), but the draft engine sorts by fantasy points then rating
+(`functions/index.js`, "Sort by calculated fantasy points descending"), and `pwhl_12` has 42.0 points
+against `pwhl_1`'s 28.5. Everything before that assertion passes — the trigger fires and the bot commits a
+pick. Decide whether points-first ranking (which routinely takes a goalie first overall) is intended before
+editing the expectation.
 
 Each script sets up mock leagues/teams/players, manipulates the simulation clock, asserts an outcome, then
 cleans up its own documents. `test-matchup-resolution.js` is the best reference for the full game-loop flow.

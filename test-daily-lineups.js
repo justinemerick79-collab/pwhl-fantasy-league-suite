@@ -6,23 +6,28 @@
  * Run using: npx tsx test-daily-lineups.js
  */
 
-import { initializeApp } from "firebase/app";
-import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
-import { getFirestore, doc, deleteDoc, setDoc } from "firebase/firestore";
+import { connectAuthEmulator, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
+import { connectFirestoreEmulator } from "firebase/firestore";
+import { requireEmulator, emulatorHosts, createAdminFixtures } from "./test-support.js";
+// Imported for their side effect of being the SAME client instances leagueService
+// writes through. This script previously built its own Firebase app and never
+// connected an emulator, so running it created a real Auth user and wrote and
+// deleted documents in PRODUCTION.
+import { db as clientDb, auth } from "./src/firebase.js";
 import { saveDailyLineup, getDailyLineup } from "./src/services/leagueService.js";
 
-const firebaseConfig = {
-  projectId: "pwhl-fantasy-mobile-26",
-  appId: "1:502197146749:web:48318c0fda30defd4dcd14",
-  storageBucket: "pwhl-fantasy-mobile-26.firebasestorage.app",
-  apiKey: "AIzaSyBUpX8nhgUOoBJABs9UNsv0j2GAVL57ZDU",
-  authDomain: "pwhl-fantasy-mobile-26.firebaseapp.com",
-  messagingSenderId: "502197146749"
-};
+requireEmulator("test-daily-lineups.js");
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+// The web SDK ignores FIRESTORE_EMULATOR_HOST, so these must be wired
+// explicitly — and before any read or write goes through them.
+const hosts = emulatorHosts();
+connectFirestoreEmulator(clientDb, hosts.firestore.host, hosts.firestore.port);
+connectAuthEmulator(auth, hosts.authUrl);
+
+// Privileged fixture seeding bypasses rules via the Admin SDK; the exercised app
+// code paths above keep using the client SDK, as the app does.
+const { doc, setDoc, deleteDoc } = createAdminFixtures("pwhl-fantasy-mobile-26", "test-daily-lineups");
+const db = null; // fixtures are addressed by path through the shim above
 
 const TEST_EMAIL = "gameloop_admin_temp@example.com";
 const TEST_PASSWORD = "TempPassword123!";

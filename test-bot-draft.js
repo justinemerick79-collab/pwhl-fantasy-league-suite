@@ -22,15 +22,7 @@ import {
   createUserWithEmailAndPassword, 
   deleteUser 
 } from "firebase/auth";
-import { 
-  getFirestore, 
-  connectFirestoreEmulator, 
-  doc, 
-  getDoc, 
-  deleteDoc, 
-  setDoc,
-  Timestamp 
-} from "firebase/firestore";
+import { requireEmulator, createAdminFixtures } from "./test-support.js";
 
 // Config matches active project config
 const firebaseConfig = {
@@ -44,18 +36,17 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
 
-// Connect to Emulators
-const firestoreHostEnv = process.env.FIRESTORE_EMULATOR_HOST;
 const authHostEnv = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 
-if (firestoreHostEnv) {
-  const [host, port] = firestoreHostEnv.split(":");
-  connectFirestoreEmulator(db, host, parseInt(port, 10));
-} else {
-  connectFirestoreEmulator(db, "127.0.0.1", 8080);
-}
+requireEmulator("test-bot-draft.js");
+
+// Fixtures go through the Admin SDK, which bypasses security rules by design.
+// The client SDK cannot do this seeding and should not be able to — see
+// test-support.js.
+const { doc, setDoc, getDoc, deleteDoc, Timestamp } =
+  createAdminFixtures(firebaseConfig.projectId, "test-admin");
+const db = null; // fixtures are addressed by path through the shim above
 
 if (authHostEnv) {
   connectAuthEmulator(auth, `http://${authHostEnv}`);
