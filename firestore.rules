@@ -106,11 +106,17 @@ service cloud.firestore {
         
         match /daily_lineups/{date} {
           allow read: if isAuthenticated();
+          // The document id is a date ("YYYY-MM-DD"), while current_simulated_date
+          // may carry a time ("YYYY-MM-DDTHH:mm:ss-ZZ:ZZ") — getSimulatedDate() in
+          // TimeTravelContext explicitly accepts both. A plain string compare makes
+          // the shorter date-only id sort BEFORE the same date with a time suffix,
+          // so a timestamped clock silently blocked every lineup save for the
+          // current day. Compare the date portion only.
           allow write: if isAuthenticated()
             && get(/databases/$(database)/documents/fantasy_leagues/$(leagueId)/teams/$(teamId)).data.ownerId == request.auth.uid
             && (
               !exists(/databases/$(database)/documents/admin_settings/simulation_state) ||
-              date >= get(/databases/$(database)/documents/admin_settings/simulation_state).data.current_simulated_date
+              date >= get(/databases/$(database)/documents/admin_settings/simulation_state).data.current_simulated_date[0:10]
             );
         }
       }

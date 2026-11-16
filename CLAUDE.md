@@ -72,14 +72,28 @@ Current state when run against the emulator with the repo's own rules:
 |---|---|
 | `test-time-machine.js` | **passes** |
 | `verify-test-league.js` | **passes** (all 4 assertions) |
+| `test-daily-lineups.js` | **passes** |
 | `test-bot-draft.js` | reaches assertions; fails on a stale expectation (below) |
 | `test-matchup-resolution.js` | reaches assertions; fails `Expected matchup status to be completed, got pending` |
-| `test-daily-lineups.js` | reaches STEP 4; `PERMISSION_DENIED` on `daily_lineups` write (`firestore.rules` L109) |
 
-The last two are real signals, not setup failures. `test-daily-lineups.js` is denied by the rule requiring
-`teams/{teamId}.ownerId == request.auth.uid` plus `date >= simulation_state.current_simulated_date` — so
-either the fixture's `ownerId` does not match the authenticated test user, or the simulated-date comparison
-fails. Investigate the fixture or the app path; **do not loosen the rule.**
+`test-matchup-resolution.js` is a real signal, not a setup failure: the weekly settlement path leaves the
+matchup `pending`.
+
+### The daily_lineups date comparison
+
+`daily_lineups/{date}` document ids are date-only (`YYYY-MM-DD`), but `current_simulated_date` may carry a
+time — `getSimulatedDate()` in `TimeTravelContext` explicitly accepts both forms. The rule compared the two
+as plain strings, and `"2023-12-28" >= "2023-12-28T12:00:00-08:00"` is **false**, because the shorter
+date-only id sorts before the same date with a time suffix. A timestamped clock therefore blocked *every*
+lineup save for the current day, silently.
+
+The rule now compares `current_simulated_date[0:10]`. Production is unaffected either way — every writer
+(`SIMULATION_START_DATE`, AdminPanel's date input, `App.jsx`'s `.split('T')[0]`) stores date-only — so this
+is defence against a format the app already supports. The security property is unchanged and still tested:
+`test-daily-lineups.js` STEP 3 confirms past-date edits are still rejected.
+
+**Keep comparing dates to dates.** If another rule ever compares a document-id date against a stored
+timestamp, slice it the same way.
 
 `test-bot-draft.js` currently ends in a **stale assertion**, not a broken engine: it expects the bot to take
 `pwhl_1` (highest `rating`, 94), but the draft engine sorts by fantasy points then rating
