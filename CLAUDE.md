@@ -79,16 +79,21 @@ Current state when run against the emulator with the repo's own rules:
 ### Week boundaries come from the season document
 
 The game loop resolves weeks from `pwhl_seasons/{season_id}.weeks` (`getWeekBounds` in `functions/index.js`).
-When that array is missing it falls back to a **hardcoded epoch**, `baseTime = 2024-01-01`, and derives weeks
-as fixed 7-day blocks from there. Production never hits this because `generateWeeksList()` populates `weeks`,
-but any league whose season lacks the array silently gets 2024-based week maths — matchups then settle on the
-wrong dates, or never settle at all, with no error.
+When that array is missing, the league is **skipped with an error** naming the season:
 
-That is what broke `test-matchup-resolution.js`: it never seeded the season, so Week 1 resolved to
-2024-01-01 → 2024-01-08, placing its 2024-01-02 warp *inside* Week 1 instead of past it. **Any fixture that
-exercises the game loop must seed `pwhl_seasons/{id}.weeks`.** The hardcoded fallback is worth replacing with
-a loud failure; it is the same shape of latent bug as the season-name filter that once lived in
-`syncDailyData`.
+```
+[Game Loop] League <id> skipped: season <n> has no `weeks` array (pwhl_seasons/<n>).
+Run the season sync so generateWeeksList() populates it.
+```
+
+It used to fall back to a hardcoded epoch (`baseTime = 2024-01-01`) and derive fixed 7-day blocks, so a
+season without its week map produced confidently wrong dates — matchups settling on the wrong days, or never
+— with nothing logged. `getWeekBounds` now returns `null` rather than inventing boundaries, and each call
+site skips instead of guessing. Week boundaries are data; do not reintroduce a default.
+
+That silent fallback is what broke `test-matchup-resolution.js`: it never seeded the season, so Week 1
+resolved to 2024-01-01 → 2024-01-08, placing its 2024-01-02 warp *inside* Week 1 instead of past it.
+**Any fixture that exercises the game loop must seed `pwhl_seasons/{id}.weeks`.**
 
 ### The daily_lineups date comparison
 
