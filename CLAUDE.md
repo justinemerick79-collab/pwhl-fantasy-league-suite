@@ -219,6 +219,10 @@ lower the number, and do not "fix" one of these in isolation. If a fetching libr
 are the call sites to migrate: `App.jsx` (2), `Matchup.jsx` (2), `Players.jsx` (2), `Roster.jsx`,
 `PlayerCardModal.jsx`.
 
+**Do not grow this list.** A refresh indicator was briefly added to Matchup as a flag set inside its effect,
+taking the count to 9; it was reworked into derived state instead (see below) to keep the gate at 8. When new
+work seems to need a loading flag in an effect, derive it from a stamp rather than adding to this group.
+
 `react-refresh/only-export-components` is switched off for `src/contexts/**`. Those files pair a provider
 component with its consumer hook, which is the standard context idiom; the rule only affects Fast Refresh
 ergonomics in dev. Satisfying it properly would mean splitting each context into three files (context
@@ -257,7 +261,11 @@ Two things that shape carries with it, both handled in `LeagueHub`: write **ever
 selected-but-unloaded league needs its own loading state, distinct from "nothing selected".
 
 Prefer deriving over mirroring: `Matchup.jsx`'s `seasonWeeks` is a `useMemo` over the season doc, not an
-effect that copies into state. Similarly `Players.jsx` derives `effectiveStatViewMode` during render
+effect that copies into state. The same stamp trick also covers "is this view refreshing?": `Matchup.jsx`
+builds a `matchupDataKey` from league + date + week, the fetch stamps `loadedMatchupKey` in its `finally`
+(after the awaits, so it is not a synchronous setState in the effect body), and the indicator is derived as
+`loadedMatchupKey !== matchupDataKey`. Stamping in `finally` matters: on `catch` alone a failed load would
+leave the indicator spinning forever. Similarly `Players.jsx` derives `effectiveStatViewMode` during render
 instead of correcting `statViewMode` in an effect.
 
 When a component needs to bail out early, the guard must sit **below every hook call**, with the effect

@@ -118,6 +118,13 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   const seasonDataLoading = loadingStates[seasonId] === true;
   const [teams, setTeams] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Stamp of the matchup slice currently held in state. Compared against
+  // matchupDataKey below to derive "refreshing" during render, rather than
+  // flipping a flag inside the effect (see CLAUDE.md: prefer deriving over
+  // mirroring). `loading` above gates the whole screen on first load; this only
+  // signals a refresh in place, so moving between weeks and dates never blanks
+  // out the scoreboard.
+  const [loadedMatchupKey, setLoadedMatchupKey] = useState(null);
   const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0, seconds: 0, totalMs: 0 });
   const [isDraftDetailsOpen, setIsDraftDetailsOpen] = useState(false);
   const [selectedCardPlayer, setSelectedCardPlayer] = useState(null);
@@ -346,6 +353,11 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     return () => unsubscribe();
   }, [activeLeagueId]);
 
+  // Identifies which matchup slice the screen is showing. The fetch below stamps
+  // this once its writes land, so a mismatch means the displayed data is stale.
+  const matchupDataKey = `${activeLeagueId || ''}|${selectedMatchupDate ? getLocalDateStr(selectedMatchupDate) : ''}|${resolvedCurrentWeek}`;
+  const matchupsRefreshing = Boolean(leagueData) && loadedMatchupKey !== matchupDataKey;
+
   // Fetch matchups and player stats when leagueData updates
   useEffect(() => {
     if (!activeLeagueId || !leagueData || seasonsLoading || seasonDataLoading) return;
@@ -470,6 +482,11 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
 
       } catch (err) {
         console.error("Error loading matchup data / points:", err);
+      } finally {
+        // Runs after the awaits above, so this is not a synchronous setState in
+        // the effect body. In `finally` so a failed load still clears the
+        // indicator instead of spinning forever.
+        setLoadedMatchupKey(matchupDataKey);
       }
     };
 
@@ -477,7 +494,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   // myTeam (not myTeam?.id): the effect passes the whole object to
   // calcTeamScore. It is a useMemo, not state, and nothing here writes it,
   // so tracking its identity cannot loop.
-  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading]);
+  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading, matchupDataKey]);
 
   // Matchup Result Popup trigger (Listens in real-time to the completed week's matchup)
   useEffect(() => {
@@ -733,6 +750,12 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           </h1>
           <p className="text-xs text-slate-500 font-medium mt-0.5">{weekDateRange}</p>
         </div>
+        {matchupsRefreshing && (
+          <div className="flex items-center gap-2 text-slate-400 animate-fade-in">
+            <div className="w-3 h-3 rounded-full border-2 border-slate-300 border-t-slate-500 animate-spin"></div>
+            <span className="text-[10px] font-black uppercase tracking-wider">Updating</span>
+          </div>
+        )}
       </div>
 
       {/* ── 1. DRAFT STATUS BANNER/CARD AT THE TOP (Pre-Draft State) ── */}

@@ -58,13 +58,38 @@ exports.syncDailyData = functions.pubsub
       const seasonsData = await fetchFromApi({ feed: 'modulekit', view: 'seasons' });
       const seasons = seasonsData?.SiteKit?.Seasons || [];
       
-      // Filter for recent seasons to keep updates efficient (e.g. 2024-25, 2025-26)
+      // Keep ingestion to recent seasons, selected by date rather than by a
+      // hardcoded list of season names. The previous name list ("2024-25",
+      // "2025-26", "2026-27") would have silently stopped covering new seasons
+      // as they were added — no error, just missing data.
+      // Anchored to 1 January of the earliest year kept, not to a floating date
+      // today-minus-N. A floating boundary clipped seasons that began slightly
+      // earlier in the same year (the 2024-25 Pre-Season, starting 2024-11-01,
+      // fell outside a window opening 2024-11-16).
+      const SEASON_LOOKBACK_YEARS = 2;
+      const now = new Date();
+      const windowStart = new Date(now.getFullYear() - SEASON_LOOKBACK_YEARS, 0, 1);
+
+      // Fallback for feed rows that carry no usable start_date: match the season
+      // name against the current and recent calendar years.
+      const recentYears = [];
+      for (let i = SEASON_LOOKBACK_YEARS + 1; i >= -1; i--) {
+        recentYears.push(String(now.getFullYear() - i));
+      }
+
       const activeSeasons = seasons.filter(s => {
-        const name = s.season_name?.toLowerCase() || "";
-        return name.includes("2024-25") || name.includes("2025-26") || name.includes("2026-27");
+        const start = s.start_date ? new Date(s.start_date) : null;
+        if (start && !isNaN(start.getTime())) {
+          return start >= windowStart;
+        }
+        const name = s.season_name || "";
+        return recentYears.some(y => name.includes(y));
       });
 
-      console.log(`Identified ${activeSeasons.length} active/recent seasons to synchronize.`);
+      console.log(
+        `Identified ${activeSeasons.length} active/recent seasons to synchronize: ` +
+        (activeSeasons.map(s => s.season_name || s.season_id).join(", ") || "none")
+      );
 
       for (const season of activeSeasons) {
         if (!season.season_id) continue;
