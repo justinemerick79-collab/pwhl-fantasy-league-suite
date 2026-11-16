@@ -22,15 +22,8 @@ import {
   createUserWithEmailAndPassword, 
   deleteUser 
 } from "firebase/auth";
-import { 
-  getFirestore, 
-  connectFirestoreEmulator, 
-  doc, 
-  getDoc, 
-  deleteDoc, 
-  setDoc,
-  Timestamp 
-} from "firebase/firestore";
+import { initializeApp as initAdminApp } from "firebase-admin/app";
+import { getFirestore as getAdminFirestore, Timestamp } from "firebase-admin/firestore";
 
 // Config matches active project config
 const firebaseConfig = {
@@ -44,18 +37,39 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
 
-// Connect to Emulators
 const firestoreHostEnv = process.env.FIRESTORE_EMULATOR_HOST;
 const authHostEnv = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 
-if (firestoreHostEnv) {
-  const [host, port] = firestoreHostEnv.split(":");
-  connectFirestoreEmulator(db, host, parseInt(port, 10));
-} else {
-  connectFirestoreEmulator(db, "127.0.0.1", 8080);
+// Setup and teardown go through the Admin SDK, which bypasses security rules by
+// design. The client SDK cannot do this seeding and should not be able to: it
+// would require writing another user's document and self-assigning
+// role: "admin", which firestore.rules correctly forbids. Rules are exercised by
+// the app, not by fixture setup.
+//
+// SAFETY: the Admin SDK talks to production when FIRESTORE_EMULATOR_HOST is
+// unset. This script creates and deletes documents, so refuse to run without it
+// rather than risk touching the real database.
+if (!firestoreHostEnv) {
+  console.error("❌ FIRESTORE_EMULATOR_HOST is not set. Refusing to run: the Admin SDK would target production.");
+  console.error("   Start the emulators, then run:");
+  console.error("   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 npx tsx test-bot-draft.js");
+  process.exit(1);
 }
+
+const adminApp = initAdminApp({ projectId: firebaseConfig.projectId }, "test-admin");
+const adminDb = getAdminFirestore(adminApp);
+
+// Thin shim so the assertions below keep reading like the modular client API.
+// These are Admin SDK calls, not firebase/firestore ones.
+const db = adminDb;
+const doc = (_db, path, id) => (id ? adminDb.doc(`${path}/${id}`) : adminDb.doc(path));
+const setDoc = (ref, data, options) => ref.set(data, options || {});
+const getDoc = async (ref) => {
+  const snap = await ref.get();
+  return { exists: () => snap.exists, data: () => snap.data() };
+};
+const deleteDoc = (ref) => ref.delete();
 
 if (authHostEnv) {
   connectAuthEmulator(auth, `http://${authHostEnv}`);
