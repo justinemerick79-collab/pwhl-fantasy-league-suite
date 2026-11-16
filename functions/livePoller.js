@@ -15,9 +15,8 @@
  * Cost: ~36 API calls per 3-hour game at 5-minute intervals
  */
 
-const functions = require("firebase-functions");
-const admin = require("firebase-admin");
-const { Timestamp } = require("firebase-admin/firestore");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { Timestamp, getFirestore } = require("firebase-admin/firestore");
 const { snapshotDailyGameStats, getLocalDateStr } = require("./dailyGameStats");
 
 const API_KEY = '446521baf8c38984';
@@ -58,10 +57,13 @@ async function fetchFromApi(params) {
  * Cloud Function running every 5 minutes to poll for live game updates.
  * Only executes work if there are PWHL games "in progress" today.
  */
-exports.liveGamePoller = functions.pubsub
-  .schedule("every 5 minutes")
-  .onRun(async () => {
-    const db = admin.firestore();
+exports.liveGamePoller = onSchedule(
+  {
+    schedule: "every 5 minutes",
+    region: "us-central1",
+  },
+  async () => {
+    const db = getFirestore();
     const todayStr = getLocalDateStr(new Date());
 
     console.log(`[LivePoller] Checking for active games on ${todayStr}...`);

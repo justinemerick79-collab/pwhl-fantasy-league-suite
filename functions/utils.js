@@ -1,4 +1,4 @@
-const admin = require("firebase-admin");
+const { getFirestore } = require("firebase-admin/firestore");
 
 /**
  * Central system clock utility.
@@ -17,7 +17,7 @@ const admin = require("firebase-admin");
  * @returns {Promise<number>} Epoch milliseconds of the current system date.
  */
 async function getSystemDate(leagueId = null) {
-  const db = admin.firestore();
+  const db = getFirestore();
 
   // 1. Per-league simulation date (new architecture)
   if (leagueId) {
