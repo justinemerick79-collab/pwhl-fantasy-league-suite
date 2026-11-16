@@ -1,6 +1,8 @@
-const functions = require("firebase-functions");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
-const admin = require("firebase-admin");
+const { initializeApp } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
 const { Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getSystemDate } = require("./utils");
 const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDateStr } = require("./dailyGameStats");
@@ -9,8 +11,8 @@ const { liveGamePoller } = require("./livePoller");
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
 
-admin.initializeApp();
-const db = admin.firestore();
+initializeApp();
+const db = getFirestore();
 
 const API_KEY = '446521baf8c38984';
 const CLIENT_CODE = 'pwhl';
@@ -49,9 +51,14 @@ async function fetchFromApi(params) {
  * Cloud Function running every 24 hours to sync Schedule and Player Stats.
  * Safely aggregates and chunks batch writes into sizes of 490 documents maximum.
  */
-exports.syncDailyData = functions.pubsub
-  .schedule("every 24 hours")
-  .onRun(async (_context) => {
+exports.syncDailyData = onSchedule(
+  {
+    schedule: "every 24 hours",
+    region: "us-central1",
+    memory: "512MiB",
+    timeoutSeconds: 540,
+  },
+  async (_event) => {
     console.log("Daily scheduled ingestion started...");
     try {
       // 1. Fetch seasons to identify active seasons to sync
@@ -598,18 +605,19 @@ exports.onGameSummaryWritten = onDocumentWritten({
  * Automatically provisions a test sandbox consisting of 7 bot users,
  * an active 8-team filled league, 8 team sheets, and a 7-week matchup schedule.
  */
-exports.initializeTestEnvironment = functions.https.onCall(async (data, context) => {
+exports.initializeTestEnvironment = onCall({ region: "us-central1" }, async (request) => {
+  const auth = request.auth;
   try {
     // 1. Enforce user authentication
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
+    if (!auth) {
+      throw new HttpsError(
         "unauthenticated",
         "The function must be called by an authenticated user."
       );
     }
 
-    const adminUid = context.auth.uid;
-    const adminEmail = context.auth.token ? context.auth.token.email : null;
+    const adminUid = auth.uid;
+    const adminEmail = auth.token ? auth.token.email : null;
 
     // 2. Enforce admin privilege check
     const userRef = db.collection("users").doc(adminUid);
@@ -619,7 +627,7 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
     const isExplicitAdmin = userSnap.exists && userSnap.data().role === "admin";
 
     if (!isSuperAdmin && !isExplicitAdmin) {
-      throw new functions.https.HttpsError(
+      throw new HttpsError(
         "permission-denied",
         "Only authenticated admin accounts can initialize the simulation mode."
       );
@@ -871,14 +879,14 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
     };
   } catch (error) {
     console.error("CRITICAL ERROR IN initializeTestEnvironment:", error);
-    if (error instanceof functions.https.HttpsError) {
+    if (error instanceof HttpsError) {
       throw error;
     }
     let msg = error.message || error.toString();
     if (msg.includes("UNAVAILABLE") || msg.includes("No connection established") || msg.includes("connection")) {
       msg = `Firestore Emulator connection failed. Please ensure the Firestore emulator is running on port 8080 (requires Java JRE). Original error: ${msg}`;
     }
-    throw new functions.https.HttpsError(
+    throw new HttpsError(
       "unknown",
       msg,
       error.stack
@@ -892,18 +900,19 @@ exports.initializeTestEnvironment = functions.https.onCall(async (data, context)
  * the simulation league, all teams, matchups, waivers, claims, and trades under it,
  * and resets simulation state and time travel settings.
  */
-exports.deactivateSimulation = functions.https.onCall(async (data, context) => {
+exports.deactivateSimulation = onCall({ region: "us-central1" }, async (request) => {
+  const auth = request.auth;
   try {
     // 1. Enforce user authentication
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
+    if (!auth) {
+      throw new HttpsError(
         "unauthenticated",
         "The function must be called by an authenticated user."
       );
     }
 
-    const adminUid = context.auth.uid;
-    const adminEmail = context.auth.token ? context.auth.token.email : null;
+    const adminUid = auth.uid;
+    const adminEmail = auth.token ? auth.token.email : null;
 
     // 2. Enforce admin privilege check
     const userRef = db.collection("users").doc(adminUid);
@@ -913,7 +922,7 @@ exports.deactivateSimulation = functions.https.onCall(async (data, context) => {
     const isExplicitAdmin = userSnap.exists && userSnap.data().role === "admin";
 
     if (!isSuperAdmin && !isExplicitAdmin) {
-      throw new functions.https.HttpsError(
+      throw new HttpsError(
         "permission-denied",
         "Only authenticated admin accounts can deactivate the simulation mode."
       );
@@ -1013,10 +1022,10 @@ exports.deactivateSimulation = functions.https.onCall(async (data, context) => {
     };
   } catch (error) {
     console.error("CRITICAL ERROR IN deactivateSimulation:", error);
-    if (error instanceof functions.https.HttpsError) {
+    if (error instanceof HttpsError) {
       throw error;
     }
-    throw new functions.https.HttpsError("unknown", error.message || error.toString());
+    throw new HttpsError("unknown", error.message || error.toString());
   }
 });
 
@@ -1024,7 +1033,7 @@ exports.deactivateSimulation = functions.https.onCall(async (data, context) => {
  * HTTPS Callable function to retrieve the current simulated system clock time.
  * Used for testing and verification of the central clock.
  */
-exports.getSimulatedTime = functions.https.onCall(async (_data, _context) => {
+exports.getSimulatedTime = onCall({ region: "us-central1" }, async () => {
   const timeMs = await getSystemDate();
   return { timeMs };
 });
@@ -1032,7 +1041,8 @@ exports.getSimulatedTime = functions.https.onCall(async (_data, _context) => {
 /**
  * HTTPS Callable function to manually trigger the daily stats snapshot for the simulated date.
  */
-exports.triggerSimulationDailySync = functions.https.onCall(async (data, _context) => {
+exports.triggerSimulationDailySync = onCall({ region: "us-central1" }, async (request) => {
+  const data = request.data;
   try {
     const leagueId = data?.leagueId || null;
     const timeMs = await getSystemDate(leagueId);
@@ -1047,10 +1057,10 @@ exports.triggerSimulationDailySync = functions.https.onCall(async (data, _contex
     return { success: true, dateStr };
   } catch (err) {
     console.error("Error in triggerSimulationDailySync:", err);
-    if (err instanceof functions.https.HttpsError) {
+    if (err instanceof HttpsError) {
       throw err;
     }
-    throw new functions.https.HttpsError("internal", err.message || err.toString());
+    throw new HttpsError("internal", err.message || err.toString());
   }
 });
 
@@ -2364,10 +2374,15 @@ async function finalizeLeagueWeek(leagueId, weekInfo) {
  * Scheduled function to settle matchup weeks for all active production leagues.
  * Runs every Monday at 6:00 AM EST (America/New_York).
  */
-exports.settleMatchupWeeksScheduled = functions.pubsub
-  .schedule("0 6 * * 1")
-  .timeZone("America/New_York")
-  .onRun(async (_context) => {
+exports.settleMatchupWeeksScheduled = onSchedule(
+  {
+    schedule: "0 6 * * 1",
+    timeZone: "America/New_York",
+    region: "us-central1",
+    memory: "512MiB",
+    timeoutSeconds: 540,
+  },
+  async (_event) => {
     console.log("[Scheduler] Weekly matchup settlement started...");
 
     const leaguesSnap = await db.collection("fantasy_leagues")
@@ -2666,24 +2681,25 @@ exports.onLeagueSimulatedDateWritten = onDocumentWritten({
   return null;
 });
 
-exports.generateSeasonProjections = functions.https.onCall(async (data, _context) => {
+exports.generateSeasonProjections = onCall({ region: "us-central1" }, async (request) => {
+  const data = request.data;
   const seasonIdStr = typeof data === "string" ? data : (data?.seasonId ? String(data.seasonId) : null);
   if (!seasonIdStr) {
-    throw new functions.https.HttpsError("invalid-argument", "Missing seasonId string parameter.");
+    throw new HttpsError("invalid-argument", "Missing seasonId string parameter.");
   }
 
   try {
     // 1. Fetch target season metadata
     const seasonDoc = await db.collection("pwhl_seasons").doc(seasonIdStr).get();
     if (!seasonDoc.exists) {
-      throw new functions.https.HttpsError("not-found", `Season ${seasonIdStr} not found.`);
+      throw new HttpsError("not-found", `Season ${seasonIdStr} not found.`);
     }
 
     const targetSeason = seasonDoc.data();
     const startDateStr = targetSeason.start_date;
     const gamesPerTeam = 30; // Force 30-game regular season schedule for projections
     if (!startDateStr) {
-      throw new functions.https.HttpsError("failed-precondition", `Season ${seasonIdStr} is missing start_date.`);
+      throw new HttpsError("failed-precondition", `Season ${seasonIdStr} is missing start_date.`);
     }
     const targetSeasonStart = new Date(startDateStr);
 
@@ -3240,7 +3256,7 @@ exports.generateSeasonProjections = functions.https.onCall(async (data, _context
     };
   } catch (err) {
     console.error("Projections generation failed:", err);
-    throw new functions.https.HttpsError("internal", err.message);
+    throw new HttpsError("internal", err.message);
   }
 });
 

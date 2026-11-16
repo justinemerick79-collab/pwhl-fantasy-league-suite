@@ -1,8 +1,9 @@
-const admin = require("firebase-admin");
-admin.initializeApp({
+const { initializeApp } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
+initializeApp({
   projectId: "pwhl-fantasy-mobile-26"
 });
-const db = admin.firestore();
+const db = getFirestore();
 
 // Mirror frontend's parseDateStr
 const parseDateStr = (dateStr) => {

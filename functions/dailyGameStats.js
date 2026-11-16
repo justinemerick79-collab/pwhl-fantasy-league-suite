@@ -10,12 +10,11 @@
  * Also provides `getLockedPlayerIds` for player-level lineup lock enforcement.
  */
 
-const admin = require("firebase-admin");
-const { Timestamp } = require("firebase-admin/firestore");
+const { Timestamp, getFirestore } = require("firebase-admin/firestore");
 
-// Lazy getter — ensures admin.initializeApp() has already been called by index.js
+// Lazy getter — ensures initializeApp() has already been called by index.js
 function getDb() {
-  return admin.firestore();
+  return getFirestore();
 }
 
 const DEFAULT_SCORING = {
