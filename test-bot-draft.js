@@ -7,7 +7,7 @@
  * 2. Pre-populates the database with user records for the human admin and a bot user.
  * 3. Initializes a mock draft state with Pick 1 belonging to the bot and Pick 2 belonging to the human.
  * 4. Waits 5 seconds (to allow the 3-second bot setTimeout + transaction processing to execute).
- * 5. Asserts that the bot automatically selected the highest pre-ranked player (e.g. Marie-Philip Poulin / pwhl_1),
+ * 5. Asserts that the bot automatically selected the highest-scoring available player
  *    added them to the picks and roster, and advanced the turn so the human is now on the clock.
  * 6. Cleans up all mock documents and the temporary user.
  * 
@@ -56,6 +56,18 @@ if (authHostEnv) {
 
 const TEST_EMAIL = "draft_admin_temp@example.com";
 const TEST_PASSWORD = "TempPassword123!";
+// The engine ranks by fantasy points, then rating as a tiebreaker (see
+// functions/index.js, "Sort by calculated fantasy points descending"). This test
+// seeds no pwhl_players, so the draft falls back to the engine's built-in pool,
+// where Aerin Frankel (pwhl_12, G) leads on 42.0 points ahead of Marie-Philip
+// Poulin (pwhl_1, F) on 28.5 — even though Poulin has the higher rating, 94 to 93.
+//
+// Goalies accumulate points faster than skaters under the current scoring, so a
+// goalie going first overall is expected for now. Scoring is intended to be
+// rebalanced later so skaters compete for the top picks; when that lands, this
+// constant is the single thing to update.
+const EXPECTED_TOP_PICK = "pwhl_12";
+
 const BOT_UID = "test_bot_user_999";
 const LEAGUE_ID = "draft_bot_test_999";
 
@@ -185,19 +197,19 @@ async function runVerification() {
       throw new Error(`Assertion 1 Failed: Expected exactly 1 pick, found ${picks.length}`);
     }
     const firstPick = picks[0];
-    console.log(`- Player selected: ${firstPick.playerId || firstPick.player_id} (Expected: pwhl_1)`);
-    if ((firstPick.playerId || firstPick.player_id) !== "pwhl_1") {
-      throw new Error(`Assertion 1 Failed: Expected bot to select highest-ranked player 'pwhl_1', got '${firstPick.playerId || firstPick.player_id}'`);
+    console.log(`- Player selected: ${firstPick.playerId || firstPick.player_id} (Expected: ${EXPECTED_TOP_PICK})`);
+    if ((firstPick.playerId || firstPick.player_id) !== EXPECTED_TOP_PICK) {
+      throw new Error(`Assertion 1 Failed: Expected bot to select highest-scoring player '${EXPECTED_TOP_PICK}', got '${firstPick.playerId || firstPick.player_id}'`);
     }
-    console.log("⭐ ASSERTION 1 PASSED: Bot successfully drafted player 'pwhl_1'!");
+    console.log(`⭐ ASSERTION 1 PASSED: Bot successfully drafted player '${EXPECTED_TOP_PICK}'!`);
 
     // Assertion 2: Verify player assigned to bot's active roster in draft state
     console.log("\n🧐 ASSERTION 2: Checking if player was assigned to bot's active rosters...");
     const activeRosters = draftData.activeRosters || draftData.active_rosters || {};
     const botRoster = activeRosters[BOT_UID] || [];
-    console.log(`- Bot Roster: [${botRoster.join(", ")}] (Expected: ['pwhl_1'])`);
-    if (!botRoster.includes("pwhl_1")) {
-      throw new Error("Assertion 2 Failed: Player 'pwhl_1' not found in bot active roster map");
+    console.log(`- Bot Roster: [${botRoster.join(", ")}] (Expected: ['${EXPECTED_TOP_PICK}'])`);
+    if (!botRoster.includes(EXPECTED_TOP_PICK)) {
+      throw new Error(`Assertion 2 Failed: Player '${EXPECTED_TOP_PICK}' not found in bot active roster map`);
     }
     console.log("⭐ ASSERTION 2 PASSED: Player correctly added to bot active roster!");
 
@@ -206,9 +218,9 @@ async function runVerification() {
     const teamSnap = await getDoc(botTeamRef);
     const teamData = teamSnap.data();
     const teamRoster = teamData.players || [];
-    console.log(`- Bot Team document roster: [${teamRoster.join(", ")}] (Expected: ['pwhl_1'])`);
-    if (!teamRoster.includes("pwhl_1")) {
-      throw new Error("Assertion 3 Failed: Player 'pwhl_1' was not updated on the team document roster");
+    console.log(`- Bot Team document roster: [${teamRoster.join(", ")}] (Expected: ['${EXPECTED_TOP_PICK}'])`);
+    if (!teamRoster.includes(EXPECTED_TOP_PICK)) {
+      throw new Error(`Assertion 3 Failed: Player '${EXPECTED_TOP_PICK}' was not updated on the team document roster`);
     }
     console.log("⭐ ASSERTION 3 PASSED: Bot team document roster successfully updated!");
 

@@ -74,7 +74,9 @@ Current state when run against the emulator with the repo's own rules:
 | `verify-test-league.js` | **passes** (all 4 assertions) |
 | `test-daily-lineups.js` | **passes** |
 | `test-matchup-resolution.js` | **passes** |
-| `test-bot-draft.js` | reaches assertions; fails on a stale expectation (below) |
+| `test-bot-draft.js` | **passes** |
+
+All five pass.
 
 ### Week boundaries come from the season document
 
@@ -111,12 +113,17 @@ is defence against a format the app already supports. The security property is u
 **Keep comparing dates to dates.** If another rule ever compares a document-id date against a stored
 timestamp, slice it the same way.
 
-`test-bot-draft.js` currently ends in a **stale assertion**, not a broken engine: it expects the bot to take
-`pwhl_1` (highest `rating`, 94), but the draft engine sorts by fantasy points then rating
-(`functions/index.js`, "Sort by calculated fantasy points descending"), and `pwhl_12` has 42.0 points
-against `pwhl_1`'s 28.5. Everything before that assertion passes — the trigger fires and the bot commits a
-pick. Decide whether points-first ranking (which routinely takes a goalie first overall) is intended before
-editing the expectation.
+### Bot draft ranking
+
+The draft engine ranks by **fantasy points**, with rating only as a tiebreaker (`functions/index.js`,
+"Sort by calculated fantasy points descending"). Goalies accumulate points faster than skaters under the
+current scoring, so **a goalie going first overall is expected**, not a bug — `test-bot-draft.js` asserts
+exactly that via its `EXPECTED_TOP_PICK` constant.
+
+This is a deliberate decision, not an accident of the data: scoring is intended to be rebalanced later so
+goalie and skater points sit closer together and skaters are likelier to lead the board. When that lands,
+`EXPECTED_TOP_PICK` in `test-bot-draft.js` is the single value to update — it is the only place the expected
+pick appears.
 
 Each script sets up mock leagues/teams/players, manipulates the simulation clock, asserts an outcome, then
 cleans up its own documents. `test-matchup-resolution.js` is the best reference for the full game-loop flow.
