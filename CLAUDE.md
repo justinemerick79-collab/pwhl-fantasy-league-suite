@@ -60,9 +60,26 @@ rules by design; rules are exercised by the app, not by fixture setup. `test-bot
 client SDK for authentication (to obtain a real uid), Admin SDK for all Firestore setup, assertions and
 teardown, behind a small shim so the call sites still read like the modular client API.
 
-**Only `test-bot-draft.js` has been converted.** `test-daily-lineups.js`, `test-matchup-resolution.js`,
-`test-time-machine.js` and `verify-test-league.js` still seed through the client SDK and will fail the same
-way until they get the same treatment.
+All five scripts now seed this way via `test-support.js`, and all five **refuse to run** unless both
+`FIRESTORE_EMULATOR_HOST` and `FIREBASE_AUTH_EMULATOR_HOST` are set. That guard matters:
+`test-daily-lineups.js` previously connected no emulator at all, so running it created a real Auth user and
+wrote and deleted documents in **production**. It now also wires `src/firebase.js`'s client instances to the
+emulator, since `leagueService` writes through those and the web SDK ignores the env var.
+
+Current state when run against the emulator with the repo's own rules:
+
+| Script | Result |
+|---|---|
+| `test-time-machine.js` | **passes** |
+| `verify-test-league.js` | **passes** (all 4 assertions) |
+| `test-bot-draft.js` | reaches assertions; fails on a stale expectation (below) |
+| `test-matchup-resolution.js` | reaches assertions; fails `Expected matchup status to be completed, got pending` |
+| `test-daily-lineups.js` | reaches STEP 4; `PERMISSION_DENIED` on `daily_lineups` write (`firestore.rules` L109) |
+
+The last two are real signals, not setup failures. `test-daily-lineups.js` is denied by the rule requiring
+`teams/{teamId}.ownerId == request.auth.uid` plus `date >= simulation_state.current_simulated_date` — so
+either the fixture's `ownerId` does not match the authenticated test user, or the simulated-date comparison
+fails. Investigate the fixture or the app path; **do not loosen the rule.**
 
 `test-bot-draft.js` currently ends in a **stale assertion**, not a broken engine: it expects the bot to take
 `pwhl_1` (highest `rating`, 94), but the draft engine sorts by fantasy points then rating

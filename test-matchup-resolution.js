@@ -16,21 +16,13 @@
  */
 
 import { initializeApp } from "firebase/app";
+import { requireEmulator, createAdminFixtures } from "./test-support.js";
 import { 
   getAuth, 
   connectAuthEmulator, 
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword 
   } from "firebase/auth";
-import { 
-  getFirestore, 
-  connectFirestoreEmulator, 
-  doc, 
-  getDoc, 
-  deleteDoc, 
-  setDoc 
-} from "firebase/firestore";
-
 // Config matches active project config in src/firebase.js
 const firebaseConfig = {
   projectId: "pwhl-fantasy-mobile-26",
@@ -43,17 +35,14 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
 
+requireEmulator("test-matchup-resolution.js");
+const { doc, setDoc, getDoc, deleteDoc } =
+  createAdminFixtures(firebaseConfig.projectId, "test-matchup");
+const db = null; // fixtures are addressed by path through the shim above
 // Connect to Emulators only if host env is explicitly set
-const firestoreHostEnv = process.env.FIRESTORE_EMULATOR_HOST;
 const authHostEnv = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 
-if (firestoreHostEnv) {
-  const [host, port] = firestoreHostEnv.split(":");
-  connectFirestoreEmulator(db, host, parseInt(port, 10));
-  console.log(`🔌 Connected to Firestore Emulator at ${host}:${port}`);
-}
 
 if (authHostEnv) {
   connectAuthEmulator(auth, `http://${authHostEnv}`);
