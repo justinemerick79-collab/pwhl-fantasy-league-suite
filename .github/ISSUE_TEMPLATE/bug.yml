@@ -1,0 +1,42 @@
+name: Bug
+description: Something does not work as it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected, and what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - "S1 — wrong score, data loss, draft stops, or security hole"
+        - "S2 — main feature fails, no workaround"
+        - "S3 — feature fails, workaround exists"
+        - "S4 — cosmetic"
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: League, date and screen
+      description: League ID, the simulated or real date, and the tab.
+  - type: textarea
+    id: cause
+    attributes:
+      label: Cause (triage)
+      description: File and line, filled in by the QA lead.

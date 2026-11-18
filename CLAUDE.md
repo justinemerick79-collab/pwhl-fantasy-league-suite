@@ -9,6 +9,14 @@ Firebase project: `pwhl-fantasy-mobile-26`. Live at https://pwhl-fantasy-mobile-
 
 Note `package.json` is still named `temp_web` and `README.md` is the stock Vite template; neither reflects the project.
 
+## AI team
+
+The business runs with a team of Claude Code agents (`.claude/agents/`) and procedures (`.claude/skills/`:
+`/ceo-brief`, `/write-prd`, `/score-backlog`, `/triage-bugs`, `/scale-review`). Their shared limits, launch
+gates, evidence levels and priority method are in `.claude/team/TEAM_RULES.md`; read it before acting as one
+of them. Business documents live in Google Drive (`.claude/team/DRIVE_MAP.md`); work items live in GitHub
+Issues. Write for the CEO with `.claude/team/WRITING_STANDARD.md` (ASD-STE100 based).
+
 ## Commands
 
 ```bash

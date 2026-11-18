@@ -1,0 +1,47 @@
+name: Feature
+description: A new feature or a change to an existing feature
+labels: ["feature"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What, for whom, and why. 5 lines or fewer.
+    validations:
+      required: true
+  - type: dropdown
+    id: gate
+    attributes:
+      label: Launch gate
+      description: The gate that this item blocks (see .claude/team/TEAM_RULES.md).
+      options: ["G1 — Private beta", "G2 — Public web beta", "G3 — Public launch + stores", "Later"]
+    validations:
+      required: true
+  - type: dropdown
+    id: evidence
+    attributes:
+      label: Evidence level
+      options: ["E1 — idea only", "E2 — competitors or market data", "E3 — beta feedback or code defect", "E4 — usage data or measured test"]
+    validations:
+      required: true
+  - type: textarea
+    id: evidence_source
+    attributes:
+      label: Evidence and sources
+      description: Links, data, file and line.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: "Given <state>, when <action>, then <result>."
+    validations:
+      required: true
+  - type: input
+    id: prd
+    attributes:
+      label: PRD link (Google Drive)
+  - type: textarea
+    id: technical
+    attributes:
+      label: Technical notes
+      description: Files, functions, Firestore documents, security rules. Scale and cost effect.
