@@ -1207,52 +1207,37 @@ async function handleDraftStateChange(docSnap) {
       let dCount = 0;
       let gCount = 0;
 
+      // Resolve by player_id first: pwhl_players doc ids are "<seasonId>_<playerId>",
+      // while rosters store the bare player id. An unresolved player used to be
+      // silently counted as a forward, skewing the counts this pick depends on.
+      const unresolvedRosterIds = [];
       botRosterIds.forEach(pId => {
-        const pInfo = allPlayers.find(p => String(p.id) === String(pId) || String(p.player_id) === String(pId));
-        const pos = normalizePosition(pInfo?.position || pInfo?.pos || 'F');
+        const pInfo = allPlayers.find(
+          p => String(p.player_id ?? '') === String(pId) || String(p.id) === String(pId)
+        );
+        if (!pInfo) {
+          unresolvedRosterIds.push(pId);
+          return;
+        }
+        const pos = normalizePosition(pInfo.position || pInfo.pos || 'F');
         if (pos === 'F') fCount++;
         else if (pos === 'D') dCount++;
         else if (pos === 'G') gCount++;
       });
+      if (unresolvedRosterIds.length > 0) {
+        console.warn(
+          `[Draft Engine] League ${leagueId}: ${unresolvedRosterIds.length} roster player(s) not found in ` +
+          `pwhl_players for bot ${currentPickerId} (${unresolvedRosterIds.join(', ')}); position counts may be short.`
+        );
+      }
 
       const forwardsLimit = rosterSettings.forwards?.max ?? 10;
       const defenseLimit = rosterSettings.defense?.max ?? 8;
       const goaliesLimit = rosterSettings.goalies?.max ?? 3;
 
-      const availablePlayers = allPlayers.filter(p => {
-        if (draftedIds.has(p.id) || draftedIds.has(p.player_id || p.id)) return false;
-
-        const pos = normalizePosition(p.position || p.pos || 'F');
-        
-        let nextFCount = fCount;
-        let nextDCount = dCount;
-        let nextGCount = gCount;
-        if (pos === 'F') nextFCount++;
-        else if (pos === 'D') nextDCount++;
-        else if (pos === 'G') nextGCount++;
-
-        // 1. Position Max Limits
-        if (pos === 'F' && nextFCount > forwardsLimit) return false;
-        if (pos === 'D' && nextDCount > defenseLimit) return false;
-        if (pos === 'G' && nextGCount > goaliesLimit) return false;
-
-        // 2. Minimum Active Roster Requirements
-        const fNeeded = Math.max(0, fStarters - nextFCount);
-        const dNeeded = Math.max(0, dStarters - nextDCount);
-        const gNeeded = Math.max(0, gStarters - nextGCount);
-        const totalNeeded = fNeeded + dNeeded + gNeeded;
-
-        if (nextPicksRemaining < totalNeeded) {
-          return false;
-        }
-
-        return true;
-      });
-
-      if (availablePlayers.length === 0) {
-        console.warn(`[Draft Engine] No players available matching roster limits for draft in league ${leagueId}`);
-        return;
-      }
+      const undraftedPlayers = allPlayers.filter(
+        p => !draftedIds.has(p.id) && !draftedIds.has(p.player_id || p.id)
+      );
 
       // Sort by calculated fantasy points descending using the league's scoring settings, then by rating as tiebreaker
       const defaultScoringFallback = {
@@ -1295,19 +1280,86 @@ async function handleDraftStateChange(docSnap) {
         return pts;
       };
 
-      availablePlayers.sort((a, b) => {
-        const fptsA = calcFpts(a);
-        const fptsB = calcFpts(b);
-        if (fptsB !== fptsA) return fptsB - fptsA;
+      // Choose the pick. Ranking by points alone is what stalled drafts: the
+      // limit rules were only a veto, never a preference, so a bot could spend
+      // its slack on the highest scorer and arrive at its final pick short in
+      // two positions — at which point every candidate was vetoed and the draft
+      // halted for everyone.
+      const posOf = (p) => normalizePosition(p.position || p.pos || 'F');
+      const underMax = (pos) => {
+        if (pos === 'F') return fCount + 1 <= forwardsLimit;
+        if (pos === 'D') return dCount + 1 <= defenseLimit;
+        if (pos === 'G') return gCount + 1 <= goaliesLimit;
+        return true;
+      };
+      // Unmet starter minimums still outstanding, and what would remain if this
+      // pick went to `pos`.
+      const need = {
+        F: Math.max(0, fStarters - fCount),
+        D: Math.max(0, dStarters - dCount),
+        G: Math.max(0, gStarters - gCount),
+      };
+      const totalNeeded = need.F + need.D + need.G;
+      const needAfter = (pos) =>
+        Math.max(0, fStarters - (fCount + (pos === 'F' ? 1 : 0))) +
+        Math.max(0, dStarters - (dCount + (pos === 'D' ? 1 : 0))) +
+        Math.max(0, gStarters - (gCount + (pos === 'G' ? 1 : 0)));
 
-        const ratingA = a.rating !== undefined ? Number(a.rating) : 0;
-        const ratingB = b.rating !== undefined ? Number(b.rating) : 0;
-        if (ratingB !== ratingA) return ratingB - ratingA;
-
+      const byValue = (a, b) => {
+        const d = calcFpts(b) - calcFpts(a);
+        if (d !== 0) return d;
+        const rb = b.rating !== undefined ? Number(b.rating) : 0;
+        const ra = a.rating !== undefined ? Number(a.rating) : 0;
+        if (rb !== ra) return rb - ra;
         return String(a.id).localeCompare(String(b.id));
-      });
+      };
 
-      const chosenPlayer = availablePlayers[0];
+      // Tiers, strictest first. Falling through costs roster shape; not falling
+      // through costs the entire draft, so the last tier takes anyone.
+      const tiers = [
+        ['limits + minimums reachable', undraftedPlayers.filter(p => underMax(posOf(p)) && nextPicksRemaining >= needAfter(posOf(p)))],
+        ['position limits only', undraftedPlayers.filter(p => underMax(posOf(p)))],
+        ['unrestricted', undraftedPlayers],
+      ];
+
+      let chosenPlayer = null;
+      for (const [tierName, pool] of tiers) {
+        if (pool.length === 0) continue;
+        // With no slack left, the pick must go to a position still short of its
+        // starter minimum — deliberately taking a lower-ranked player so the
+        // roster can still be completed.
+        let candidates = pool;
+        let forced = false;
+        if (totalNeeded > 0 && picksRemaining <= totalNeeded) {
+          const needful = pool.filter(p => need[posOf(p)] > 0);
+          if (needful.length > 0) {
+            candidates = needful;
+            forced = true;
+          }
+        }
+        candidates.sort(byValue);
+        chosenPlayer = candidates[0];
+        if (tierName !== 'limits + minimums reachable') {
+          console.warn(
+            `[Draft Engine] League ${leagueId}: no pick satisfied the strict roster rules for bot ` +
+            `${currentPickerId} (F ${fCount}/${fStarters}-${forwardsLimit}, D ${dCount}/${dStarters}-${defenseLimit}, ` +
+            `G ${gCount}/${gStarters}-${goaliesLimit}, ${picksRemaining} pick(s) left). ` +
+            `Falling back to "${tierName}" rather than stalling the draft.`
+          );
+        }
+        if (forced) {
+          console.log(
+            `[Draft Engine] Bot ${currentPickerId} forced to a needed position ` +
+            `(need F${need.F} D${need.D} G${need.G}, ${picksRemaining} pick(s) left)`
+          );
+        }
+        break;
+      }
+
+      if (!chosenPlayer) {
+        console.error(`[Draft Engine] League ${leagueId}: no undrafted players remain; cannot advance the draft.`);
+        return;
+      }
       const chosenPlayerId = chosenPlayer.id || chosenPlayer.player_id;
       const chosenPlayerName = chosenPlayer.name || `${chosenPlayer.first_name || ""} ${chosenPlayer.last_name || ""}`.trim() || chosenPlayerId;
 

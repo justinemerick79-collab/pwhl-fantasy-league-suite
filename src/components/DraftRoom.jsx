@@ -272,38 +272,8 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
     const currentPicks = currentDraftState.picks || [];
     const currentDraftedSet = new Set(currentPicks.map(p => p.playerId).filter(Boolean));
 
-    // Filter available players respecting position limits and requirements
-    const available = currentAllPlayers.filter(p => {
-      if (currentDraftedSet.has(p.id)) return false;
-      
-      const pos = p.pos || 'F';
-      
-      let nextFCount = posCounts.F;
-      let nextDCount = posCounts.D;
-      let nextGCount = posCounts.G;
-      if (pos === 'F') nextFCount++;
-      else if (pos === 'D') nextDCount++;
-      else if (pos === 'G') nextGCount++;
-
-      // 1. Position Max Limits
-      if (pos === 'F' && nextFCount > forwardsLimit) return false;
-      if (pos === 'D' && nextDCount > defenseLimit) return false;
-      if (pos === 'G' && nextGCount > goaliesLimit) return false;
-
-      // 2. Minimum Active Roster Requirements
-      const fNeeded = Math.max(0, fStarters - nextFCount);
-      const dNeeded = Math.max(0, dStarters - nextDCount);
-      const gNeeded = Math.max(0, gStarters - nextGCount);
-      const totalNeeded = fNeeded + dNeeded + gNeeded;
-
-      if (nextPicksRemaining < totalNeeded) {
-        return false;
-      }
-
-      return true;
-    });
-
-    if (available.length === 0) return null;
+    const undrafted = currentAllPlayers.filter(pl => !currentDraftedSet.has(pl.id));
+    if (undrafted.length === 0) return null;
 
     // Sort by projected fantasy points (highest first) using the league's scoring settings
     const defaultScoringFallback = {
@@ -340,15 +310,55 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
       return pts;
     };
 
-    // Sort by projected FPTS descending, then by overallRank ascending as tiebreaker
-    available.sort((a, b) => {
-      const fptsA = calcFpts(a);
-      const fptsB = calcFpts(b);
-      if (fptsB !== fptsA) return fptsB - fptsA;
-      return (a.overallRank || 999) - (b.overallRank || 999);
-    });
+    // Choose the pick. Ranking by points alone is what stalled drafts: the limit
+    // rules were only a veto, never a preference, so a picker could spend its
+    // slack on the highest scorer and reach its final pick short in two
+    // positions, at which point every candidate was vetoed. Mirrors the server
+    // engine in functions/index.js — keep the two in step.
+    const posOf = (pl) => (pl.pos === 'D' || pl.pos === 'G' ? pl.pos : 'F');
+    const underMax = (pos) => {
+      if (pos === 'F') return posCounts.F + 1 <= forwardsLimit;
+      if (pos === 'D') return posCounts.D + 1 <= defenseLimit;
+      if (pos === 'G') return posCounts.G + 1 <= goaliesLimit;
+      return true;
+    };
+    const need = {
+      F: Math.max(0, fStarters - posCounts.F),
+      D: Math.max(0, dStarters - posCounts.D),
+      G: Math.max(0, gStarters - posCounts.G),
+    };
+    const totalNeeded = need.F + need.D + need.G;
+    const needAfter = (pos) =>
+      Math.max(0, fStarters - (posCounts.F + (pos === 'F' ? 1 : 0))) +
+      Math.max(0, dStarters - (posCounts.D + (pos === 'D' ? 1 : 0))) +
+      Math.max(0, gStarters - (posCounts.G + (pos === 'G' ? 1 : 0)));
 
-    return available[0];
+    const byValue = (a, b) => {
+      const d = calcFpts(b) - calcFpts(a);
+      if (d !== 0) return d;
+      return (a.overallRank || 999) - (b.overallRank || 999);
+    };
+
+    // Strictest first; the last tier takes anyone rather than stalling.
+    const tiers = [
+      undrafted.filter(pl => underMax(posOf(pl)) && nextPicksRemaining >= needAfter(posOf(pl))),
+      undrafted.filter(pl => underMax(posOf(pl))),
+      undrafted,
+    ];
+
+    for (const pool of tiers) {
+      if (pool.length === 0) continue;
+      // No slack left: the pick must address an unmet starter minimum, even if a
+      // higher-ranked player is on the board.
+      let candidates = pool;
+      if (totalNeeded > 0 && picksRemaining <= totalNeeded) {
+        const needful = pool.filter(pl => need[posOf(pl)] > 0);
+        if (needful.length > 0) candidates = needful;
+      }
+      candidates.sort(byValue);
+      return candidates[0];
+    }
+    return null;
   }, [activeSeasonId]);
 
   const triggerAutoPickForUser = useCallback(async (pickerUid, timedOut = false) => {
