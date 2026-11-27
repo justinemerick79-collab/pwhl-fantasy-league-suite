@@ -86,8 +86,15 @@ Current state when run against the emulator with the repo's own rules:
 | `test-matchup-resolution.js` | **passes** |
 | `test-bot-draft.js` | **passes** |
 | `test-draft-roster-needs.js` | **passes** |
+| `test-admin-callables.js` | **passes** |
 
-All six pass.
+All seven pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
+emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
+which starts the emulators, sets both env vars, runs the script and shuts down.
+
+Admin-only callables check the caller with `requireAdmin(request, action)` at the top of `functions/index.js`.
+Call it first, **outside** any `try` whose `catch` rewraps errors (as `generateSeasonProjections`' does), or the
+caller sees `internal` instead of `permission-denied`. Any new admin callable belongs in that test's `ADMIN_ONLY` list.
 
 ### Week boundaries come from the season document
 

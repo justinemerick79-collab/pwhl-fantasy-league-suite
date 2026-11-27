@@ -14,6 +14,30 @@ exports.liveGamePoller = liveGamePoller;
 initializeApp();
 const db = getFirestore();
 
+/**
+ * Throws unless the callable request comes from a signed-in admin.
+ * Admin = the super-admin email, or users/{uid}.role === 'admin'.
+ * Call it before any work, and outside any try/catch that rewraps errors,
+ * so the caller sees `unauthenticated` / `permission-denied` rather than `internal`.
+ */
+async function requireAdmin(request, action) {
+  const auth = request.auth;
+  if (!auth) {
+    throw new HttpsError("unauthenticated", "The function must be called by an authenticated user.");
+  }
+  const email = auth.token ? auth.token.email : null;
+  const isSuperAdmin = email === "justinemerick79@gmail.com";
+  let isExplicitAdmin = false;
+  if (!isSuperAdmin) {
+    const userSnap = await db.collection("users").doc(auth.uid).get();
+    isExplicitAdmin = userSnap.exists && userSnap.data().role === "admin";
+  }
+  if (!isSuperAdmin && !isExplicitAdmin) {
+    throw new HttpsError("permission-denied", `Only authenticated admin accounts can ${action}.`);
+  }
+  return { uid: auth.uid, email, isSuperAdmin };
+}
+
 const API_KEY = '446521baf8c38984';
 const CLIENT_CODE = 'pwhl';
 const BASE_URL = 'https://lscluster.hockeytech.com/feed/index.php';
@@ -606,32 +630,10 @@ exports.onGameSummaryWritten = onDocumentWritten({
  * an active 8-team filled league, 8 team sheets, and a 7-week matchup schedule.
  */
 exports.initializeTestEnvironment = onCall({ region: "us-central1" }, async (request) => {
-  const auth = request.auth;
   try {
-    // 1. Enforce user authentication
-    if (!auth) {
-      throw new HttpsError(
-        "unauthenticated",
-        "The function must be called by an authenticated user."
-      );
-    }
-
-    const adminUid = auth.uid;
-    const adminEmail = auth.token ? auth.token.email : null;
-
-    // 2. Enforce admin privilege check
+    const { uid: adminUid, email: adminEmail, isSuperAdmin } = await requireAdmin(request, "initialize the simulation mode");
     const userRef = db.collection("users").doc(adminUid);
     const userSnap = await userRef.get();
-
-    const isSuperAdmin = adminEmail === "justinemerick79@gmail.com";
-    const isExplicitAdmin = userSnap.exists && userSnap.data().role === "admin";
-
-    if (!isSuperAdmin && !isExplicitAdmin) {
-      throw new HttpsError(
-        "permission-denied",
-        "Only authenticated admin accounts can initialize the simulation mode."
-      );
-    }
 
     console.log(`[Simulation] Admin ${adminUid} started test environment setup...`);
 
@@ -901,32 +903,8 @@ exports.initializeTestEnvironment = onCall({ region: "us-central1" }, async (req
  * and resets simulation state and time travel settings.
  */
 exports.deactivateSimulation = onCall({ region: "us-central1" }, async (request) => {
-  const auth = request.auth;
   try {
-    // 1. Enforce user authentication
-    if (!auth) {
-      throw new HttpsError(
-        "unauthenticated",
-        "The function must be called by an authenticated user."
-      );
-    }
-
-    const adminUid = auth.uid;
-    const adminEmail = auth.token ? auth.token.email : null;
-
-    // 2. Enforce admin privilege check
-    const userRef = db.collection("users").doc(adminUid);
-    const userSnap = await userRef.get();
-
-    const isSuperAdmin = adminEmail === "justinemerick79@gmail.com";
-    const isExplicitAdmin = userSnap.exists && userSnap.data().role === "admin";
-
-    if (!isSuperAdmin && !isExplicitAdmin) {
-      throw new HttpsError(
-        "permission-denied",
-        "Only authenticated admin accounts can deactivate the simulation mode."
-      );
-    }
+    const { uid: adminUid } = await requireAdmin(request, "deactivate the simulation mode");
 
     console.log(`[Simulation] Admin ${adminUid} started deactivating simulation...`);
 
@@ -1042,6 +1020,7 @@ exports.getSimulatedTime = onCall({ region: "us-central1" }, async () => {
  * HTTPS Callable function to manually trigger the daily stats snapshot for the simulated date.
  */
 exports.triggerSimulationDailySync = onCall({ region: "us-central1" }, async (request) => {
+  await requireAdmin(request, "trigger the daily stats sync");
   const data = request.data;
   try {
     const leagueId = data?.leagueId || null;
@@ -2770,6 +2749,7 @@ exports.onLeagueSimulatedDateWritten = onDocumentWritten({
 });
 
 exports.generateSeasonProjections = onCall({ region: "us-central1" }, async (request) => {
+  await requireAdmin(request, "generate season projections");
   const data = request.data;
   const seasonIdStr = typeof data === "string" ? data : (data?.seasonId ? String(data.seasonId) : null);
   if (!seasonIdStr) {
