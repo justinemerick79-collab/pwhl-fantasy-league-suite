@@ -87,8 +87,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-bot-draft.js` | **passes** |
 | `test-draft-roster-needs.js` | **passes** |
 | `test-admin-callables.js` | **passes** |
+| `test-league-schedule.js` | **passes** |
 
-All seven pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
+All eight pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
 
@@ -114,6 +115,23 @@ site skips instead of guessing. Week boundaries are data; do not reintroduce a d
 That silent fallback is what broke `test-matchup-resolution.js`: it never seeded the season, so Week 1
 resolved to 2024-01-01 → 2024-01-08, placing its 2024-01-02 warp *inside* Week 1 instead of past it.
 **Any fixture that exercises the game loop must seed `pwhl_seasons/{id}.weeks`.**
+
+### Real leagues get their schedule when the draft completes
+
+`functions/schedule.js` builds the regular-season schedule. `onDraftWritten` calls `generateLeagueSchedule` when
+`fantasy_leagues/{id}/draft/state` changes to `status: 'completed'` — both the client (human last pick) and the
+server (bot last pick) make that write, so the one transition covers both. Simulation leagues are skipped; they
+still build their own schedule in `initializeTestEnvironment`.
+
+- Uses only non-off weeks that **start after** the draft, and sets `currentWeek` to the first of them. Settlement
+  starts from `currentWeek`, so without this a league drafted mid-season would settle its past weeks with no games.
+- Reserves the last `ceil(log2(playoffTeams)) × playoffDuration` game weeks for playoffs, recorded in
+  `league.schedule.playoffWeeks`. Nothing settles those weeks yet (playoffs are issue #17).
+- Circle-method round-robin, repeated with home/away swapped on each pass. Odd team counts give one bye a week
+  (no matchup document). `matchupDuration: 2` keeps the same pairs for 2 weeks, but each week still settles on its
+  own — `finalizeLeagueWeek` is per week.
+- Idempotent: does nothing if the league already has any matchup. Team order is sorted, so a retry is identical.
+- No week map → skipped with a logged error, the same rule as `getWeekBounds`.
 
 ### The daily_lineups date comparison
 
