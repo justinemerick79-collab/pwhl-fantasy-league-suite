@@ -88,8 +88,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-draft-roster-needs.js` | **passes** |
 | `test-admin-callables.js` | **passes** |
 | `test-league-schedule.js` | **passes** |
+| `test-season-weeks.js` | **passes** (reads the live feed; writes only to the emulator, then removes what it wrote) |
 
-All eight pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
+All nine pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
 
@@ -115,6 +116,17 @@ site skips instead of guessing. Week boundaries are data; do not reintroduce a d
 That silent fallback is what broke `test-matchup-resolution.js`: it never seeded the season, so Week 1
 resolved to 2024-01-01 → 2024-01-08, placing its 2024-01-02 warp *inside* Week 1 instead of past it.
 **Any fixture that exercises the game loop must seed `pwhl_seasons/{id}.weeks`.**
+
+**The daily server sync builds the week map.** `syncDailyData` writes each recent season's feed row and its
+`weeks` to `pwhl_seasons/{id}` using `functions/seasonWeeks.js#buildSeasonWeeks`. Before this, only the
+dev-server admin sync wrote it. Weeks run Monday 00:00 → Sunday 23:59:59.999 **Pacific**; week 1 contains the
+season's `start_date`; games are placed by their `date_played` **string**, never `new Date('YYYY-MM-DD')` (that
+is midnight UTC, 4 pm Sunday Pacific, and used to move every Monday game into the previous week). An empty
+schedule never replaces an existing week map. The client's `generateWeeksList()` in `pwhlService.js` is a copy of
+the same rules for the admin sync — **keep the two in step**; `test-season-weeks.js` fails if they differ.
+
+The simulation schedules the first 14 *game* weeks of its season (skipping off weeks), so with real season data
+its weeks are not 1–14; `verify-test-league.js` derives its expectation the same way.
 
 ### Real leagues get their schedule when the draft completes
 

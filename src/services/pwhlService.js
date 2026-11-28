@@ -397,46 +397,57 @@ export async function syncRoster(seasonId, teamId) {
   return players;
 }
 
+// Fantasy weeks run Monday 00:00 to Sunday 23:59:59.999 Pacific time (league days
+// are PST-based). Games are assigned by their calendar date string, never by
+// `new Date('YYYY-MM-DD')`, which is midnight UTC and moved Monday games into the
+// previous week. Must match functions/seasonWeeks.js#buildSeasonWeeks, which the
+// daily server sync uses; keep the two in step.
+const PACIFIC_HOUR = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: '2-digit', hourCycle: 'h23' });
+
+function pacificMidnightMs(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  for (const offsetHours of [8, 7]) {
+    const ms = Date.UTC(y, m - 1, d, offsetHours);
+    if (Number(PACIFIC_HOUR.format(new Date(ms))) === 0) return ms;
+  }
+  throw new Error(`Cannot resolve Pacific midnight for ${dateStr}`);
+}
+
+function addDaysStr(dateStr, n) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+
+function mondayOfStr(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0 = Sunday
+  return addDaysStr(dateStr, dow === 0 ? -6 : 1 - dow);
+}
+
 export function generateWeeksList(seasonStart, seasonEnd, games) {
-  const startDate = new Date(seasonStart);
-  const endDate = new Date(seasonEnd);
-  
-  // Find Monday of the week containing seasonStart
-  const startDay = startDate.getDay(); // 0 is Sunday, 1 is Monday, etc.
-  const diffToMonday = startDay === 0 ? -6 : 1 - startDay;
-  const firstMonday = new Date(startDate);
-  firstMonday.setDate(startDate.getDate() + diffToMonday);
-  firstMonday.setHours(0, 0, 0, 0);
-  
+  const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v);
+  if (!isDate(seasonStart) || !isDate(seasonEnd)) return [];
+  const endDay = seasonEnd.slice(0, 10);
+  const gameDay = (g) => {
+    const raw = g.date_played || g.GameDateISO8601 || g.date || '';
+    return isDate(raw) ? raw.slice(0, 10) : null;
+  };
+
   const weeks = [];
-  let currentMonday = new Date(firstMonday);
-  let weekIndex = 1;
-  
-  while (currentMonday <= endDate) {
-    const nextSunday = new Date(currentMonday);
-    nextSunday.setDate(currentMonday.getDate() + 6);
-    nextSunday.setHours(23, 59, 59, 999);
-    
-    // Check if there are games in this week range
+  for (let monday = mondayOfStr(seasonStart.slice(0, 10)), n = 1; monday <= endDay; monday = addDaysStr(monday, 7), n++) {
+    const sunday = addDaysStr(monday, 6);
     const gamesInWeek = games.filter(g => {
-      const gDateStr = g.date_played || g.date;
-      if (!gDateStr) return false;
-      const gDate = new Date(gDateStr);
-      return gDate >= currentMonday && gDate <= nextSunday;
+      const d = gameDay(g);
+      return d && d >= monday && d <= sunday;
     });
-    
     weeks.push({
-      week: weekIndex,
-      start: currentMonday.toISOString(),
-      end: nextSunday.toISOString(),
+      week: n,
+      start: new Date(pacificMidnightMs(monday)).toISOString(),
+      end: new Date(pacificMidnightMs(addDaysStr(monday, 7)) - 1).toISOString(),
       gameCount: gamesInWeek.length,
       isOffWeek: gamesInWeek.length === 0,
       games: gamesInWeek.map(g => (g.game_id || g.id).toString())
     });
-    
-    // Move to next Monday
-    currentMonday.setDate(currentMonday.getDate() + 7);
-    weekIndex++;
   }
   return weeks;
 }

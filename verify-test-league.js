@@ -181,7 +181,17 @@ async function runVerification() {
     if (uniqueWeeks.size !== 14) {
       throw new Error(`Assertion 3 Failed: Expected exactly 14 weeks of matchups, found ${uniqueWeeks.size} weeks`);
     }
-    for (let w = 1; w <= 14; w++) {
+    // The simulation schedules the first 14 *game* weeks of its season, skipping
+    // off weeks (getActiveWeekNum in initializeTestEnvironment). With no season
+    // week map in the database it falls back to weeks 1-14. Expect the same.
+    const simLeagueSnap = await getDoc(doc(db, "fantasy_leagues", activeLeagueId));
+    const simSeasonId = simLeagueSnap.data()?.simulationSeasonId;
+    const simSeasonSnap = simSeasonId ? await getDoc(doc(db, "pwhl_seasons", String(simSeasonId))) : null;
+    const gameWeeks = ((simSeasonSnap && simSeasonSnap.exists() && simSeasonSnap.data().weeks) || [])
+      .filter(w => !w.isOffWeek).map(w => w.week);
+    const expectedWeeks = Array.from({ length: 14 }, (_, i) => (gameWeeks.length ? gameWeeks[i % gameWeeks.length] : i + 1));
+    console.log(`- Expected weeks (${gameWeeks.length ? `first 14 game weeks of season ${simSeasonId}` : "no week map: 1-14"}): [${expectedWeeks.join(", ")}]`);
+    for (const w of expectedWeeks) {
       if (!uniqueWeeks.has(w)) {
         throw new Error(`Assertion 3 Failed: Matchups are missing for week ${w}`);
       }

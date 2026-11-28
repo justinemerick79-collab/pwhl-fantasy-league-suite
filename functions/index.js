@@ -8,6 +8,7 @@ const { getSystemDate } = require("./utils");
 const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDateStr } = require("./dailyGameStats");
 const { liveGamePoller } = require("./livePoller");
 const { generateLeagueSchedule } = require("./schedule");
+const { buildSeasonWeeks } = require("./seasonWeeks");
 
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
@@ -153,6 +154,22 @@ exports.syncDailyData = onSchedule(
           await currentBatch.commit();
           console.log(`[Schedule Sync] Committed final ${count}-write chunk to Firestore.`);
         }
+
+        // A2. Season document and its week map. Schedules, settlement and the
+        // Matchup screen all read pwhl_seasons/{id}.weeks; before this, only the
+        // dev-server admin sync wrote it. An empty schedule (upcoming season, or
+        // a feed failure) never replaces an existing week map.
+        const seasonRef = db.collection('pwhl_seasons').doc(seasonId);
+        const seasonUpdate = { ...season };
+        if (games.length > 0 && season.start_date && season.end_date) {
+          seasonUpdate.weeks = buildSeasonWeeks(season.start_date, season.end_date, games);
+          seasonUpdate.weeksUpdatedAt = Timestamp.now();
+          const placed = seasonUpdate.weeks.reduce((n, w) => n + w.gameCount, 0);
+          console.log(`[Season Sync] Season ${seasonId}: ${seasonUpdate.weeks.length} weeks, ${placed}/${games.length} games placed.`);
+        } else {
+          console.log(`[Season Sync] Season ${seasonId}: week map not rebuilt (${games.length} games, start ${season.start_date || "missing"}, end ${season.end_date || "missing"}).`);
+        }
+        await seasonRef.set(seasonUpdate, { merge: true });
 
         // B. Ingest player stats data (Top Scorers & Top Goalies)
         console.log(`[Stats Sync] Fetching top scorers for season ${seasonId}...`);
