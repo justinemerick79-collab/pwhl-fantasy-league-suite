@@ -232,6 +232,15 @@ try {
 } finally {
   await signOut(auth).catch(() => {});
   live.setFetchSummaryForTests(null);
+  // Official games save their summaries, which fire onGameSummaryWritten in the
+  // background. Wait for those writes to stop, or they slow and leak into later tests.
+  let last = -1;
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const n = (await db.collection("pwhl_season_player_stats").get()).size;
+    if (n === last) break;
+    last = n;
+  }
   if (L.id) await db.recursiveDelete(db.collection("fantasy_leagues").doc(L.id));
   for (const c of ["pwhl_players", "pwhl_teams", "pwhl_games", "pwhl_player_stats", "pwhl_game_summaries", "pwhl_season_player_stats", "game_box_scores", "daily_game_stats", "live_state", "stat_corrections"]) {
     await db.recursiveDelete(db.collection(c));

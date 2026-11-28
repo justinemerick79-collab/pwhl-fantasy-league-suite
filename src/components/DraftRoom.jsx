@@ -17,6 +17,7 @@ import { useData } from '../contexts/DataContext';
 import { initializeDraft, submitDraftPick, toggleAutoDraftStatus } from '../services/leagueService';
 import { fetchDraftEligiblePlayers } from '../services/pwhlService';
 import PwhlTeamLabel from './PwhlTeamLabel';
+import { projectedPoints } from '../services/scoring';
 
 export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const { currentUser } = useAuth();
@@ -282,34 +283,10 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
       goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
     };
     const scoring = currentLeagueData?.scoringSettings || defaultScoringFallback;
-    const seasonIdStr = activeSeasonId ? String(activeSeasonId) : '5';
-
-    const calcFpts = (player) => {
-      const stats = player.stats?.[seasonIdStr] || {};
-      let pts = 0;
-      if (player.pos === 'G') {
-        const m = scoring.goalies || defaultScoringFallback.goalies;
-        pts += (stats.wins || 0) * (m.wins || 0);
-        pts += (stats.overtimeLosses || stats.otl || 0) * (m.otl || 0);
-        pts += (stats.goalsAgainst || stats.ga || 0) * (m.ga || 0);
-        pts += (stats.shotsSaved || stats.saves || 0) * (m.saves || 0);
-        pts += (stats.shutouts || 0) * (m.shutouts || 0);
-      } else {
-        const m = scoring.skaters || defaultScoringFallback.skaters;
-        pts += (stats.goals || 0) * (m.goals || 0);
-        pts += (stats.assists || 0) * (m.assists || 0);
-        pts += (stats.plusMinus || 0) * (m.plusMinus || 0);
-        pts += (stats.powerPlayPoints || stats.ppp || 0) * (m.ppp || 0);
-        pts += (stats.shortHandedPoints || stats.shp || 0) * (m.shp || 0);
-        pts += (stats.shotsOnGoal || stats.shots || 0) * (m.sog || 0);
-        pts += (stats.hits || 0) * (m.hits || 0);
-        pts += (stats.blockedShots || stats.blocks || 0) * (m.blocks || 0);
-        if (player.pos === 'D') {
-          pts += ((stats.goals || 0) + (stats.assists || 0)) * (m.defensePoints || 0);
-        }
-      }
-      return pts;
-    };
+    // Draft value = projected points under this league's scoring, from the rank line
+    // fetchDraftEligiblePlayers attached for the draft season (not the view mode).
+    // Mirrors functions/draftRanking.js — keep the two in step.
+    const calcFpts = (player) => projectedPoints(player.rankLine, scoring, player.pos);
 
     // Choose the pick. Ranking by points alone is what stalled drafts: the limit
     // rules were only a veto, never a preference, so a picker could spend its
@@ -360,7 +337,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
       return candidates[0];
     }
     return null;
-  }, [activeSeasonId]);
+  }, []);
 
   const triggerAutoPickForUser = useCallback(async (pickerUid, timedOut = false) => {
     if (isSubmittingRef.current) return;

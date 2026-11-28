@@ -14,6 +14,7 @@ const { planGameDay, reconcileRecentGames, ensureWeekOfficial, snapshotLiveDay, 
 const { pacificDateStr, addDays } = require("./dates");
 const { runSync } = require("./dataSync");
 const { resolveLeagueSeasonId } = require("./leagueSeason");
+const { loadRankLines, projectedPoints } = require("./draftRanking");
 const { loadSeasonPlayerPool } = require("./universeSeason");
 
 // Re-export the live poller
@@ -1054,6 +1055,17 @@ async function handleDraftStateChange(docSnap) {
     const botTeam = teams.find(t => t.ownerId === currentPickerId);
 
     // 6. Run Firestore transaction to execute the pick
+    // The league's season and the draft values are loaded BEFORE the transaction:
+    // the season safety net may write the league doc, and a write to a doc the
+    // transaction has read — or long reads inside it — makes the pick fail
+    // ("Transaction is invalid or closed").
+    const preLeagueSnap = await db.collection(parentCollection).doc(leagueId).get();
+    const preLeague = preLeagueSnap.exists ? preLeagueSnap.data() : {};
+    const seasonIdStr = parentCollection === "fantasy_leagues"
+      ? await resolveLeagueSeasonId(db, leagueId, preLeague)
+      : String(preLeague.season_id || "");
+    const rankLines = await loadRankLines(db, seasonIdStr);
+
     await db.runTransaction(async (transaction) => {
       // Re-read draft state and league within transaction
       const txDraftSnap = await transaction.get(docRef);
@@ -1146,39 +1158,18 @@ async function handleDraftStateChange(docSnap) {
         goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
       };
       const scoring = leagueData.scoringSettings || defaultScoringFallback;
-      const seasonIdStr = leagueData.season_id ? String(leagueData.season_id) : '5';
 
+      // Draft value = projected fantasy points under this league's scoring
+      // (functions/draftRanking.js: projection, else last regular season, else 0).
+      // rankLines is loaded before the transaction (see above).
       const calcFpts = (player) => {
-        if (player.points !== undefined && (player.stats === undefined || typeof player.stats === 'string')) {
-          return Number(player.points);
-        }
-        
-        const stats = player.stats?.[seasonIdStr] || {};
-        let pts = 0;
+        const pid = String(player.player_id ?? player.id);
         const pos = normalizePosition(player.position || player.pos || 'F');
-        
-        if (pos === 'G') {
-          const m = scoring.goalies || defaultScoringFallback.goalies;
-          pts += (stats.wins || 0) * (m.wins || 0);
-          pts += (stats.overtimeLosses || stats.otl || 0) * (m.otl || 0);
-          pts += (stats.goalsAgainst || stats.ga || 0) * (m.ga || 0);
-          pts += (stats.shotsSaved || stats.saves || 0) * (m.saves || 0);
-          pts += (stats.shutouts || 0) * (m.shutouts || 0);
-        } else {
-          const m = scoring.skaters || defaultScoringFallback.skaters;
-          pts += (stats.goals || 0) * (m.goals || 0);
-          pts += (stats.assists || 0) * (m.assists || 0);
-          pts += (stats.plusMinus || 0) * (m.plusMinus || 0);
-          pts += (stats.powerPlayPoints || stats.ppp || 0) * (m.ppp || 0);
-          pts += (stats.shortHandedPoints || stats.shp || 0) * (m.shp || 0);
-          pts += (stats.shotsOnGoal || stats.shots || 0) * (m.sog || 0);
-          pts += (stats.hits || 0) * (m.hits || 0);
-          pts += (stats.blockedShots || stats.blocks || 0) * (m.blocks || 0);
-          if (pos === 'D') {
-            pts += ((stats.goals || 0) + (stats.assists || 0)) * (m.defensePoints || 0);
-          }
-        }
-        return pts;
+        const ranked = rankLines.get(pid);
+        if (ranked) return projectedPoints(ranked.line, scoring, pos);
+        // Last resort: an inline `points` value (the built-in dev pool and test
+        // fixtures). Real player docs do not carry it.
+        return player.points !== undefined ? Number(player.points) || 0 : 0;
       };
 
       // Choose the pick. Ranking by points alone is what stalled drafts: the
