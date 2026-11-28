@@ -58,6 +58,21 @@ service cloud.firestore {
       }
     }
 
+    // Live scoring (functions/liveStats.js). Written only by Cloud Functions
+    // (Admin SDK); managers read them.
+    match /game_box_scores/{gameId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    match /stat_corrections/{id} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    match /live_state/{id} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
     // PWHL Data Collections - Only admins can write, anyone can read
     match /daily_game_stats/{document=**} {
       allow read: if isAuthenticated();

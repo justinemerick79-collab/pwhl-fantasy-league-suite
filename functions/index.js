@@ -11,6 +11,8 @@ const { generateLeagueSchedule } = require("./schedule");
 const { buildSeasonWeeks } = require("./seasonWeeks");
 const { processLeagueTransactions, processLeagueTrades } = require("./transactions");
 const { afterWeekSettled, playoffWinner } = require("./playoffs");
+const { planGameDay, reconcileRecentGames, ensureWeekOfficial, snapshotLiveDay, SETTLE_VALVE_HOURS } = require("./liveStats");
+const { pacificDateStr, addDays } = require("./dates");
 
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
@@ -81,7 +83,8 @@ async function fetchFromApi(params) {
  */
 exports.syncDailyData = onSchedule(
   {
-    schedule: "every 24 hours",
+    schedule: "0 3 * * *",
+    timeZone: "America/Los_Angeles",
     region: "us-central1",
     memory: "512MiB",
     timeoutSeconds: 540,
@@ -221,18 +224,23 @@ exports.syncDailyData = onSchedule(
         }
       }
 
-      // C. Snapshot yesterday's daily game stats as "final" (authoritative)
-      // This overwrites any "preliminary" data from the live poller
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yesterdayStr = getDateStr(yesterday);
-
-      console.log(`[Daily Snapshot] Snapshotting daily_game_stats for ${yesterdayStr} as "final"...`);
+      // C. Rebuild yesterday's (Pacific) points from the box scores that live
+      // polling and the 1:00 am official switch keep. A day with no box scores
+      // (before live scoring existed) uses the original summary-based snapshot.
+      const yesterdayStr = addDays(pacificDateStr(), -1);
       try {
-        await snapshotDailyGameStats(yesterdayStr, "final");
-        console.log(`[Daily Snapshot] Successfully snapshotted ${yesterdayStr}.`);
+        const r = await snapshotLiveDay(db, yesterdayStr);
+        if (r.status === "no box scores") await snapshotDailyGameStats(yesterdayStr, "final");
+        console.log(`[Daily Snapshot] ${yesterdayStr}: ${r.status}`);
       } catch (snapshotErr) {
         console.error(`[Daily Snapshot] Failed to snapshot ${yesterdayStr}:`, snapshotErr);
+      }
+
+      // D. Plan today's live polling now that the schedule is fresh.
+      try {
+        await planGameDay(db, Date.now());
+      } catch (planErr) {
+        console.error("[GameDay] planning failed:", planErr);
       }
 
       console.log("Daily scheduled ingestion finished successfully!");
@@ -2518,8 +2526,10 @@ async function finalizeLeagueWeek(leagueId, weekInfo) {
  */
 exports.settleMatchupWeeksScheduled = onSchedule(
   {
-    schedule: "0 6 * * 1",
-    timeZone: "America/New_York",
+    // Hourly: a week settles at the first run after (a) it has ended and (b) every
+    // game in it is official. See liveStats.js#ensureWeekOfficial.
+    schedule: "0 * * * *",
+    timeZone: "America/Los_Angeles",
     region: "us-central1",
     memory: "512MiB",
     timeoutSeconds: 540,
@@ -2538,6 +2548,7 @@ exports.settleMatchupWeeksScheduled = onSchedule(
 
     console.log(`[Scheduler] Found ${leaguesSnap.size} leagues to inspect.`);
     const now = new Date();
+    const weekGates = {};
 
     for (const leagueDoc of leaguesSnap.docs) {
       const leagueId = leagueDoc.id;
@@ -2578,6 +2589,24 @@ exports.settleMatchupWeeksScheduled = onSchedule(
               currentWeek: currentWeek + 1
             });
           } else {
+            // Gate: never settle on provisional stats. Cached per season-week for this run.
+            const gateKey = `${seasonId}:${currentWeek}`;
+            if (!weekGates[gateKey]) weekGates[gateKey] = await ensureWeekOfficial(db, weekInfo, now.getTime());
+            const gate = weekGates[gateKey];
+            if (!gate.ok) {
+              const overdue = now.getTime() > weekEnd.getTime() + SETTLE_VALVE_HOURS * 3600 * 1000;
+              if (!overdue) {
+                console.log(`[Scheduler] Week ${currentWeek} for league ${leagueId} waits: game(s) ${gate.pending.join(", ")} not official yet.`);
+                continue;
+              }
+              // Safety valve: a stuck feed must not freeze every league.
+              await db.collection("stat_corrections").doc(`unconfirmed_${seasonId}_${currentWeek}`).set({
+                type: "unconfirmed_settlement", seasonId, week: currentWeek, gameIds: gate.pending,
+                detectedAt: Timestamp.now(),
+                note: `Week ${currentWeek} settled on unconfirmed data: LeagueStat had not confirmed game(s) ${gate.pending.join(", ")} ${SETTLE_VALVE_HOURS} h after the week ended.`
+              }, { merge: true });
+              console.warn(`[Scheduler] Week ${currentWeek} for league ${leagueId}: settling on unconfirmed data (games ${gate.pending.join(", ")}).`);
+            }
             await finalizeLeagueWeek(leagueId, weekInfo);
           }
         } catch (err) {
@@ -2591,6 +2620,23 @@ exports.settleMatchupWeeksScheduled = onSchedule(
     console.log("[Scheduler] Weekly matchup settlement complete.");
     return null;
   });
+/**
+ * 4:00 am Pacific: decide whether today has PWHL games. On a day without games the
+ * live poller reads one document and stops. (syncDailyData also re-plans at 3:00 am.)
+ */
+exports.planGameDayScheduled = onSchedule(
+  { schedule: "0 4 * * *", timeZone: "America/Los_Angeles", region: "us-central1" },
+  async () => { await planGameDay(db, Date.now()); return null; });
+
+/**
+ * 1:00 am Pacific: the official switch. Re-checks every game of the last 3 days
+ * against LeagueStat, marks stable finals official, logs stat corrections, and
+ * rebuilds those days' points — before any week can settle.
+ */
+exports.reconcileFinalStatsScheduled = onSchedule(
+  { schedule: "0 1 * * *", timeZone: "America/Los_Angeles", region: "us-central1", timeoutSeconds: 540, memory: "512MiB" },
+  async () => { await reconcileRecentGames(db, Date.now()); return null; });
+
 /**
  * Clears expired waivers and accepted trades for every active league.
  * Before this, they were processed only in a manager's browser, so a league
