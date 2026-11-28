@@ -720,6 +720,13 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       (resolvedOppTeam.benchPlayers || []).forEach(pId => awayBench.push(String(pId)));
     }
 
+    // A rostered player with no doc in this season's list still shows (safeguard):
+    // defaults first, then whatever the player map has.
+    const playerRow = (id, slotKey) => ({
+      id, name: `Player ${id}`, pos: slotKey ? slotKey[0] : 'F', team: 'FA', teamCode: 'FA',
+      ...playersMap[id],
+    });
+
     // Align starting positions
     const slots = [];
     for (let i = 1; i <= fLimit; i++) slots.push({ label: "F", key: `F${i}`, pos: "F" });
@@ -732,8 +739,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       return {
         slotLabel: slot.label,
         slotPos: slot.key,
-        myPlayer: myP ? { id: myP, ...playersMap[myP] } : null,
-        oppPlayer: oppP ? { id: oppP, ...playersMap[oppP] } : null
+        myPlayer: myP ? playerRow(myP, slot.key) : null,
+        oppPlayer: oppP ? playerRow(oppP, slot.key) : null
       };
     });
 
@@ -746,8 +753,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
       benchLineups.push({
         slotLabel: "BN",
         slotPos: "BN",
-        myPlayer: myP ? { id: myP, ...playersMap[myP] } : null,
-        oppPlayer: oppP ? { id: oppP, ...playersMap[oppP] } : null
+        myPlayer: myP ? playerRow(myP) : null,
+        oppPlayer: oppP ? playerRow(oppP) : null
       });
     }
 

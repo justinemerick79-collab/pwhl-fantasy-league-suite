@@ -317,7 +317,7 @@ export default function PlayerCardModal({ player: initialPlayer, playerId, onClo
             <div>
               <h3 className="font-sports text-2xl font-black tracking-tight">{player.name}</h3>
               <div className="flex items-center gap-2 mt-1 flex-wrap">
-                <span className="text-[10px] font-black bg-white/20 px-2 py-0.5 rounded border border-white/10 uppercase tracking-wider">
+                <span title={player.teamCode && player.teamCode !== 'FA' ? undefined : 'No PWHL team'} className={`text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-wider ${player.teamCode && player.teamCode !== 'FA' ? 'bg-white/20 border border-white/10' : 'border border-dashed border-white/40 text-white/70'}`}>
                   {player.teamCode || 'FA'}
                 </span>
                 <span className="text-[10px] font-black bg-white/20 px-2 py-0.5 rounded border border-white/10 uppercase tracking-wider">

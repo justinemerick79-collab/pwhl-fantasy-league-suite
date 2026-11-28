@@ -13,6 +13,7 @@ import { saveDailyLineup, getDailyLineup, getLocalDateStr, getPSTDateStr } from 
 import PlayerCardModal from './PlayerCardModal';
 import { useLiveDay } from '../hooks/useLiveStats';
 import LiveBadge from './LiveBadge';
+import PwhlTeamLabel from './PwhlTeamLabel';
 
 const getActiveStatsText = (player, stats) => {
   if (!stats) return '';
@@ -323,13 +324,36 @@ export default function Roster({ activeLeagueId }) {
           };
         });
 
-        setPlayersMap(map);
-
         // Fetch daily lineup state
-        if (myTeam) {
-          const lineup = await getDailyLineup(activeLeagueId, myTeam.id, selectedDateStr);
-          setDailyLineup(lineup);
+        const lineup = myTeam ? await getDailyLineup(activeLeagueId, myTeam.id, selectedDateStr) : null;
+
+        // Safeguard: a player on this fantasy roster must never vanish, even with no
+        // player doc in this season's list (the server keeps one, but the screen must
+        // not depend on it). Use the player's doc from any season for the name, the
+        // lineup slot for the position, and show no PWHL team.
+        const slotPos = {};
+        Object.entries(lineup?.activeLineup || {}).forEach(([slot, id]) => { if (id) slotPos[String(id)] = slot[0]; });
+        const rosterIds = new Set([...(myTeam?.players || []), ...Object.keys(slotPos), ...(lineup?.bench || [])].map(String));
+        const missingIds = [...rosterIds].filter(id => !map[id]);
+        const namesById = {};
+        for (let i = 0; i < missingIds.length; i += 30) {
+          const chunk = missingIds.slice(i, i + 30);
+          const snap = await getDocs(query(collection(db, 'pwhl_players'), where('player_id', 'in', chunk)));
+          snap.forEach(d => { const x = d.data(); namesById[String(x.player_id)] = x; });
         }
+        missingIds.forEach(id => {
+          const older = namesById[id] || {};
+          const pos = slotPos[id] || normalizePosition(older.position) || 'F';
+          map[id] = {
+            id, name: older.name || `${older.first_name || ''} ${older.last_name || ''}`.trim() || `Player ${id}`,
+            pos, jersey_number: older.tp_jersey_number || '', teamId: '', teamCode: 'FA', team: 'FA',
+            rating: pos === 'G' ? 85 : pos === 'D' ? 82 : 84,
+            stats: 'Not in this season\'s player list', points: pointsMap[id] || 0.0, raw: older,
+          };
+        });
+
+        setPlayersMap(map);
+        if (lineup) setDailyLineup(lineup);
       } catch (err) {
         console.error("Error loading dynamic players and stats:", err);
       } finally {
@@ -663,9 +687,7 @@ export default function Roster({ activeLeagueId }) {
                   </td>
                   <td className="px-4 py-3">
                     {p ? (
-                      <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-lg border border-slate-200">
-                        {p.team}
-                      </span>
+                      <PwhlTeamLabel code={p.team} className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-lg border border-slate-200" />
                     ) : '-'}
                   </td>
                   <td className="px-4 py-3">
@@ -767,9 +789,7 @@ export default function Roster({ activeLeagueId }) {
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <span className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-lg border border-slate-200">
-                      {p.team}
-                    </span>
+                    <PwhlTeamLabel code={p.team} className="text-[10px] font-black text-slate-700 bg-slate-100 px-2 py-0.5 rounded-lg border border-slate-200" />
                   </td>
                   <td className="px-4 py-3">
                     <span className="text-sm font-sports font-bold text-indigo-600">

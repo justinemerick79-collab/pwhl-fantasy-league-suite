@@ -11,6 +11,7 @@
 const { Timestamp } = require("firebase-admin/firestore");
 const { fetchFromApi, fetchGameSummary } = require("./hockeytech");
 const { buildSeasonWeeks } = require("./seasonWeeks");
+const { buildSeasonUniverse, fetchSeasonRosters, isRegularSeason } = require("./playerUniverse");
 
 const SEASON_LOOKBACK_YEARS = 2;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -48,31 +49,27 @@ function selectSeasons(seasons, target, nowMs = Date.now()) {
  * @param {{log: Function, maxSummaries: number}} opts
  * @returns {Promise<{summariesLeft: number}>}
  */
-async function syncSeason(db, season, { log, maxSummaries }) {
+async function syncSeason(db, season, { log, maxSummaries, api = fetchFromApi, feedSeasons = [], sleepMs = 150 }) {
   const sId = String(season.season_id);
   log(`Season ${season.season_name || sId}:`);
 
   // Teams and rosters
-  const teams = (await fetchFromApi({ feed: "modulekit", view: "teamsbyseason", season_id: sId }))?.SiteKit?.Teamsbyseason || [];
+  const { teams, rosters } = await fetchSeasonRosters(api, sId, sleepMs);
   await commitInChunks(db, teams.filter(t => t.id).map(t => [db.collection("pwhl_teams").doc(`${sId}_${t.id}`), { ...t, season_id: sId }]));
-  let playerCount = 0;
-  for (const team of teams) {
-    if (!team.id) continue;
-    await sleep(150);
-    const roster = (await fetchFromApi({ feed: "modulekit", view: "roster", season_id: sId, team_id: team.id }))?.SiteKit?.Roster || [];
-    const writes = [];
-    for (const p of roster) {
-      const pId = p.player_id || p.id || p.person_id;
-      if (pId) writes.push([db.collection("pwhl_players").doc(`${sId}_${pId}`), { ...p, current_team_id: team.id, season_id: sId }]);
-    }
-    await commitInChunks(db, writes);
-    playerCount += writes.length;
-  }
-  log(`  ${teams.length} teams, ${playerCount} rostered players`);
+  log(`  ${teams.length} teams, ${rosters.size} rostered players`);
 
-  // Schedule, season document and week map
-  const games = (await fetchFromApi({ feed: "modulekit", view: "schedule", season_id: sId }))?.SiteKit?.Schedule || [];
+  // Schedule
+  const games = (await api({ feed: "modulekit", view: "schedule", season_id: sId }))?.SiteKit?.Schedule || [];
   await commitInChunks(db, games.filter(g => g.game_id).map(g => [db.collection("pwhl_games").doc(String(g.game_id)), g]));
+
+  // Players. A regular season gets its full universe (functions/playerUniverse.js):
+  // its rosters + the paired preseason + box-score, retained and fantasy-rostered
+  // players. Other seasons store their rosters as they come.
+  if (isRegularSeason(season)) {
+    await buildSeasonUniverse(db, season, feedSeasons, { api, log, regular: rosters, games, sleepMs });
+  } else {
+    await commitInChunks(db, [...rosters].map(([pid, r]) => [db.collection("pwhl_players").doc(`${sId}_${pid}`), { ...r.row, player_id: pid, current_team_id: r.teamId, season_id: sId }]));
+  }
   const seasonUpdate = { ...season };
   if (games.length > 0 && season.start_date && season.end_date) {
     seasonUpdate.weeks = buildSeasonWeeks(season.start_date, season.end_date, games);
@@ -95,8 +92,8 @@ async function syncSeason(db, season, { log, maxSummaries }) {
   let fetched = 0;
   for (const id of missing.slice(0, maxSummaries)) {
     try {
-      await sleep(150);
-      const summary = await fetchGameSummary(id);
+      if (sleepMs) await sleep(sleepMs);
+      const summary = api === fetchFromApi ? await fetchGameSummary(id) : (await api({ feed: "gc", tab: "gamesummary", game_id: id, site_id: "0", lang: "en" }))?.GC?.Gamesummary;
       if (!summary) continue;
       await db.collection("pwhl_game_summaries").doc(id).set({ ...summary, season_id: sId, game_id: id }, { merge: true });
       fetched++;
@@ -108,8 +105,8 @@ async function syncSeason(db, season, { log, maxSummaries }) {
   log(`  game summaries: ${fetched} downloaded${summariesLeft ? `, ${summariesLeft} still missing (run the sync again)` : ", all complete"}`);
 
   // Player stats
-  const skaters = (await fetchFromApi({ feed: "modulekit", view: "statviewtype", type: "topscorers", season_id: sId, first: 0, limit: 500 }))?.SiteKit?.Statviewtype || [];
-  const goalies = (await fetchFromApi({ feed: "modulekit", view: "statviewtype", type: "topgoalies", season_id: sId, first: 0, limit: 100 }))?.SiteKit?.Statviewtype || [];
+  const skaters = (await api({ feed: "modulekit", view: "statviewtype", type: "topscorers", season_id: sId, first: 0, limit: 500 }))?.SiteKit?.Statviewtype || [];
+  const goalies = (await api({ feed: "modulekit", view: "statviewtype", type: "topgoalies", season_id: sId, first: 0, limit: 100 }))?.SiteKit?.Statviewtype || [];
   const stats = [...skaters, ...goalies].filter(s => s.player_id);
   await commitInChunks(db, stats.map(s => [db.collection("pwhl_player_stats").doc(`${sId}_${s.player_id}`), { ...s, season_id: sId }]));
   log(`  ${stats.length} player stat lines`);
@@ -120,14 +117,14 @@ async function syncSeason(db, season, { log, maxSummaries }) {
  * @param {{target?: 'recent'|'all'|string, maxSummaries?: number, log?: Function}} [opts]
  * @returns {Promise<{seasons: string[], summariesLeft: number}>}
  */
-async function runSync(db, { target = "recent", maxSummaries = 40, log = console.log } = {}) {
-  const feedSeasons = (await fetchFromApi({ feed: "modulekit", view: "seasons" }))?.SiteKit?.Seasons || [];
+async function runSync(db, { target = "recent", maxSummaries = 40, log = console.log, api = fetchFromApi, sleepMs = 150 } = {}) {
+  const feedSeasons = (await api({ feed: "modulekit", view: "seasons" }))?.SiteKit?.Seasons || [];
   const seasons = selectSeasons(feedSeasons, target);
   log(`Syncing ${seasons.length} season(s): ${seasons.map(s => s.season_name || s.season_id).join(", ") || "none"}`);
   let summariesLeft = 0;
   for (const season of seasons) {
     try {
-      const r = await syncSeason(db, season, { log, maxSummaries }); // the cap applies per season
+      const r = await syncSeason(db, season, { log, maxSummaries, api, feedSeasons, sleepMs }); // the cap applies per season
       summariesLeft += r.summariesLeft;
     } catch (err) {
       log(`  Season ${season.season_id} failed: ${err.message || err}`);

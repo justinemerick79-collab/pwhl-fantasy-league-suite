@@ -93,8 +93,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-playoffs.js` | **passes** |
 | `test-live-scoring.js` | **passes** (replays `test-fixtures/gamesummary-358-final.json` through a stubbed fetch) |
 | `test-data-sync.js` | **passes** (calls `runDataSync` as an admin for season 10; live feed in, emulator out) |
+| `test-player-universe.js` | **passes** (stubbed feed) |
 
-All thirteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
+All fourteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
 stop before cleanup (see `test-season-weeks.js`), or leftover players leak into later tests (`test-bot-draft.js`). `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
@@ -306,6 +307,30 @@ claims, drops and trade responses.
 Services that need simulation state outside React re-read it from Firestore via their own local
 `checkIsSimulation()` helpers (in `statsEngine.js` and `pwhlService.js`), which read
 `localStorage.pwhl_active_league`. That key is the bridge between the React context and the service layer.
+
+### Season player universe (who "exists" in a season)
+
+`functions/playerUniverse.js`, built by `dataSync.js` on every sync for each **regular** season S. It writes
+`pwhl_players/{S}_{playerId}` for the union below, so the app, the draft room, the bot engine and projections read
+one complete list. The 2026-27 regular rosters were **empty** six days before the opener; the paired preseason
+(345 players, incl. the 73 "Draftee" rookies) was the only source.
+
+| Source (first match wins) | PWHL team (`current_team_id`, `team_id`, …) |
+|---|---|
+| `roster` — on S's regular roster | S team |
+| `preseason` — on the paired preseason P only (P = the preseason starting latest before S: 11↔10, 8↔7, 5↔4, 1↔2) | P team while S has **0 final games**; after that **none (shows "FA")** |
+| `game` — in a season-S box score only | team of the latest game |
+| `retained` — was in S's feed, now in none | none (FA); **docs are never deleted** |
+| `fantasy_roster` — on a fantasy roster of an S league, no S doc | none (FA); bio from the player's latest doc in any season |
+
+- Copied rows carry only `BIO_FIELDS` — never stats. Team fields are always written explicitly (null for FA),
+  because `DataContext` spreads the raw doc last and a stale `team_id` would otherwise win.
+- Each doc has `universe { source, onRegularRoster, pwhlTeamId, lastSeenInFeedAt }`; `pwhl_seasons/{S}.universe`
+  holds the counts. Camp invitees are included, with no label (CEO, 2026-11-28).
+- UI: a player with no PWHL team shows team **FA** via `PwhlTeamLabel` (dashed grey chip). The league's fantasy
+  availability "FA" stays a filled colour pill — same letters, visibly different.
+- Safeguard in the app: Roster and Matchup never drop a rostered player with no doc in the season list; they show
+  the name from any season's doc (else "Player {id}"), the slot's position, and team FA.
 
 ### DataContext "universe resolver" fallback
 
