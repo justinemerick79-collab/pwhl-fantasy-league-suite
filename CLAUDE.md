@@ -94,8 +94,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-live-scoring.js` | **passes** (replays `test-fixtures/gamesummary-358-final.json` through a stubbed fetch) |
 | `test-data-sync.js` | **passes** (calls `runDataSync` as an admin for season 10; live feed in, emulator out) |
 | `test-player-universe.js` | **passes** (stubbed feed) |
+| `test-season-pool.js` | **passes** (one fallback rule client + server; bot drafts only the league's season; picks store real position) |
 
-All fourteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
+All fifteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
 stop before cleanup (see `test-season-weeks.js`), or leftover players leak into later tests (`test-bot-draft.js`). `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
@@ -339,6 +340,21 @@ behavior: **if the requested season has no players yet** (an upcoming season), i
 recent prior *regular* season (`playoff === '0' && career === '1'`) and returns `resolvedSeasonId` plus
 `isFallbackUniverse: true`. Consumers should respect those fields rather than assuming they got the season
 they asked for.
+
+**That rule exists once on each side.** Client: `resolveUniverseSeason(seasonId, seasons, hasPlayers)` in
+`src/services/pwhlService.js` → `{ seasonId, isFallback }`, used by `DataContext`, `fetchDraftEligiblePlayers`,
+`generateSeasonProjectionsClient` and `DataHub`. Server: the same function in `functions/universeSeason.js`, plus
+`loadSeasonPlayerPool(db, seasonId)`, used by `generateSeasonProjections` and the bot draft engine. **Keep the two in
+step** — `test-season-pool.js` runs both over the same cases. Do not write another inline copy.
+
+Every reader uses **one season's pool**, never all of `pwhl_players`:
+
+- The bot draft engine (`handleDraftStateChange`) reads only the league's season — `league.season_id`, or
+  `app_settings/active_season` for leagues made by `createLeague`, which stores none — through that fallback. It
+  dedupes by `player_id` and records the bare `player_id` in picks and rosters, never the `<season>_<player>` doc id.
+- `submitDraftPick` reads the `<season>_<player>` doc for the league's season (then any season's doc by `player_id`)
+  for the pick's position, and stores it on the pick as `position`. The fixed id ranges (8–11 D, 12–14 G) apply only to
+  the engine's built-in `pwhl_N` scouting pool, used when a season pool is empty.
 
 It intentionally keeps parallel `useRef` mirrors (`cacheRef`, `loadingStatesRef`) alongside React state —
 the refs provide synchronous dedupe to prevent concurrent duplicate loads and render loops. Keep both in sync.
