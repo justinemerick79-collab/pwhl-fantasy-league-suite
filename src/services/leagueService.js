@@ -1,4 +1,5 @@
-import { db } from '../firebase.js';
+import { db, auth } from '../firebase.js';
+import { track } from './analytics';
 import { 
   collection, 
   doc, 
@@ -559,6 +560,7 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
       });
     }
   });
+  track('draft_pick', { league_id: leagueId, auto: Boolean(isAutoPick), timed_out: Boolean(timedOut), own_pick: userId === auth.currentUser?.uid });
 }
 
 /**
@@ -769,6 +771,7 @@ export async function submitAddDrop(leagueId, teamId, userId, addPlayerId, dropP
       });
     }
   });
+  track('add_drop', { league_id: leagueId, has_add: Boolean(addPlayerId), has_drop: Boolean(dropPlayerId) });
 }
 
 /**
@@ -829,6 +832,7 @@ export async function submitWaiverClaim(leagueId, teamId, userId, playerId, drop
       createdAt: Timestamp.fromDate(simulatedDate)
     });
   });
+  track('waiver_claim', { league_id: leagueId, has_drop: Boolean(dropPlayerId) });
 }
 
 // Expired waivers are processed on the server: functions/transactions.js
@@ -856,6 +860,7 @@ export async function submitTradeProposal(leagueId, proposerTeamId, receiverTeam
   };
 
   await setDoc(tradeRef, tradeData);
+  track('trade_propose', { league_id: leagueId, players_sent: proposerSends.length, players_received: receiverSends.length });
 
   try {
     const teamsSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/teams`));
@@ -921,6 +926,7 @@ export async function respondToTrade(leagueId, tradeId, userId, response, receiv
       console.log("Trade proposal rejected.");
     }
   });
+  track(response === 'accept' ? 'trade_accept' : 'trade_reject', { league_id: leagueId });
 
   try {
     const teamsSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/teams`));
@@ -1333,6 +1339,7 @@ export async function saveDailyLineup(leagueId, teamId, dateStr, activeLineup, b
       source: "user"
     });
   });
+  track('lineup_change', { league_id: leagueId, lineup_date: dateStr });
 }
 
 /**

@@ -385,6 +385,17 @@ plus `draft_room`. `standings`/`transactions`/`settings`/`manager` all render `L
 `initialTab`. Styling is **Tailwind via CDN `<script>` in `index.html`** — there is no Tailwind build step,
 so no custom config or `@apply`.
 
+### Product analytics
+
+`src/services/analytics.js` wraps Firebase Analytics (GA4). Call `track(name, params)`; it never throws, does
+nothing when Analytics is not enabled or the manager opted out (account menu → "Usage data"), and on localhost
+only logs `[analytics] …` to the console unless `?analyticsDebug` is in the URL. **Params carry ids only — never
+names, emails or free text.** Events: `sign_up`, `login`, `league_create`, `league_join`, `draft_pick`,
+`lineup_change`, `add_drop`, `waiver_claim`, `trade_propose`, `trade_accept`/`trade_reject`, `matchup_view`.
+Service-level events are logged in `leagueService.js` after the write succeeds, so every screen that calls the
+service is covered. As of 2026-11-28 Google Analytics is **not yet enabled** for the project (no `measurementId`);
+events queue locally and are dropped until it is.
+
 ## Conventions and gotchas
 
 - **`season_id` is stored inconsistently as both string and number.** Every query uses

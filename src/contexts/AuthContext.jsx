@@ -9,6 +9,7 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
+import { track, identify } from '../services/analytics';
 
 const AuthContext = createContext();
 
@@ -28,11 +29,14 @@ export function AuthProvider({ children }) {
       email: userCredential.user.email,
       role: 'user'
     });
+    track('sign_up', { method: 'email' });
     return userCredential;
   }
 
-  function login(email, password) {
-    return signInWithEmailAndPassword(auth, email, password);
+  async function login(email, password) {
+    const cred = await signInWithEmailAndPassword(auth, email, password);
+    track('login', { method: 'email' });
+    return cred;
   }
 
   function logout() {
@@ -51,6 +55,9 @@ export function AuthProvider({ children }) {
         email: result.user.email,
         role: 'user'
       });
+      track('sign_up', { method: 'google' });
+    } else {
+      track('login', { method: 'google' });
     }
     return result;
   }
@@ -58,6 +65,7 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
+      identify(user ? user.uid : null);
       
       if (user) {
         // Hardcoded super-admin check
