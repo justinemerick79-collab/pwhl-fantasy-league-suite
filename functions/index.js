@@ -8,11 +8,11 @@ const { getSystemDate } = require("./utils");
 const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDateStr } = require("./dailyGameStats");
 const { liveGamePoller } = require("./livePoller");
 const { generateLeagueSchedule } = require("./schedule");
-const { buildSeasonWeeks } = require("./seasonWeeks");
 const { processLeagueTransactions, processLeagueTrades } = require("./transactions");
 const { afterWeekSettled, playoffWinner } = require("./playoffs");
 const { planGameDay, reconcileRecentGames, ensureWeekOfficial, snapshotLiveDay, SETTLE_VALVE_HOURS } = require("./liveStats");
 const { pacificDateStr, addDays } = require("./dates");
+const { runSync } = require("./dataSync");
 
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
@@ -44,43 +44,28 @@ async function requireAdmin(request, action) {
   return { uid: auth.uid, email, isSuperAdmin };
 }
 
-const API_KEY = '446521baf8c38984';
-const CLIENT_CODE = 'pwhl';
-const BASE_URL = 'https://lscluster.hockeytech.com/feed/index.php';
-
-/**
- * Fetches JSON data from HockeyTech GC API
- */
-async function fetchFromApi(params) {
-  const url = new URL(BASE_URL);
-  url.searchParams.append('key', API_KEY);
-  url.searchParams.append('client_code', CLIENT_CODE);
-  url.searchParams.append('fmt', 'json'); 
-  
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.append(key, value);
-  }
-
-  const response = await fetch(url.toString());
-  if (!response.ok) throw new Error(`HockeyTech API fetch failed: ${response.statusText}`);
-  
-  const text = await response.text();
-  let jsonString = text;
-  // Handle JSONP callback wrappers if present
-  if (text.startsWith('typeof ') || text.indexOf('(') > -1) {
-      const match = text.match(/^[^{]*({.*})[^}]*$/s);
-      if (match) {
-          jsonString = match[1];
-      }
-  }
-  
-  return JSON.parse(jsonString);
-}
+// HockeyTech feed access lives in functions/hockeytech.js.
 
 /**
  * Cloud Function running every 24 hours to sync Schedule and Player Stats.
  * Safely aggregates and chunks batch writes into sizes of 490 documents maximum.
  */
+/**
+ * Admin "Sync" button. Runs the same sync as the nightly job, on the server, so it
+ * works from the deployed site. data: { seasonId: 'all' | 'recent' | '<id>' }.
+ * Returns the log lines for the Admin Panel.
+ */
+exports.runDataSync = onCall({ region: "us-central1", timeoutSeconds: 1800, memory: "1GiB" }, async (request) => {
+  await requireAdmin(request, "run the data sync");
+  const target = String(request.data?.seasonId || "recent");
+  const lines = [];
+  const log = (m) => { lines.push(m); console.log(`[Sync] ${m}`); };
+  const result = await runSync(db, { target, maxSummaries: 40, log });
+  try { await planGameDay(db, Date.now()); } catch (e) { log(`Game-day plan failed: ${e.message}`); }
+  log("Sync complete.");
+  return { ...result, log: lines };
+});
+
 exports.syncDailyData = onSchedule(
   {
     schedule: "0 3 * * *",
@@ -92,137 +77,10 @@ exports.syncDailyData = onSchedule(
   async (_event) => {
     console.log("Daily scheduled ingestion started...");
     try {
-      // 1. Fetch seasons to identify active seasons to sync
-      const seasonsData = await fetchFromApi({ feed: 'modulekit', view: 'seasons' });
-      const seasons = seasonsData?.SiteKit?.Seasons || [];
-      
-      // Keep ingestion to recent seasons, selected by date rather than by a
-      // hardcoded list of season names. The previous name list ("2024-25",
-      // "2025-26", "2026-27") would have silently stopped covering new seasons
-      // as they were added — no error, just missing data.
-      // Anchored to 1 January of the earliest year kept, not to a floating date
-      // today-minus-N. A floating boundary clipped seasons that began slightly
-      // earlier in the same year (the 2024-25 Pre-Season, starting 2024-11-01,
-      // fell outside a window opening 2024-11-16).
-      const SEASON_LOOKBACK_YEARS = 2;
-      const now = new Date();
-      const windowStart = new Date(now.getFullYear() - SEASON_LOOKBACK_YEARS, 0, 1);
-
-      // Fallback for feed rows that carry no usable start_date: match the season
-      // name against the current and recent calendar years.
-      const recentYears = [];
-      for (let i = SEASON_LOOKBACK_YEARS + 1; i >= -1; i--) {
-        recentYears.push(String(now.getFullYear() - i));
-      }
-
-      const activeSeasons = seasons.filter(s => {
-        const start = s.start_date ? new Date(s.start_date) : null;
-        if (start && !isNaN(start.getTime())) {
-          return start >= windowStart;
-        }
-        const name = s.season_name || "";
-        return recentYears.some(y => name.includes(y));
-      });
-
-      console.log(
-        `Identified ${activeSeasons.length} active/recent seasons to synchronize: ` +
-        (activeSeasons.map(s => s.season_name || s.season_id).join(", ") || "none")
-      );
-
-      for (const season of activeSeasons) {
-        if (!season.season_id) continue;
-        const seasonId = season.season_id.toString();
-
-        // A. Ingest schedule data
-        console.log(`[Schedule Sync] Fetching games for season ${seasonId}...`);
-        const scheduleData = await fetchFromApi({ feed: 'modulekit', view: 'schedule', season_id: seasonId });
-        const games = scheduleData?.SiteKit?.Schedule || [];
-
-        let count = 0;
-        let currentBatch = db.batch();
-
-        for (const game of games) {
-          if (!game.game_id) continue;
-          const ref = db.collection('pwhl_games').doc(game.game_id.toString());
-          currentBatch.set(ref, game, { merge: true });
-          count++;
-
-          if (count === 490) {
-            await currentBatch.commit();
-            currentBatch = db.batch();
-            count = 0;
-            console.log(`[Schedule Sync] Committed 490-write chunk to Firestore.`);
-          }
-        }
-
-        if (count > 0) {
-          await currentBatch.commit();
-          console.log(`[Schedule Sync] Committed final ${count}-write chunk to Firestore.`);
-        }
-
-        // A2. Season document and its week map. Schedules, settlement and the
-        // Matchup screen all read pwhl_seasons/{id}.weeks; before this, only the
-        // dev-server admin sync wrote it. An empty schedule (upcoming season, or
-        // a feed failure) never replaces an existing week map.
-        const seasonRef = db.collection('pwhl_seasons').doc(seasonId);
-        const seasonUpdate = { ...season };
-        if (games.length > 0 && season.start_date && season.end_date) {
-          seasonUpdate.weeks = buildSeasonWeeks(season.start_date, season.end_date, games);
-          seasonUpdate.weeksUpdatedAt = Timestamp.now();
-          const placed = seasonUpdate.weeks.reduce((n, w) => n + w.gameCount, 0);
-          console.log(`[Season Sync] Season ${seasonId}: ${seasonUpdate.weeks.length} weeks, ${placed}/${games.length} games placed.`);
-        } else {
-          console.log(`[Season Sync] Season ${seasonId}: week map not rebuilt (${games.length} games, start ${season.start_date || "missing"}, end ${season.end_date || "missing"}).`);
-        }
-        await seasonRef.set(seasonUpdate, { merge: true });
-
-        // B. Ingest player stats data (Top Scorers & Top Goalies)
-        console.log(`[Stats Sync] Fetching top scorers for season ${seasonId}...`);
-        const statsData = await fetchFromApi({ 
-          feed: 'modulekit', 
-          view: 'statviewtype', 
-          type: 'topscorers', 
-          season_id: seasonId, 
-          first: 0, 
-          limit: 500 
-        });
-        const skatersStats = statsData?.SiteKit?.Statviewtype || [];
-
-        console.log(`[Stats Sync] Fetching top goalies for season ${seasonId}...`);
-        const goaliesData = await fetchFromApi({
-          feed: 'modulekit',
-          view: 'statviewtype',
-          type: 'topgoalies',
-          season_id: seasonId,
-          first: 0,
-          limit: 100
-        });
-        const goaliesStats = goaliesData?.SiteKit?.Statviewtype || [];
-
-        const allStats = [...skatersStats, ...goaliesStats];
-
-        count = 0;
-        currentBatch = db.batch();
-
-        for (const stat of allStats) {
-          if (!stat.player_id) continue;
-          const ref = db.collection('pwhl_player_stats').doc(`${seasonId}_${stat.player_id}`);
-          currentBatch.set(ref, { ...stat, season_id: seasonId }, { merge: true });
-          count++;
-
-          if (count === 490) {
-            await currentBatch.commit();
-            currentBatch = db.batch();
-            count = 0;
-            console.log(`[Stats Sync] Committed 490-write chunk to Firestore.`);
-          }
-        }
-
-        if (count > 0) {
-          await currentBatch.commit();
-          console.log(`[Stats Sync] Committed final ${count}-write chunk to Firestore.`);
-        }
-      }
+      // A/B. Seasons, teams, rosters, schedule, week maps, missing summaries and
+      // player stats for recent seasons (functions/dataSync.js — the same code the
+      // admin Sync button runs).
+      await runSync(db, { target: "recent", maxSummaries: 20, log: (m) => console.log(`[Sync] ${m}`) });
 
       // C. Rebuild yesterday's (Pacific) points from the box scores that live
       // polling and the 1:00 am official switch keep. A day with no box scores

@@ -41,6 +41,7 @@ const ADMIN_ONLY = [
   "deactivateSimulation",
   "triggerSimulationDailySync",
   "generateSeasonProjections",
+  "runDataSync",
 ];
 const TEST_EMAIL = "admin_callables_temp@example.com";
 const TEST_PASSWORD = "TempPassword123!";
