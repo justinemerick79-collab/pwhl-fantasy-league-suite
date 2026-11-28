@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Trophy, Users, Calendar, Zap, RotateCw, LogOut, Shield, Activity, 
-  ChevronDown, Check, Plus, Ticket, Play, Home, Settings
+  ChevronDown, Check, Plus, Ticket, Play, Home, Settings, BarChart3
 } from 'lucide-react';
+import { isOptedOut, setOptOut } from './services/analytics';
 import './index.css';
 import AuthModal from './components/AuthModal';
 import AdminPanel from './components/AdminPanel';
@@ -35,6 +36,7 @@ function App() {
   // Dropdown States
   const [isSwitchMenuOpen, setIsSwitchMenuOpen] = useState(false);
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const [shareUsageData, setShareUsageData] = useState(() => !isOptedOut());
   
   // Creation/Join launcher popups
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -526,6 +528,14 @@ function App() {
                       <Shield className="w-3.5 h-3.5" /> Admin Console
                     </button>
                   )}
+
+                  <button
+                    onClick={() => { const next = !shareUsageData; setShareUsageData(next); setOptOut(!next); }}
+                    className="w-full text-left px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
+                    title="Anonymous usage data helps us improve the app. No names or emails are sent."
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" /> Usage data: <strong className="ml-auto">{shareUsageData ? 'On' : 'Off'}</strong>
+                  </button>
 
                   <button 
                     onClick={handleSignOut}

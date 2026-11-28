@@ -9,6 +9,7 @@ import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { useData } from '../contexts/DataContext';
 import PlayerCardModal from './PlayerCardModal';
 import MatchupResultModal from './MatchupResultModal';
+import { track } from '../services/analytics';
 
 const getActiveStatsText = (player, stats) => {
   if (!stats) return '';
@@ -194,6 +195,12 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
     }
     return cw;
   }, [leagueData, seasonWeeks, selectedMatchupDate, getSimulatedDate]);
+
+  // One matchup_view per league and week shown (not on every re-render).
+  const leagueLoaded = Boolean(leagueData);
+  useEffect(() => {
+    if (activeLeagueId && leagueLoaded) track('matchup_view', { league_id: activeLeagueId, week: resolvedCurrentWeek });
+  }, [activeLeagueId, leagueLoaded, resolvedCurrentWeek]);
 
   const matchupWeekBounds = useMemo(() => {
     let weekStartStr = "2024-01-01";

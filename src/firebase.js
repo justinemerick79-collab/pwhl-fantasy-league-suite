@@ -13,7 +13,7 @@ const firebaseConfig = {
   messagingSenderId: "502197146749"
 };
 
-const app = initializeApp(firebaseConfig);
+export const app = initializeApp(firebaseConfig);
 
 // Note: Clean up of local Firestore IndexedDB databases is handled in main.jsx
 // before importing/initializing the App to prevent connection timeouts/emulator caching races.

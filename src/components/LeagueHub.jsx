@@ -15,6 +15,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { useData } from '../contexts/DataContext';
 import { submitAddDrop } from '../services/leagueService.js';
+import { track } from '../services/analytics';
 
 const GENERIC_TEAM_NAMES = [
   "Boston Fleet", "Minnesota Frost", "Montreal Victoires", "New York Sirens",
@@ -222,6 +223,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
       });
 
       alert(`League created! Invite Code: ${inviteCode}`);
+      track('league_create', { league_id: leagueRef.id, max_teams: parseInt(createMaxTeams) });
       setCreateName('');
       setLauncherTab('my-leagues');
       setActiveLeagueId(leagueRef.id);
@@ -276,6 +278,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
         players: [] // Empty roster initially!
       });
       
+      track('league_join', { league_id: leagueDoc.id });
       alert(`Joined ${leagueData.name}!`);
       setJoinCode('');
       setLauncherTab('my-leagues');
