@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { db, functions } from '../firebase';
 import { collection, getDocs, doc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
-import { runFullSync, autoGenerateMissingWeeks, generateSeasonProjectionsClient } from '../services/pwhlService';
+import { autoGenerateMissingWeeks, generateSeasonProjectionsClient } from '../services/pwhlService';
 import DataHub from './DataHub';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { httpsCallable } from 'firebase/functions';
@@ -150,7 +150,10 @@ export default function AdminPanel() {
     setIsSyncing(true);
     setSyncLog(`Starting Sync for ${syncTargetSeason === 'all' ? 'All Seasons' : 'Season ' + syncTargetSeason}...`);
     try {
-      await runFullSync((msg) => setSyncLog(prev => prev + '\n' + msg), syncTargetSeason);
+      // Runs on the server (functions/dataSync.js), so it works on the deployed site.
+      setSyncLog(prev => prev + '\nRunning on the server — this can take a few minutes...');
+      const res = await httpsCallable(functions, 'runDataSync', { timeout: 1800000 })({ seasonId: syncTargetSeason });
+      setSyncLog(prev => prev + '\n' + (res.data?.log || []).join('\n'));
       alert('PWHL Data Sync Completed Successfully!');
     } catch (err) {
       setSyncLog(prev => prev + '\nError: ' + err.message);

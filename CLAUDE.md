@@ -92,8 +92,10 @@ Current state when run against the emulator with the repo's own rules:
 | `test-server-transactions.js` | **passes** |
 | `test-playoffs.js` | **passes** |
 | `test-live-scoring.js` | **passes** (replays `test-fixtures/gamesummary-358-final.json` through a stubbed fetch) |
+| `test-data-sync.js` | **passes** (calls `runDataSync` as an admin for season 10; live feed in, emulator out) |
 
-All twelve pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
+All thirteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
+stop before cleanup (see `test-season-weeks.js`), or leftover players leak into later tests (`test-bot-draft.js`). `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
 
@@ -356,14 +358,18 @@ the server-side counterpart to `getSimulatedDate()`.
 
 ### PWHL API access differs between client and server
 
-- **Client** (`src/services/pwhlService.js`): `BASE_URL = '/api/pwhl/index.php'`, proxied to
-  `lscluster.hockeytech.com` by the **Vite dev server only** (`vite.config.js`). Firebase Hosting rewrites
-  `**` → `/index.html` and has no `/api` rewrite, so on the deployed site these calls return the SPA's HTML
-  instead of JSON. The functions that hit the live feed — `syncSeasons`, `syncTeams`, `syncRoster`,
-  `syncSchedule`, `syncPlayerStats`, `fetchGameSummary`, and `runFullSync` — therefore **only work under
-  `npm run dev`**. They are invoked from `AdminPanel` / `DataHub`. Production ingestion runs through Cloud
-  Functions instead.
-- **Server** (`functions/livePoller.js`): uses the absolute `https://lscluster.hockeytech.com/feed/index.php` and works anywhere.
+- **Data sync runs on the server.** `functions/dataSync.js#runSync` syncs seasons, teams, rosters (`pwhl_players`),
+  schedule, week maps, missing game summaries (capped per run — each write fires `onGameSummaryWritten`) and player
+  stats. The nightly `syncDailyData` runs it for recent seasons; the Admin Panel **Sync** button calls the
+  admin-only `runDataSync` callable, so it works on the deployed site. The old browser sync (`runFullSync`,
+  `syncSeasons` … `syncPlayerStats`) is deleted — it re-downloaded every summary (it compared `status_value`,
+  which is text like "Final", to `'4'`) and wrote a hard-coded `UPCOMING_SEASONS` list over the feed's real season
+  dates (preseason 2026-06-01 instead of 2026-10-01).
+- **Client** (`src/services/pwhlService.js`): `BASE_URL = '/api/pwhl/index.php'` is proxied to
+  `lscluster.hockeytech.com` by the **Vite dev server only**; on Hosting these calls return the SPA's HTML. The
+  remaining client feed calls (`fetchGameSummary` for the Data Hub viewer, player history) therefore only work under
+  `npm run dev`.
+- **Server** (`functions/hockeytech.js`, used by every function): uses the absolute `https://lscluster.hockeytech.com/feed/index.php` and works anywhere.
 
 The feed sometimes wraps responses in a JSONP callback; `fetchFromApi` strips it with a regex before parsing.
 

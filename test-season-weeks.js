@@ -70,7 +70,19 @@ async function part3() {
   } finally {
     // Remove everything the sync wrote, so later tests start from the empty
     // database they expect. Emulator only (requireEmulator above).
-    for (const c of ["pwhl_seasons", "pwhl_games", "pwhl_player_stats", "pwhl_season_player_stats", "daily_game_stats"]) {
+    // The nightly job now runs the full sync (functions/dataSync.js): teams, rosters
+    // and game summaries too. Each stored summary fires onGameSummaryWritten in the
+    // background, so wait for those writes to stop before cleaning up, or they leak
+    // into the next test.
+    let last = -1;
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const n = (await adminDb.collection("pwhl_season_player_stats").get()).size;
+      if (n === last) break;
+      last = n;
+    }
+    for (const c of ["pwhl_seasons", "pwhl_games", "pwhl_player_stats", "pwhl_season_player_stats", "daily_game_stats",
+      "pwhl_teams", "pwhl_players", "pwhl_game_summaries", "live_state"]) {
       await adminDb.recursiveDelete(adminDb.collection(c));
     }
   }
