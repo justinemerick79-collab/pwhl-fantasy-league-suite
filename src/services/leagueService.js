@@ -32,159 +32,123 @@ function parseDateSafe(dateStr) {
  */
 function generateInviteCode() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let result = '';
-  for (let i = 0; i < 6; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
+  // Cryptographic randomness: invite codes must not be guessable.
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(6));
+  return Array.from(bytes, b => chars[b % chars.length]).join('');
 }
 
 /**
- * Creates a new fantasy league with secure transactions and default rules.
- * 
- * @param {string} name - The name of the league.
- * @param {number} maxTeams - The maximum number of teams (4-10).
- * @param {string} userId - The UID of the commissioner creating the league.
- * @param {string} teamName - The name of the commissioner's team.
+ * Creates a fantasy league and the commissioner's team — the one creation path
+ * (LeagueHub and the beta rehearsal test both call it).
+ *
+ * The league stores its PWHL season (`season_id`): every server job — schedule
+ * generation, settlement, playoffs, the player universe — keys off it.
+ * `waiverOrder` holds TEAM ids (functions/transactions.js ranks claims by team id).
+ *
+ * @param {string} name
+ * @param {number} maxTeams 4-10
+ * @param {string} userId the commissioner's uid
+ * @param {string} teamName
+ * @param {string} seasonId the PWHL season this league plays (the app's active season)
+ * @returns {Promise<{leagueId: string, teamId: string, inviteCode: string}>}
  */
-export async function createLeague(name, maxTeams, userId, teamName) {
-  if (maxTeams < 4 || maxTeams > 10) {
+export async function createLeague(name, maxTeams, userId, teamName, seasonId) {
+  maxTeams = parseInt(maxTeams, 10);
+  if (!(maxTeams >= 4 && maxTeams <= 10)) {
     throw new Error("A league must have between 4 and 10 teams.");
   }
+  if (!seasonId) {
+    throw new Error("No active PWHL season is set. An admin must choose one in the Admin Console first.");
+  }
 
-  // Generate league and team references
   const leagueRef = doc(collection(db, "fantasy_leagues"));
   const teamRef = doc(collection(leagueRef, "teams"));
+  const inviteCode = generateInviteCode();
 
   await runTransaction(db, async (transaction) => {
-    const inviteCode = generateInviteCode();
-    
-    // Securely initialize default rules
-    const defaultRosterSettings = {
-      forwards: { starters: 6, max: 10 },
-      defense: { starters: 4, max: 8 },
-      goalies: { starters: 1, max: 3 },
-      bench: 4
-    };
-
-    const defaultScoringSettings = {
-      skaters: {
-        goals: 2,
-        assists: 1,
-        plusMinus: 0.5,
-        ppp: 0.5,
-        shp: 0.5,
-        sog: 0.1,
-        hits: 0.1,
-        blocks: 0.5,
-        defensePoints: 0.5
-      },
-      goalies: {
-        wins: 4,
-        otl: 1,
-        ga: -2,
-        saves: 0.2,
-        shutouts: 3
-      }
-    };
-
-    const defaultScheduleSettings = {
-      matchupDuration: 1,
-      playoffTeams: 4,
-      playoffDuration: 1
-    };
-
     transaction.set(leagueRef, {
-      name: name,
+      name,
       ownerId: userId,
       commissionerId: userId,
-      maxTeams: maxTeams,
-      inviteCode: inviteCode,
+      maxTeams,
+      inviteCode,
       members: [userId],
-      userIds: [userId], // backward compatibility mapping
-      draftOrder: [userId],
-      status: 'pending', // default pending status until draft is set and league is full
+      userIds: [userId], // backward compatibility
+      season_id: String(seasonId),
+      status: 'pending', // pending until the commissioner fills the league and starts the draft
       createdAt: serverTimestamp(),
-      rosterSettings: defaultRosterSettings,
-      scoringSettings: defaultScoringSettings,
-      scheduleSettings: defaultScheduleSettings,
-      waiverOrder: [] // secure initialized empty waiver order
+      rosterSettings: {
+        forwards: { starters: 6, max: 10 },
+        defense: { starters: 4, max: 8 },
+        goalies: { starters: 1, max: 3 },
+        bench: 4
+      },
+      scoringSettings: {
+        skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
+        goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
+      },
+      scheduleSettings: { matchupDuration: 1, playoffTeams: 4, playoffDuration: 1 },
+      waiverOrder: [teamRef.id]
     });
 
     transaction.set(teamRef, {
       ownerId: userId,
-      teamName: teamName,
-      joinedAt: serverTimestamp()
+      teamName,
+      joinedAt: serverTimestamp(),
+      players: []
     });
   });
 
-  return leagueRef.id;
+  return { leagueId: leagueRef.id, teamId: teamRef.id, inviteCode };
 }
 
 /**
- * Joins an existing fantasy league securely via transaction.
- * Prevents joining if league is full or user already joined.
- * 
- * @param {string} inviteCode - The unique 6-character invite code of the league.
- * @param {string} userId - The UID of the user joining.
- * @param {string} teamName - The user's team name.
+ * Joins a league by invite code — the one join path. A transaction stops two
+ * people taking the last spot at once. The new team goes to the end of the
+ * waiver order.
+ *
+ * @returns {Promise<{leagueId: string, teamId: string, leagueName: string}>}
  */
 export async function joinLeague(inviteCode, userId, teamName) {
   if (!inviteCode) {
     throw new Error("Invite code is required.");
   }
 
-  // 1. Query for the league by invite code outside transaction (queries are disallowed inside transactions)
+  // Queries are not allowed inside a transaction: find the league first.
   const q = query(collection(db, "fantasy_leagues"), where("inviteCode", "==", inviteCode.toUpperCase()));
   const snap = await getDocs(q);
-  
   if (snap.empty) {
-    throw new Error("Invalid invite code. League not found.");
+    throw new Error("League not found.");
   }
 
-  const leagueDoc = snap.docs[0];
-  const leagueRef = doc(db, "fantasy_leagues", leagueDoc.id);
+  const leagueRef = doc(db, "fantasy_leagues", snap.docs[0].id);
   const teamRef = doc(collection(leagueRef, "teams"));
+  let leagueName = '';
 
-  // 2. Perform concurrent safety transaction
   await runTransaction(db, async (transaction) => {
     const leagueSnap = await transaction.get(leagueRef);
-    if (!leagueSnap.exists()) {
-      throw new Error("League does not exist.");
-    }
-
+    if (!leagueSnap.exists()) throw new Error("League not found.");
     const leagueData = leagueSnap.data();
-    const currentMembers = leagueData.members || leagueData.userIds || [];
+    leagueName = leagueData.name || '';
+    const members = leagueData.members || leagueData.userIds || [];
+    if (members.includes(userId)) throw new Error("Already joined.");
+    if (members.length >= leagueData.maxTeams) throw new Error("League full.");
 
-    if (currentMembers.includes(userId)) {
-      throw new Error("You are already a member of this league.");
-    }
-
-    if (currentMembers.length >= leagueData.maxTeams) {
-      throw new Error("This league is already full.");
-    }
-
-    const updatedMembers = [...currentMembers, userId];
-    
-    // Status advances once league gets full, commission can set draft and activate
-    const isFull = updatedMembers.length === leagueData.maxTeams;
-    const newStatus = leagueData.status === 'pending' ? 'pending' : (isFull ? 'active_full' : 'active_not_full');
-
-    const updatedDraftOrder = [...(leagueData.draftOrder || currentMembers), userId];
-
+    const updatedMembers = [...members, userId];
     transaction.update(leagueRef, {
       members: updatedMembers,
-      userIds: updatedMembers, // maintain backwards compatibility
-      draftOrder: updatedDraftOrder,
-      status: newStatus
+      userIds: updatedMembers,
+      waiverOrder: [...(leagueData.waiverOrder || []), teamRef.id]
     });
-
     transaction.set(teamRef, {
       ownerId: userId,
-      teamName: teamName,
-      joinedAt: serverTimestamp()
+      teamName,
+      joinedAt: serverTimestamp(),
+      players: []
     });
   });
+
+  return { leagueId: leagueRef.id, teamId: teamRef.id, leagueName };
 }
 
 /**
@@ -285,6 +249,20 @@ export async function initializeDraft(leagueId, draftOrder) {
   const leagueRef = doc(db, "fantasy_leagues", leagueId);
   const draftStateRef = doc(db, `fantasy_leagues/${leagueId}/draft`, "state");
 
+  // Who drafts automatically (bots exist only in simulations). The team docs carry
+  // `isBot` and any league member can read them. users/{uid} is readable only by its
+  // owner or an admin, so reading other managers' user docs inside the transaction
+  // made a non-admin commissioner's draft start fail with PERMISSION_DENIED.
+  const botOwners = new Set();
+  const teamsSnap = await getDocs(collection(db, `fantasy_leagues/${leagueId}/teams`));
+  teamsSnap.forEach(t => { if (t.data().isBot) botOwners.add(t.data().ownerId); });
+  await Promise.all(draftOrder.map(async uid => {
+    try {
+      const u = await getDoc(doc(db, "users", uid));
+      if (u.exists() && u.data().isBot) botOwners.add(uid);
+    } catch { /* not readable for this user: rely on the team flag */ }
+  }));
+
   await runTransaction(db, async (transaction) => {
     const leagueSnap = await transaction.get(leagueRef);
     if (!leagueSnap.exists()) {
@@ -293,18 +271,9 @@ export async function initializeDraft(leagueId, draftOrder) {
 
     const activeRosters = {};
     const autoDraftUsers = {};
-
-    // Fetch user documents within transaction to see who is a bot (all reads first)
-    const userSnaps = await Promise.all(
-      draftOrder.map(uid => transaction.get(doc(db, "users", uid)))
-    );
-
-    draftOrder.forEach((uid, index) => {
+    draftOrder.forEach(uid => {
       activeRosters[uid] = [];
-      const userSnap = userSnaps[index];
-      if (userSnap.exists() && userSnap.data().isBot) {
-        autoDraftUsers[uid] = true;
-      }
+      if (botOwners.has(uid)) autoDraftUsers[uid] = true;
     });
 
     const nowMs = Date.now();

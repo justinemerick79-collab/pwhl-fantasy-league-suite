@@ -10,6 +10,7 @@
  * default: a season without its week map is skipped loudly (see CLAUDE.md).
  */
 const { Timestamp } = require("firebase-admin/firestore");
+const { resolveLeagueSeasonId } = require("./leagueSeason");
 
 const BYE = null;
 
@@ -129,9 +130,9 @@ async function generateLeagueSchedule(db, leagueId, nowMs) {
   const existing = await leagueRef.collection("matchups").limit(1).get();
   if (!existing.empty) return { status: "skipped", reason: "schedule already exists" };
 
-  const seasonId = league.season_id != null ? String(league.season_id) : null;
+  const seasonId = await resolveLeagueSeasonId(db, leagueId, league);
   if (!seasonId) {
-    console.error(`[Schedule] League ${leagueId} skipped: no season_id on the league document.`);
+    console.error(`[Schedule] League ${leagueId} skipped: no season_id and no active season.`);
     return { status: "error", reason: "league has no season_id" };
   }
   const seasonSnap = await db.collection("pwhl_seasons").doc(seasonId).get();

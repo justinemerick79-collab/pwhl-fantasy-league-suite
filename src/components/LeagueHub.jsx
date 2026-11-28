@@ -1,20 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { db } from '../firebase.js';
-import { 
-  collection, 
-  query, 
-  where, 
-  getDocs, 
-  updateDoc, 
-  doc, 
-  getDoc, 
-  serverTimestamp,
-  addDoc
-} from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { useAuth } from '../contexts/AuthContext';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { useData } from '../contexts/DataContext';
-import { submitAddDrop } from '../services/leagueService.js';
+import { submitAddDrop, createLeague, joinLeague } from '../services/leagueService.js';
 import { track } from '../services/analytics';
 
 const GENERIC_TEAM_NAMES = [
@@ -82,16 +72,7 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
   // Form States - Create
   const [createName, setCreateName] = useState('');
   const [createMaxTeams, setCreateMaxTeams] = useState(6);
-  const matchupDuration = 1;
-  const playoffTeams = 4;
-  const playoffDuration = 1;
   const [createLoading, setCreateLoading] = useState(false);
-  const rosterLimits = {
-    forwards: { starters: 6, max: 10 },
-    defense: { starters: 4, max: 8 },
-    goalies: { starters: 1, max: 3 },
-    bench: 4
-  };
 
   // Form States - Join
   const [joinCode, setJoinCode] = useState('');
@@ -185,51 +166,17 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
     if (!createName) return;
     setCreateLoading(true);
     try {
-      const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-      const defaultScoring = {
-        skaters: { goals: 2, assists: 1, plusMinus: 0.5, ppp: 0.5, shp: 0.5, sog: 0.1, hits: 0.1, blocks: 0.5, defensePoints: 0.5 },
-        goalies: { wins: 4, otl: 1, ga: -2, saves: 0.2, shutouts: 3 }
-      };
-
-      const leagueRef = await addDoc(collection(db, 'fantasy_leagues'), {
-        name: createName,
-        ownerId: currentUser.uid,
-        commissionerId: currentUser.uid,
-        maxTeams: parseInt(createMaxTeams),
-        inviteCode,
-        members: [currentUser.uid],
-        userIds: [currentUser.uid],
-        status: 'pending', // Initialize as pending until commissioner fills & activates!
-        rosterSettings: rosterLimits,
-        scoringSettings: defaultScoring,
-        scheduleSettings: {
-          matchupDuration: parseInt(matchupDuration),
-          playoffTeams: parseInt(playoffTeams),
-          playoffDuration: parseInt(playoffDuration)
-        },
-        waiverOrder: [currentUser.uid],
-        createdAt: serverTimestamp()
-      });
-
-      // Issue random generic team name
-      const randomTeamName = GENERIC_TEAM_NAMES[Math.floor(Math.random() * GENERIC_TEAM_NAMES.length)];
-
-      // Create owner's team document with empty rosters initially
-      await addDoc(collection(db, `fantasy_leagues/${leagueRef.id}/teams`), {
-        ownerId: currentUser.uid,
-        teamName: randomTeamName,
-        joinedAt: serverTimestamp(),
-        players: [] // Empty roster initially!
-      });
-
+      const teamName = GENERIC_TEAM_NAMES[Math.floor(Math.random() * GENERIC_TEAM_NAMES.length)];
+      // The league plays the app's active PWHL season (Admin Console setting).
+      const { leagueId, inviteCode } = await createLeague(createName, createMaxTeams, currentUser.uid, teamName, activeSeasonId);
       alert(`League created! Invite Code: ${inviteCode}`);
-      track('league_create', { league_id: leagueRef.id, max_teams: parseInt(createMaxTeams) });
+      track('league_create', { league_id: leagueId, max_teams: parseInt(createMaxTeams, 10) });
       setCreateName('');
       setLauncherTab('my-leagues');
-      setActiveLeagueId(leagueRef.id);
+      setActiveLeagueId(leagueId);
     } catch (err) {
       console.error(err);
-      alert('Failed to create league.');
+      alert(`Failed to create league. ${err.message || ''}`);
     } finally {
       setCreateLoading(false);
     }
@@ -241,51 +188,16 @@ export default function LeagueHub({ activeLeagueId, setActiveLeagueId }) {
     if (!joinCode || joinCode.length !== 6) return;
     setJoinLoading(true);
     try {
-      const q = query(collection(db, 'fantasy_leagues'), where('inviteCode', '==', joinCode.toUpperCase()));
-      const snap = await getDocs(q);
-      
-      if (snap.empty) {
-        setJoinError('League not found.');
-        return;
-      }
-
-      const leagueDoc = snap.docs[0];
-      const leagueData = leagueDoc.data();
-
-      if (leagueData.members.includes(currentUser.uid)) {
-        setJoinError('Already joined.');
-        return;
-      }
-
-      if (leagueData.members.length >= leagueData.maxTeams) {
-        setJoinError('League full.');
-        return;
-      }
-
-      const updatedMembers = [...leagueData.members, currentUser.uid];
-      await updateDoc(doc(db, 'fantasy_leagues', leagueDoc.id), {
-        members: updatedMembers,
-        userIds: updatedMembers
-      });
-
-      // Issue random generic team name for joining user
-      const randomTeamName = GENERIC_TEAM_NAMES[Math.floor(Math.random() * GENERIC_TEAM_NAMES.length)];
-
-      await addDoc(collection(db, `fantasy_leagues/${leagueDoc.id}/teams`), {
-        ownerId: currentUser.uid,
-        teamName: randomTeamName,
-        joinedAt: serverTimestamp(),
-        players: [] // Empty roster initially!
-      });
-      
-      track('league_join', { league_id: leagueDoc.id });
-      alert(`Joined ${leagueData.name}!`);
+      const teamName = GENERIC_TEAM_NAMES[Math.floor(Math.random() * GENERIC_TEAM_NAMES.length)];
+      const { leagueId, leagueName } = await joinLeague(joinCode, currentUser.uid, teamName);
+      track('league_join', { league_id: leagueId });
+      alert(`Joined ${leagueName}!`);
       setJoinCode('');
       setLauncherTab('my-leagues');
-      setActiveLeagueId(leagueDoc.id);
+      setActiveLeagueId(leagueId);
     } catch (err) {
       console.error(err);
-      setJoinError('Failed to join league.');
+      setJoinError(err.message || 'Failed to join league.');
     } finally {
       setJoinLoading(false);
     }
