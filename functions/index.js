@@ -13,6 +13,7 @@ const { afterWeekSettled, playoffWinner } = require("./playoffs");
 const { planGameDay, reconcileRecentGames, ensureWeekOfficial, snapshotLiveDay, SETTLE_VALVE_HOURS } = require("./liveStats");
 const { pacificDateStr, addDays } = require("./dates");
 const { runSync } = require("./dataSync");
+const { resolveLeagueSeasonId } = require("./leagueSeason");
 const { loadSeasonPlayerPool } = require("./universeSeason");
 
 // Re-export the live poller
@@ -603,6 +604,7 @@ exports.initializeTestEnvironment = onCall({ region: "us-central1" }, async (req
         ownerId: botUids[i],
         teamName: `Bot Team ${i + 1}`,
         avatar: "🤖",
+        isBot: true, // read by initializeDraft (league members cannot read other users' docs)
         isTestNode: true,
         joinedAt: systemTimestamp
       });
@@ -2445,7 +2447,8 @@ exports.settleMatchupWeeksScheduled = onSchedule(
       }
 
       const currentWeek = leagueData.currentWeek || 1;
-      const seasonId = leagueData.season_id ? String(leagueData.season_id) : '5';
+      const seasonId = await resolveLeagueSeasonId(db, leagueId, leagueData);
+      if (!seasonId) continue;
 
       let weeks = [];
       try {

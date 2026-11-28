@@ -95,8 +95,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-data-sync.js` | **passes** (calls `runDataSync` as an admin for season 10; live feed in, emulator out) |
 | `test-player-universe.js` | **passes** (stubbed feed) |
 | `test-season-pool.js` | **passes** (one fallback rule client + server; bot drafts only the league's season; picks store real position) |
+| `test-beta-rehearsal.js` | **passes** — one private league start to finish through the real code (see below) |
 
-All fifteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
+All sixteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
 stop before cleanup (see `test-season-weeks.js`), or leftover players leak into later tests (`test-bot-draft.js`). `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
@@ -308,6 +309,25 @@ claims, drops and trade responses.
 Services that need simulation state outside React re-read it from Firestore via their own local
 `checkIsSimulation()` helpers (in `statsEngine.js` and `pwhlService.js`), which read
 `localStorage.pwhl_active_league`. That key is the bridge between the React context and the service layer.
+
+### League lifecycle and the beta rehearsal
+
+`leagueService.createLeague` / `joinLeague` are the **only** create and join paths (LeagueHub calls them). A
+league stores its PWHL season as `season_id` (the app's active season, `app_settings/active_season`) — every
+server job keys off it. Before 2026-11-28 creation never stored it, so a real league drafted and then got no
+schedule; `functions/leagueSeason.js#resolveLeagueSeasonId` is the server safety net (adopts the active season,
+saves it, warns — never a hardcoded default). `waiverOrder` holds **team** ids, and each joining team is appended.
+Invite codes use `crypto.getRandomValues`.
+
+`initializeDraft` takes "who is a bot" from the league's **team** docs (`isBot`). It must not read other managers'
+`users/{uid}` docs inside its transaction: the rules allow only the owner or an admin, so a non-admin commissioner
+could not start the draft (simulations hid it — the admin was always commissioner).
+
+`test-beta-rehearsal.js` runs one 4-team league through the real code: admin sync builds the universe → create →
+3 joins (+ a refused 5th) → 60-pick snake draft as signed-in users against the rules → schedule trigger → lineup →
+live game day → official switch → add/drop + waiver claim → immediate trade (trigger) → the real hourly settlement
+job → playoffs → champion. It uses a test season set in the past with the global simulation clock placed before
+it, so the draft is "pre-season" and settlement acts on ended weeks. **Run it before every beta-facing release.**
 
 ### Season player universe (who "exists" in a season)
 
