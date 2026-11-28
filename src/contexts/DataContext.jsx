@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { db } from '../firebase';
 import { collection, getDocs, query, where } from 'firebase/firestore';
+import { resolveUniverseSeason } from '../services/pwhlService';
 
 const DataContext = createContext();
 
@@ -84,33 +85,17 @@ export function DataProvider({ children }) {
       const playersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [sId, Number(sId)]));
       const playersSnap = await getDocs(playersQuery);
       
-      let resolvedSeasonId = sId;
       let rawPlayers = playersSnap.docs.map(d => d.data());
-      let fallbackActive = false;
 
-      // Fallback resolution if upcoming season has no players yet
-      if (rawPlayers.length === 0 && seasons.length > 0) {
-        const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(sId));
-        const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
-        
-        const prevRegularSeasons = seasons.filter(s => {
-          const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
-          const startsBefore = new Date(s.start_date) < currentStartDate;
-          return isRegular && startsBefore;
-        });
-        
-        if (prevRegularSeasons.length > 0) {
-          prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
-          const prevRegSeason = prevRegularSeasons[0];
-          resolvedSeasonId = prevRegSeason.season_id.toString();
-          fallbackActive = true;
-          
-          console.log(`[DataContext Universe Resolver] Season ${sId} has no players. Falling back to Season ${resolvedSeasonId}`);
-          
-          const prevPlayersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
-          const prevPlayersSnap = await getDocs(prevPlayersQuery);
-          rawPlayers = prevPlayersSnap.docs.map(d => d.data());
-        }
+      // Fallback resolution if upcoming season has no players yet (one rule: pwhlService.resolveUniverseSeason)
+      const universe = resolveUniverseSeason(sId, seasons, rawPlayers.length > 0);
+      const resolvedSeasonId = universe.seasonId;
+      const fallbackActive = universe.isFallback;
+      if (fallbackActive) {
+        console.log(`[DataContext Universe Resolver] Season ${sId} has no players. Falling back to Season ${resolvedSeasonId}`);
+        const prevPlayersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
+        const prevPlayersSnap = await getDocs(prevPlayersQuery);
+        rawPlayers = prevPlayersSnap.docs.map(d => d.data());
       }
 
       // Fetch remaining season details (teams, projections, games) in parallel

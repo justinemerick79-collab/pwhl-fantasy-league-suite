@@ -13,6 +13,7 @@ const { afterWeekSettled, playoffWinner } = require("./playoffs");
 const { planGameDay, reconcileRecentGames, ensureWeekOfficial, snapshotLiveDay, SETTLE_VALVE_HOURS } = require("./liveStats");
 const { pacificDateStr, addDays } = require("./dates");
 const { runSync } = require("./dataSync");
+const { loadSeasonPlayerPool } = require("./universeSeason");
 
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
@@ -998,9 +999,33 @@ async function handleDraftStateChange(docSnap) {
     const parentCollection = pathSegments[0]; // e.g. "fantasy_leagues" or "leagues"
     const leagueId = pathSegments[1];
 
-    // 5. Fetch all players and teams outside the transaction (disallowed inside transaction)
-    const playersSnap = await db.collection("pwhl_players").get();
-    let allPlayers = playersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // 5. Fetch the league's season player pool and teams outside the transaction (disallowed inside transaction).
+    // Only the league's season: reading every season let the bot draft a player from an old
+    // season's doc. Rosters and picks store the bare player id, so dedupe by player_id.
+    // Leagues made by createLeague store no season_id; they play the app's active season.
+    const leagueSnapForPool = await db.collection(parentCollection).doc(leagueId).get();
+    let leagueSeasonId = leagueSnapForPool.exists ? leagueSnapForPool.data().season_id : undefined;
+    if (leagueSeasonId === undefined || leagueSeasonId === null || leagueSeasonId === '') {
+      const activeSnap = await db.collection("app_settings").doc("active_season").get();
+      leagueSeasonId = activeSnap.exists ? activeSnap.data().active_season_id : undefined;
+    }
+    let allPlayers = [];
+    if (leagueSeasonId !== undefined && leagueSeasonId !== null && leagueSeasonId !== '') {
+      const pool = await loadSeasonPlayerPool(db, leagueSeasonId);
+      if (pool.isFallback) {
+        console.log(`[Draft Engine] League ${leagueId}: season ${leagueSeasonId} has no players; using season ${pool.seasonId} pool.`);
+      }
+      const seenPlayerIds = new Set();
+      pool.docs.forEach(d => {
+        const data = d.data();
+        const bareId = String(data.player_id ?? data.id ?? d.id.split("_").pop());
+        if (seenPlayerIds.has(bareId)) return;
+        seenPlayerIds.add(bareId);
+        allPlayers.push({ ...data, id: d.id, player_id: bareId });
+      });
+    } else {
+      console.warn(`[Draft Engine] League ${leagueId} has no season_id and there is no active season; cannot pick a season player pool.`);
+    }
 
     // Fallback scouting pool if collection is empty
     if (allPlayers.length === 0) {
@@ -1054,13 +1079,13 @@ async function handleDraftStateChange(docSnap) {
       const draftedIds = new Set();
       const picks = txDraftData.picks || [];
       picks.forEach(p => {
-        if (p.playerId) draftedIds.add(p.playerId);
-        if (p.player_id) draftedIds.add(p.player_id);
+        if (p.playerId) draftedIds.add(String(p.playerId));
+        if (p.player_id) draftedIds.add(String(p.player_id));
       });
       const activeRosters = txDraftData.activeRosters || txDraftData.active_rosters || {};
       Object.values(activeRosters).forEach(roster => {
         if (Array.isArray(roster)) {
-          roster.forEach(id => draftedIds.add(id));
+          roster.forEach(id => draftedIds.add(String(id)));
         }
       });
 
@@ -1110,7 +1135,7 @@ async function handleDraftStateChange(docSnap) {
       const goaliesLimit = rosterSettings.goalies?.max ?? 3;
 
       const undraftedPlayers = allPlayers.filter(
-        p => !draftedIds.has(p.id) && !draftedIds.has(p.player_id || p.id)
+        p => !draftedIds.has(String(p.id)) && !draftedIds.has(String(p.player_id ?? p.id))
       );
 
       // Sort by calculated fantasy points descending using the league's scoring settings, then by rating as tiebreaker
@@ -1234,7 +1259,8 @@ async function handleDraftStateChange(docSnap) {
         console.error(`[Draft Engine] League ${leagueId}: no undrafted players remain; cannot advance the draft.`);
         return;
       }
-      const chosenPlayerId = chosenPlayer.id || chosenPlayer.player_id;
+      // Picks and rosters hold the bare player id, never the "<seasonId>_<playerId>" doc id.
+      const chosenPlayerId = String(chosenPlayer.player_id ?? chosenPlayer.id);
       const chosenPlayerName = chosenPlayer.name || `${chosenPlayer.first_name || ""} ${chosenPlayer.last_name || ""}`.trim() || chosenPlayerId;
 
       console.log(`[Draft Engine] Bot ${currentPickerId} picks player: ${chosenPlayerName} (${chosenPlayerId})`);
@@ -2864,7 +2890,7 @@ exports.generateSeasonProjections = onCall({ region: "us-central1" }, async (req
       });
     }
 
-    // 4. Identify previous regular season ID for fallback
+    // 4. Identify the previous regular season (last-season goalie games-played weighting)
     const prevRegularSeasons = [];
     allSeasonsSnap.forEach(sDoc => {
       const s = sDoc.data();
@@ -2879,25 +2905,15 @@ exports.generateSeasonProjections = onCall({ region: "us-central1" }, async (req
     prevRegularSeasons.sort((a, b) => b.startDate - a.startDate);
     const prevSeasonId = prevRegularSeasons[0]?.id || "5";
 
-    // 5. Fetch all player records for the target season (with fallback to prevSeasonId if 0)
-    let playersSnap = await db.collection("pwhl_players")
-      .where("season_id", "in", [seasonIdStr, Number(seasonIdStr)])
-      .get();
-    let allPlayers = playersSnap.docs.map(doc => ({
+    // 5. Fetch all player records for the target season (one fallback rule: universeSeason.js)
+    const pool = await loadSeasonPlayerPool(db, seasonIdStr);
+    if (pool.isFallback) {
+      console.log(`[Projections] Target season ${seasonIdStr} has 0 rostered players in pwhl_players. Falling back to previous regular season ${pool.seasonId} player pool...`);
+    }
+    const allPlayers = pool.docs.map(doc => ({
       id: doc.id,
       data: doc.data()
     }));
-
-    if (allPlayers.length === 0 && prevSeasonId) {
-      console.log(`[Projections] Target season ${seasonIdStr} has 0 rostered players in pwhl_players. Falling back to previous regular season ${prevSeasonId} player pool...`);
-      const prevPlayersSnap = await db.collection("pwhl_players")
-        .where("season_id", "in", [prevSeasonId.toString(), Number(prevSeasonId)])
-        .get();
-      allPlayers = prevPlayersSnap.docs.map(doc => ({
-        id: doc.id,
-        data: doc.data()
-      }));
-    }
 
     // Goalie weight and team distribution setup (Pass 1)
     const goalieWeights = {};

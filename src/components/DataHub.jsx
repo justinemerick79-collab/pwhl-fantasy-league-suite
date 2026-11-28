@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
-import { fetchGameSummary } from '../services/pwhlService';
+import { fetchGameSummary, resolveUniverseSeason } from '../services/pwhlService';
 import { fetchAggregatedStats } from '../services/statsEngine';
 import { useTimeTravel } from '../contexts/TimeTravelContext';
 
@@ -403,17 +403,9 @@ export default function DataHub() {
         if (rawPlayers.length === 0) {
           const seasonsSnap = await getDocsWithTimeout(collection(db, 'pwhl_seasons'), 5000);
           const allSeasons = seasonsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-          const targetDoc = allSeasons.find(s => String(s.season_id) === seasonIdStr || s.id === seasonIdStr);
-          const targetStart = targetDoc?.start_date ? new Date(targetDoc.start_date) : new Date();
-
-          const prevSeasons = allSeasons.filter(s => {
-            const isReg = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
-            return isReg && s.start_date && new Date(s.start_date) < targetStart;
-          }).sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
-
-          const prevSId = prevSeasons[0]?.season_id || prevSeasons[0]?.id;
-          if (prevSId) {
-            const prevPlayerQ = query(collection(db, 'pwhl_players'), where('season_id', 'in', [String(prevSId), Number(prevSId)]));
+          const universe = resolveUniverseSeason(seasonIdStr, allSeasons, false);
+          if (universe.isFallback) {
+            const prevPlayerQ = query(collection(db, 'pwhl_players'), where('season_id', 'in', [universe.seasonId, Number(universe.seasonId)]));
             const prevPlayerSnap = await getDocsWithTimeout(prevPlayerQ, 5000);
             rawPlayers = prevPlayerSnap.docs.map(d => ({id: d.id, ...d.data()}));
           }
