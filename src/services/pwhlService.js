@@ -1,4 +1,5 @@
 import { db } from '../firebase.js';
+import { rankLineFromProjection, rankLineFromSeasonStats } from './scoring';
 import { doc, writeBatch, collection, getDocs, query, where, getDoc } from 'firebase/firestore';
 
 export const normalizePosition = (posStr) => {
@@ -470,6 +471,24 @@ export async function fetchDraftEligiblePlayers(draftSeasonId, selectedSeasonId)
     rawPlayers = prevPlayersSnap.docs.map(d => d.data());
   }
 
+  // Draft value for auto-pick (src/services/scoring.js#projectedPoints): always for the
+  // DRAFT season, whatever the on-screen view: projection, else last regular season.
+  const rankLines = {};
+  try {
+    const projSnap = await getDocs(collection(db, `pwhl_projections/${draftSeasonId}/player_projections`));
+    projSnap.forEach(d => { rankLines[String(d.data().playerId || d.id)] = { line: rankLineFromProjection(d.data().projected_season_stats), source: 'projection' }; });
+    const target = seasons.find(se => String(se.season_id) === String(draftSeasonId));
+    const prev = seasons
+      .filter(se => String(se.career) === '1' && String(se.playoff) === '0' && Date.parse(se.start_date) < Date.parse(target?.start_date))
+      .sort((a, b) => Date.parse(b.start_date) - Date.parse(a.start_date))[0];
+    if (prev) {
+      const prevSnap = await getDocs(query(collection(db, 'pwhl_player_stats'), where('season_id', 'in', [String(prev.season_id), Number(prev.season_id)])));
+      prevSnap.forEach(d => { const pid = String(d.data().player_id); if (!rankLines[pid]) rankLines[pid] = { line: rankLineFromSeasonStats(d.data()), source: 'last_season' }; });
+    }
+  } catch (err) {
+    console.error("Error loading draft values:", err);
+  }
+
   // 3. Query and attach stats data based on selectedSeasonId
   let projList = [];
   let prevStats = [];
@@ -551,6 +570,8 @@ export async function fetchDraftEligiblePlayers(draftSeasonId, selectedSeasonId)
 
     return {
       id: pId,
+      rankLine: rankLines[pId]?.line || null,
+      rankSource: rankLines[pId]?.source || 'none',
       name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
       pos: normalizePosition(p.position),
       teamId: String(p.current_team_id || p.latest_team_id || p.team_id || ''),

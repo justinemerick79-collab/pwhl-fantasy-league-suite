@@ -38,3 +38,39 @@ export const STAT_LABELS = {
   goals: 'G', assists: 'A', plusMinus: '+/-', ppp: 'PPP', shp: 'SHP', sog: 'SOG', hits: 'Hits', blocks: 'Blk', pim: 'PIM',
   saves: 'Saves', goalsAgainst: 'GA', shotsAgainst: 'SA', wins: 'W', losses: 'L', overtimeLosses: 'OTL', shutouts: 'SO',
 };
+
+// ── Draft value (browser copy of functions/draftRanking.js — keep in step) ──
+const n = (v) => Number(v) || 0;
+
+/** A projection's season stats → the common rank line. */
+export function rankLineFromProjection(ps = {}) {
+  return {
+    goals: n(ps.goals), assists: n(ps.assists), plusMinus: n(ps.plusMinus), ppp: n(ps.powerPlayPoints),
+    shp: n(ps.shortHandedPoints), sog: n(ps.shotsOnGoal), hits: n(ps.hits), blocks: n(ps.blockedShots),
+    wins: n(ps.wins), otl: n(ps.overtimeLosses ?? ps.otl), ga: n(ps.goalsAgainst ?? ps.ga),
+    saves: n(ps.shotsSaved ?? ps.saves), shutouts: n(ps.shutouts),
+  };
+}
+
+/** A feed season stat row (pwhl_player_stats) → the common rank line. */
+export function rankLineFromSeasonStats(r = {}) {
+  return {
+    goals: n(r.goals), assists: n(r.assists), plusMinus: n(r.plus_minus), ppp: n(r.power_play_points),
+    shp: n(r.short_handed_points), sog: n(r.shots), hits: n(r.hits), blocks: n(r.shots_blocked_by_player),
+    wins: n(r.wins), otl: n(r.ot_losses), ga: n(r.goals_against), saves: n(r.saves), shutouts: n(r.shutouts),
+  };
+}
+
+/** Projected fantasy points of a rank line under a league's scoring. */
+export function projectedPoints(line, scoringSettings, pos) {
+  if (!line) return 0;
+  if (pos === 'G') {
+    const m = scoringSettings?.goalies || DEFAULT_GOALIES;
+    return line.wins * (m.wins || 0) + line.otl * (m.otl || 0) + line.ga * (m.ga || 0) + line.saves * (m.saves || 0) + line.shutouts * (m.shutouts || 0);
+  }
+  const m = scoringSettings?.skaters || DEFAULT_SKATERS;
+  let pts = line.goals * (m.goals || 0) + line.assists * (m.assists || 0) + line.plusMinus * (m.plusMinus || 0)
+    + line.ppp * (m.ppp || 0) + line.shp * (m.shp || 0) + line.sog * (m.sog || 0) + line.hits * (m.hits || 0) + line.blocks * (m.blocks || 0);
+  if (pos === 'D') pts += (line.goals + line.assists) * (m.defensePoints || 0);
+  return pts;
+}

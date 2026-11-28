@@ -177,8 +177,14 @@ async function runVerification() {
     });
     createdDocs.push(draftStateRef);
 
-    console.log("⏳ Waiting 5 seconds for bot setTimeout (3s) and transaction writes...");
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // Poll rather than sleep a fixed time: the engine waits 3 s, then picks; a busy
+    // emulator can take longer.
+    console.log("⏳ Waiting up to 20 seconds for the bot's pick (3s think time + transaction)...");
+    for (let i = 0; i < 40; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const st = await getDoc(doc(db, `fantasy_leagues/${LEAGUE_ID}/draft`, "state"));
+      if ((st.data()?.picks || []).length > 0) break;
+    }
 
     console.log("\n🔍 Executing Assertions...\n");
 

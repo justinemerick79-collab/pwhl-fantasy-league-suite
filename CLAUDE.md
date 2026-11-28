@@ -96,8 +96,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-player-universe.js` | **passes** (stubbed feed) |
 | `test-season-pool.js` | **passes** (one fallback rule client + server; bot drafts only the league's season; picks store real position) |
 | `test-beta-rehearsal.js` | **passes** — one private league start to finish through the real code (see below) |
+| `test-draft-rankings.js` | **passes** |
 
-All sixteen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
+All seventeen pass. Tests that run the real sync must wait for the background `onGameSummaryWritten` writes to
 stop before cleanup (see `test-season-weeks.js`), or leftover players leak into later tests (`test-bot-draft.js`). `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
@@ -252,24 +253,19 @@ still pick, and a bot with no slack must take a needed position over a far highe
 
 ### Bot draft ranking
 
-The draft engine ranks by **fantasy points**, with rating only as a tiebreaker (`functions/index.js`,
-"Sort by calculated fantasy points descending"). Goalies accumulate points faster than skaters under the
-current scoring, so **a goalie going first overall is expected**, not a bug — `test-bot-draft.js` asserts
-exactly that via its `EXPECTED_TOP_PICK` constant.
+Bots (`handleDraftStateChange`) and auto-picks (`DraftRoom.getTopAvailablePlayer`) rank by **draft value**:
+projected fantasy points for the league's season under the **league's own scoring**
+(`functions/draftRanking.js`, browser copy `src/services/scoring.js#projectedPoints` — keep in step;
+`test-draft-rankings.js` checks they agree). Data, best first: `pwhl_projections/{S}/player_projections`
+→ the player's previous regular season (`pwhl_player_stats`) → an inline `points` field (only the built-in dev pool
+and test fixtures) → 0. Until 2026-11-28 both read a `stats` field real player docs do not have, so every player
+scored 0 and bots drafted alphabetically.
 
-This is a deliberate decision, not an accident of the data: scoring is intended to be rebalanced later so
-goalie and skater points sit closer together and skaters are likelier to lead the board. When that lands,
-`EXPECTED_TOP_PICK` in `test-bot-draft.js` is the single value to update — it is the only place the expected
-pick appears.
-
-Each script sets up mock leagues/teams/players, manipulates the simulation clock, asserts an outcome, then
-cleans up its own documents. `test-matchup-resolution.js` is the best reference for the full game-loop flow.
-
-To point the browser at the local Functions emulator, append `?useEmulator` to the dev URL or set
-`localStorage.useEmulator = 'true'` — see the guard at the bottom of `src/firebase.js`. Firestore and Auth
-always hit production from the browser; only Functions are redirected.
-
-## Architecture
+- The season and draft values load **before** the draft transaction. The season safety net can write the league
+  doc; doing that (or long reads) inside the transaction failed the pick with "Transaction is invalid or closed".
+- **Projections must exist for the season** (Admin Console → Generate projections) or rookies rank last.
+- Goalies can still lead the board under the default scoring — a deliberate decision. When scoring is rebalanced,
+  `EXPECTED_TOP_PICK` in `test-bot-draft.js` is the single value to update.
 
 ### Provider nesting is load-order-sensitive
 
