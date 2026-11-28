@@ -7,6 +7,7 @@ const { Timestamp, FieldValue } = require("firebase-admin/firestore");
 const { getSystemDate } = require("./utils");
 const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDateStr } = require("./dailyGameStats");
 const { liveGamePoller } = require("./livePoller");
+const { generateLeagueSchedule } = require("./schedule");
 
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
@@ -1494,6 +1495,24 @@ async function onDraftWritten(event) {
     await handleDraftStateChange(after);
   } catch (err) {
     console.error("[Draft Engine] draft write handler failed:", err);
+  }
+
+  // When the draft finishes, build the regular-season schedule. Both the client
+  // (human last pick) and the server (bot last pick) mark the draft doc
+  // 'completed', so this one transition covers both. Kept separate from the
+  // draft engine so a schedule failure can never affect a pick.
+  const before = event.data?.before;
+  const justCompleted = after.data()?.status === "completed" &&
+    (!before || !before.exists || before.data()?.status !== "completed");
+  const leagueRef = after.ref.parent.parent;
+  if (justCompleted && leagueRef && leagueRef.parent.id === "fantasy_leagues") {
+    try {
+      const nowMs = await getSystemDate(leagueRef.id);
+      const result = await generateLeagueSchedule(db, leagueRef.id, nowMs);
+      console.log(`[Schedule] League ${leagueRef.id}: ${result.status}${result.reason ? ` (${result.reason})` : ""}`);
+    } catch (err) {
+      console.error(`[Schedule] League ${leagueRef.id}: schedule generation failed:`, err);
+    }
   }
 }
 
