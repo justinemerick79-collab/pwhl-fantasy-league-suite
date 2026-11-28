@@ -52,6 +52,29 @@ const created = [];
 const box = async (id) => (await db.collection("game_box_scores").doc(id).get()).data();
 const day = async (d) => (await db.collection("daily_game_stats").doc(d).get()).data();
 
+async function partScoringParity() {
+  console.log("\nCLIENT AND SERVER SCORING AGREE");
+  const { pointsDelta } = await import("./src/services/scoring.js");
+  const { scoreSkater, scoreGoalie } = require("./functions/boxScore.js");
+  const scoring = { skaters: { goals: 3, assists: 2, plusMinus: 1, ppp: 1, shp: 2, sog: 0.25, hits: 0.3, blocks: 0.4, defensePoints: 1 }, goalies: { wins: 5, otl: 2, ga: -1.5, saves: 0.3, shutouts: 4 } };
+  let worst = 0;
+  for (let i = 0; i < 200; i++) {
+    const r = () => Math.floor(Math.random() * 6);
+    const a = { goals: r(), assists: r(), plusMinus: r() - 3, ppp: r(), shp: r(), sog: r(), hits: r(), blocks: r(), pim: r() };
+    const b = { ...a, [["goals", "assists", "sog", "hits", "blocks", "plusMinus"][i % 6]]: r() };
+    const pos = i % 2 ? "D" : "F";
+    const changes = Object.keys(a).filter(k => a[k] !== b[k]).map(k => ({ stat: k, from: a[k], to: b[k] }));
+    const server = scoreSkater(b, scoring.skaters, pos) - scoreSkater(a, scoring.skaters, pos);
+    worst = Math.max(worst, Math.abs(Math.round(server * 100) / 100 - pointsDelta(changes, "skaters", scoring, pos)));
+    const ga = { saves: r() * 5, goalsAgainst: r(), shotsAgainst: 30, timeOnIce: 3600, wins: i % 2, losses: 0, overtimeLosses: 0, shutouts: 0 };
+    const gb = { ...ga, saves: ga.saves - 2, goalsAgainst: ga.goalsAgainst + 1 };
+    const gServer = scoreGoalie(gb, scoring.goalies) - scoreGoalie(ga, scoring.goalies);
+    const gChanges = [{ stat: "saves", from: ga.saves, to: gb.saves }, { stat: "goalsAgainst", from: ga.goalsAgainst, to: gb.goalsAgainst }];
+    worst = Math.max(worst, Math.abs(Math.round(gServer * 100) / 100 - pointsDelta(gChanges, "goalies", scoring)));
+  }
+  check(worst < 0.011, `correction points match the server formula on 400 random cases (worst gap ${worst.toFixed(3)})`);
+}
+
 async function partGate() {
   console.log("\nGAME-DAY GATE");
   const NOW = Date.parse("2026-12-09T12:00:00-08:00"); // a Wednesday with no seeded games
@@ -85,6 +108,8 @@ async function partLiveDay() {
   await live.runLivePoll(db, t, deps);
   let b = await box(gid);
   check(b?.status === "live" && b.skaters[firstSkater(FINAL).player_id].sog === 1, `live box score stored (status ${b?.status})`);
+  const lsGame = (await db.collection("live_state").doc("current").get()).data().games.find(x => x.gameId === gid);
+  check(lsGame.status === "2" && lsGame.homeGoals != null && lsGame.period != null, `live_state carries status, score and period for the app (status ${lsGame.status}, ${lsGame.homeGoals}-${lsGame.visitorGoals}, P${lsGame.period})`);
   let d = await day(date);
   check(d?.status === "live" && d.leaguePoints?.test_live_league, `day points exist DURING the game (day status ${d?.status})`);
   const changedAt1 = b.changedAt.toMillis();
@@ -222,6 +247,7 @@ async function partSettlementGate() {
 }
 
 try {
+  await partScoringParity();
   await partGate();
   await partLiveDay();
   await partTwoGamesOneDay();

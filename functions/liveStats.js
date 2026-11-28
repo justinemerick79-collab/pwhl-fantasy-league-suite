@@ -108,7 +108,12 @@ async function refreshGame(db, gameId, nowMs, deps = defaultDeps, opts = {}) {
     batch.set(db.collection("pwhl_game_summaries").doc(gameId), { ...summary, game_id: gameId, season_id: update.seasonId }, { merge: false });
   }
   await batch.commit();
-  return { gameId, ok: true, changed, statusChanged: prev?.status !== status, status, date, gameStatus };
+  return {
+    gameId, ok: true, changed, statusChanged: prev?.status !== status, status, date, gameStatus,
+    // For the app's "PWHL Games Today" panel (live_state/current).
+    homeGoals: summary.totalGoals?.home ?? null, visitorGoals: summary.totalGoals?.visitor ?? null,
+    period: meta.period ?? null, clock: meta.game_clock ?? null,
+  };
 }
 
 /** Write live_state/current for today's Pacific date from pwhl_games. */
@@ -120,6 +125,7 @@ async function planGameDay(db, nowMs) {
     return {
       gameId: String(g.game_id || d.id), startISO: g.GameDateISO8601 || null, status: String(g.status || "1"),
       home: g.home_team_code || "", visitor: g.visiting_team_code || "",
+      homeGoals: g.home_goal_count ?? null, visitorGoals: g.visiting_goal_count ?? null, period: null, clock: null,
     };
   });
   const starts = games.map(g => Date.parse(g.startISO)).filter(n => !Number.isNaN(n));
@@ -215,7 +221,7 @@ async function runLivePoll(db, nowMs, deps = defaultDeps) {
     const r = await refreshGame(db, g.gameId, nowMs, deps, { postCheck });
     results.push(r);
     if (r.ok && (r.changed || r.statusChanged) && r.date) touchedDates.add(r.date); // day status follows game status
-    if (r.ok) g.status = r.gameStatus;
+    if (r.ok) Object.assign(g, { status: r.gameStatus, homeGoals: r.homeGoals, visitorGoals: r.visitorGoals, period: r.period, clock: r.clock });
     const finished = r.ok && (r.status === "official" || (r.status === "final" && (box?.postChecks || 0) + (postCheck ? 1 : 0) >= POST_GAME_CHECK_MIN.length));
     if (!finished) open++;
   }
