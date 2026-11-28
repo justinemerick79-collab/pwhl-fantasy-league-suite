@@ -11,6 +11,8 @@ import { useData } from '../contexts/DataContext';
 import { normalizePosition } from '../services/pwhlService';
 import { saveDailyLineup, getDailyLineup, getLocalDateStr, getPSTDateStr } from '../services/leagueService';
 import PlayerCardModal from './PlayerCardModal';
+import { useLiveDay } from '../hooks/useLiveStats';
+import LiveBadge from './LiveBadge';
 
 const getActiveStatsText = (player, stats) => {
   if (!stats) return '';
@@ -100,6 +102,10 @@ export default function Roster({ activeLeagueId }) {
   // Daily lineups states
   const [resolvedCurrentWeek, setResolvedCurrentWeek] = useState(1);
   const [selectedDateStr, setSelectedDateStr] = useState(''); // "YYYY-MM-DD"
+  // Live status of the day being viewed; its version reloads the day's points
+  // whenever the server updates them during games.
+  const liveDay = useLiveDay(selectedDateStr);
+  const liveVersion = liveDay?.version || 0;
   const lastSimDateStrRef = useRef('');
   const lastLeagueIdRef = useRef('');
   const [weekDates, setWeekDates] = useState([]);
@@ -336,7 +342,7 @@ export default function Roster({ activeLeagueId }) {
   // itself. It is set by the league-loading effect above, never here, so
   // tracking its identity cannot loop.
   }, [activeLeagueId, activeSeasonId, leagueData, selectedDateStr, myTeam, playersList, pwhlTeams,
-      gamesList, seasonsLoading, seasonDataLoading, getSimulatedDate, seasons]);
+      gamesList, seasonsLoading, seasonDataLoading, getSimulatedDate, seasons, liveVersion]);
 
   if (!activeLeagueId) {
     return (
@@ -826,7 +832,7 @@ export default function Roster({ activeLeagueId }) {
           <h1 className="font-sports text-2xl font-bold tracking-tight text-slate-800">
             {myTeam?.teamName || 'My Team Roster'}
           </h1>
-          <p className="text-xs text-slate-500 font-medium mt-0.5">Manage daily starting lineups and lock in active players.</p>
+          <p className="text-xs text-slate-500 font-medium mt-0.5 flex items-center gap-2 flex-wrap">Manage daily starting lineups and lock in active players. <LiveBadge liveDay={liveDay} /></p>
         </div>
       </header>
 

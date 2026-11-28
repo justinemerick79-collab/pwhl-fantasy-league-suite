@@ -170,6 +170,12 @@ parity run over 10 real games showed 0 differences). Server game days are **Paci
 - `pwhl_game_summaries` is written only when a game becomes official — that write fires the heavy
   `onGameSummaryWritten` season-totals rebuild, which must not run every 5 minutes.
 - Day status in `daily_game_stats/{date}`: `live` / `final` / `official`. The old `preliminary` value is gone.
+- **In the app:** `src/hooks/useLiveStats.js` — `useLiveDay(date)` listens to `daily_game_stats/{date}`; Matchup
+  (today) and Roster (the viewed day) add its `version` to their data-loading effect, so each server update reloads
+  the data once; `LiveBadge` shows LIVE · updated / Final (unofficial) / Final. `useLiveGames()` feeds the "PWHL
+  Games Today" panel (status, score, period, clock from `live_state/current`). `StatCorrectionsFeed` (League →
+  Transactions) lists corrections for rostered players with the point change from `src/services/scoring.js`, a
+  client copy of `boxScore.js` scoring that `test-live-scoring.js` checks for parity.
 - **Open (Step 0):** whether LeagueStat's box score changes during play is being measured on games 363/364. If it
   does not, only the fetch layer changes (Firebase goals for live G/A/+/-).
 

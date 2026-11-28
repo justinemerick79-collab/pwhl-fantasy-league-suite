@@ -10,6 +10,8 @@ import { useData } from '../contexts/DataContext';
 import PlayerCardModal from './PlayerCardModal';
 import MatchupResultModal from './MatchupResultModal';
 import { track } from '../services/analytics';
+import { useLiveDay, useLiveGames } from '../hooks/useLiveStats';
+import LiveBadge from './LiveBadge';
 
 const getActiveStatsText = (player, stats) => {
   if (!stats) return '';
@@ -197,6 +199,13 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   }, [leagueData, seasonWeeks, selectedMatchupDate, getSimulatedDate]);
 
   // One matchup_view per league and week shown (not on every re-render).
+  // Live scoring: today's points document and today's games. Each server update
+  // bumps liveVersion, which the matchup data effect below depends on.
+  const todayStr = getPSTDateStr(getSimulatedDate());
+  const liveDay = useLiveDay(todayStr);
+  const liveVersion = liveDay?.version || 0;
+  const liveGames = useLiveGames();
+
   const leagueLoaded = Boolean(leagueData);
   useEffect(() => {
     if (activeLeagueId && leagueLoaded) track('matchup_view', { league_id: activeLeagueId, week: resolvedCurrentWeek });
@@ -501,7 +510,8 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
   // myTeam (not myTeam?.id): the effect passes the whole object to
   // calcTeamScore. It is a useMemo, not state, and nothing here writes it,
   // so tracking its identity cannot loop.
-  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading, matchupDataKey]);
+  // liveVersion: reload when the server updates today's points during games.
+  }, [activeLeagueId, leagueData, activeSeasonId, getSimulatedDate, selectedMatchupDate, resolvedCurrentWeek, myTeam, oppTeamId, playersMap, matchupWeekBounds, resolvedOppTeam, seasonsLoading, seasonDataLoading, matchupDataKey, liveVersion]);
 
   // Matchup Result Popup trigger (Listens in real-time to the completed week's matchup)
   useEffect(() => {
@@ -755,7 +765,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
           <h1 className="font-sports text-2xl font-bold tracking-tight text-slate-800">
             Week {currentWeek} Matchup
           </h1>
-          <p className="text-xs text-slate-500 font-medium mt-0.5">{weekDateRange}</p>
+          <p className="text-xs text-slate-500 font-medium mt-0.5 flex items-center gap-2 flex-wrap">{weekDateRange} <LiveBadge liveDay={liveDay} /></p>
         </div>
         {matchupsRefreshing && (
           <div className="flex items-center gap-2 text-slate-400 animate-fade-in">
@@ -1288,9 +1298,16 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                   const gamePST = getGameDatePSTStr(game.GameDateISO8601 || game.date_time_played || game.date_played || game.date);
                   const simPST = getPSTDateStr(simDate);
                   const isFutureOfSim = gamePST > simPST;
-                  const realStatus = game.status;
-                  const isLive = !isFutureOfSim && realStatus === '2';
-                  const isFinal = !isFutureOfSim && (realStatus === '3' || realStatus === '4' || gamePST <= simPST);
+                  // Today's games: live status, score, period and clock from live_state/current.
+                  const lg = liveGames && liveGames.date === dateStr ? liveGames.byId[String(game.game_id || game.id)] : null;
+                  const realStatus = String(lg?.status ?? game.status ?? '');
+                  const isLive = !isFutureOfSim && (realStatus === '2' || realStatus === '3');
+                  // A game is final when its status says so, or it is on a day before today.
+                  // (It used to treat every game *on* today as final, even before puck drop.)
+                  const isFinal = !isFutureOfSim && !isLive && (realStatus === '4' || gamePST < simPST);
+                  const homeGoals = lg?.homeGoals ?? game.home_goal_count ?? game.home_score ?? 0;
+                  const visitorGoals = lg?.visitorGoals ?? game.visiting_goal_count ?? game.visiting_score ?? 0;
+                  const notStarted = isFutureOfSim || (!isLive && !isFinal);
                   
                   return (
                     <div key={game.id} className="bg-white border rounded-xl p-4 flex flex-col gap-3" style={{ borderColor: '#E5E5E3' }}>
@@ -1304,7 +1321,7 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                               <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-600"></span>
                             </span>
-                            LIVE (P{game.period || '1'})
+                            {realStatus === '3' ? 'FINAL (unofficial)' : `LIVE · P${lg?.period || game.period || '1'}${lg?.clock ? ` ${String(lg.clock).replace(/^00:/, '')}` : ''}`}
                           </div>
                         ) : isFinal ? (
                           <span className="text-[10px] font-medium text-slate-400">
@@ -1322,13 +1339,13 @@ export default function Matchup({ activeLeagueId, setCurrentTab }) {
                           <div className="text-xs font-semibold text-slate-800">{game.home_team_name || game.home_team || 'Home'}</div>
                         </div>
                         <div className="flex justify-center items-center gap-2 w-[20%]">
-                          {isFutureOfSim ? (
+                          {notStarted ? (
                             <span className="text-xs font-medium text-slate-400">vs</span>
                           ) : (
                             <>
-                              <span className="text-sm font-bold text-slate-800">{game.home_goal_count ?? game.home_score ?? 0}</span>
+                              <span className="text-sm font-bold text-slate-800">{homeGoals}</span>
                               <span className="text-slate-400 text-xs">-</span>
-                              <span className="text-sm font-bold text-slate-800">{game.visiting_goal_count ?? game.visiting_score ?? 0}</span>
+                              <span className="text-sm font-bold text-slate-800">{visitorGoals}</span>
                             </>
                           )}
                         </div>

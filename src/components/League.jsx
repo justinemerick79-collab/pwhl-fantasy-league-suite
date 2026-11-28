@@ -5,6 +5,7 @@ import {
 import { db } from '../firebase.js';
 import { doc, getDoc, updateDoc, collection, getDocs, deleteDoc, query, where } from 'firebase/firestore';
 import PlayoffBracket from './PlayoffBracket';
+import StatCorrectionsFeed from './StatCorrectionsFeed';
 import { useAuth } from '../contexts/AuthContext';
 import { 
   randomizeDraftOrder, submitTradeProposal, respondToTrade, cancelTradeProposal, cancelWaiverClaim, vetoTrade 
@@ -521,6 +522,8 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
         {/* ── TRANSACTIONS, WAIVERS & TRADES HUB ── */}
         {initialTab === 'transactions' && (
           <div className="space-y-8 animate-fade-in">
+            <StatCorrectionsFeed leagueId={activeLeagueId} leagueData={leagueData} teams={teams} playersMap={playersMap} />
+
             {/* Top Action Bar */}
             <div className="flex flex-wrap justify-between items-center bg-white border border-slate-200/80 p-5 rounded-2xl shadow-sm gap-4">
               <div>
