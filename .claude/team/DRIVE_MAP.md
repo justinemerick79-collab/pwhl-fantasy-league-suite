@@ -23,7 +23,8 @@ Use the folder ID as `parentId` when you make a document.
 | Document | ID |
 |---|---|
 | README — How This Drive Works | `12IKNLACHTw6gXFssVW5lZKkZFAul2CPgL27ilk17j3Y` |
-| Decision Log | `1SGQzH4tWby1l6zbMmg1TTRmiYXl77FFZRdhfLZkHZPQ` |
+| Decision Log (v2) | `1gDb_CRQYMk5mcalHdp4rWnvB219W8tJfWYZhf1VMgzM` |
+| Plan — Live Scoring | `1ZpL33-t8EadftMdJQvsl5IJ0vzXR9IukP11dpJY3bHA` |
 | CEO Brief #1 | `1waJyZBmDCZCMov2AzWDtZUoQ3M1V9FQ39CoZ8T0-HhM` |
 | Launch Roadmap & Ranked Backlog | `1MmilVDcwsp-A-iGVsCz45qQKOsvo6wejcp9QmmNbPz4` |
 | Competitive Landscape & Market | `1T7rlXDn3kCVhMw0Lk0BsS3g8BozDDJE2HwAvp6YGcro` |

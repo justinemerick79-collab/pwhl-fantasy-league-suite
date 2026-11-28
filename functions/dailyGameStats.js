@@ -11,6 +11,7 @@
  */
 
 const { Timestamp, getFirestore } = require("firebase-admin/firestore");
+const { normalizeBoxScore, pointsForGame, scoreGoalie } = require("./boxScore");
 
 // Lazy getter — ensures initializeApp() has already been called by index.js
 function getDb() {
@@ -64,180 +65,28 @@ function parseDateSafe(dateStr) {
 /**
  * Calculates per-player raw stats and fantasy points from a single game summary.
  * Returns an object: { playerId: { fantasyPoints, stats: { ... } } }
- * 
- * This mirrors the logic in calculateSummaryFantasyPoints (functions/index.js)
- * but returns structured stat breakdowns for audit trail purposes.
+ *
+ * A thin wrapper over functions/boxScore.js — the one parser and scoring formula
+ * shared with live scoring and the nightly official switch. Positions come from
+ * `playersPosMap` (default 'F'), as before.
  */
 function calculatePlayerStatsFromSummary(summary, scoringRules, playersPosMap) {
-  const result = {}; // playerId -> { stats, fantasyPoints }
-
-  // Step 1: Parse scoring plays for assist/PP/SH breakdowns
-  const scoringPlays = Array.isArray(summary.goals) ? summary.goals : [];
-  const assistCounts = {};
-  const goalCounts = {};
-
-  scoringPlays.forEach(goal => {
-    const isPP = goal.power_play === "1" || goal.power_play === 1;
-    const isSH = goal.short_handed === "1" || goal.short_handed === 1;
-
-    if (goal.goal_scorer?.player_id) {
-      const scorerId = String(goal.goal_scorer.player_id);
-      if (!goalCounts[scorerId]) goalCounts[scorerId] = { ppGoals: 0, shGoals: 0 };
-      if (isPP) goalCounts[scorerId].ppGoals++;
-      if (isSH) goalCounts[scorerId].shGoals++;
-    }
-
-    [goal.assist1_player, goal.assist2_player].forEach(a => {
-      if (!a?.player_id) return;
-      const assistId = String(a.player_id);
-      if (!assistCounts[assistId]) assistCounts[assistId] = { assists: 0, ppAssists: 0, shAssists: 0 };
-      assistCounts[assistId].assists++;
-      if (isPP) assistCounts[assistId].ppAssists++;
-      if (isSH) assistCounts[assistId].shAssists++;
-    });
-  });
-
-  // Step 2: Process skaters
-  const homeSkaters = summary.home_team_lineup?.players || [];
-  const visitorSkaters = summary.visitor_team_lineup?.players || [];
-
-  [...homeSkaters, ...visitorSkaters].forEach(player => {
-    const id = String(player.player_id);
-    if (!id) return;
-
-    const goals = parseInt(player.goals || 0);
-    const pim = parseInt(player.pim || 0);
-    const shots = parseInt(player.shots_on || player.shots || 0);
-    const blocks = parseInt(player.shots_blocked_by_player || player.shots_blocked || 0);
-    const hits = parseInt(player.hits || 0);
-
-    let plusMinus = 0;
-    const pm = player.plusminus;
-    if (pm !== undefined && pm !== null && pm !== "") {
-      plusMinus = parseInt(pm, 10) || 0;
-    }
-
-    let assists = 0;
-    let ppPoints = 0;
-    let shPoints = 0;
-
-    const assistObj = assistCounts[id];
-    if (assistObj) {
-      assists += assistObj.assists;
-      ppPoints += assistObj.ppAssists;
-      shPoints += assistObj.shAssists;
-    }
-
-    const goalObj = goalCounts[id];
-    if (goalObj) {
-      ppPoints += goalObj.ppGoals;
-      shPoints += goalObj.shGoals;
-    }
-
-    const stats = { goals, assists, plusMinus, ppp: ppPoints, shp: shPoints, sog: shots, hits, blocks, pim };
-
-    // Calculate fantasy points using the provided scoring rules
-    const matrix = scoringRules.skaters || DEFAULT_SCORING.skaters;
-    let pts = 0;
-    pts += goals * (matrix.goals || 0);
-    pts += assists * (matrix.assists || 0);
-    pts += plusMinus * (matrix.plusMinus || 0);
-    pts += ppPoints * (matrix.ppp || 0);
-    pts += shPoints * (matrix.shp || 0);
-    pts += shots * (matrix.sog || 0);
-    pts += hits * (matrix.hits || 0);
-    pts += blocks * (matrix.blocks || 0);
-
-    // Defense bonus
-    const pos = playersPosMap[id] || "F";
-    if (pos === "D" || pos === "Defense") {
-      pts += (goals + assists) * (matrix.defensePoints || 0);
-    }
-
-    if (!result[id]) {
-      result[id] = { fantasyPoints: 0, stats: { goals: 0, assists: 0, plusMinus: 0, ppp: 0, shp: 0, sog: 0, hits: 0, blocks: 0, pim: 0 } };
-    }
-    result[id].fantasyPoints += pts;
-    // Accumulate stats (a player could appear in multiple summaries on same date, though rare)
-    const rs = result[id].stats;
-    rs.goals += stats.goals;
-    rs.assists += stats.assists;
-    rs.plusMinus += stats.plusMinus;
-    rs.ppp += stats.ppp;
-    rs.shp += stats.shp;
-    rs.sog += stats.sog;
-    rs.hits += stats.hits;
-    rs.blocks += stats.blocks;
-    rs.pim += stats.pim;
-  });
-
-  // Step 3: Process goalies
-  const homeGoalies = summary.goalies?.home || [];
-  const visitorGoalies = summary.goalies?.visitor || [];
-
-  const gameGoaliesMap = {};
-  [...homeGoalies, ...visitorGoalies].forEach(goalie => {
-    const id = String(goalie.player_id);
-    if (!id) return;
-
-    let secs = parseInt(goalie.seconds || goalie.secs || 0);
-    if (!secs && goalie.secs_mmss && goalie.secs_mmss.includes(":")) {
-      const [m, s] = goalie.secs_mmss.split(":").map(Number);
-      secs = m * 60 + s;
-    }
-
-    if (!gameGoaliesMap[id]) {
-      gameGoaliesMap[id] = {
-        saves: parseInt(goalie.saves || 0),
-        goalsAgainst: parseInt(goalie.goals_against || 0),
-        wins: parseInt(goalie.win || 0),
-        losses: parseInt(goalie.loss || 0),
-        overtimeLosses: parseInt(goalie.ot_loss || 0),
-        shutouts: parseInt(goalie.shutout || 0),
-        timeOnIce: secs
-      };
-    } else {
-      const existing = gameGoaliesMap[id];
-      existing.saves += parseInt(goalie.saves || 0);
-      existing.goalsAgainst += parseInt(goalie.goals_against || 0);
-      existing.wins = Math.max(existing.wins, parseInt(goalie.win || 0));
-      existing.losses = Math.max(existing.losses, parseInt(goalie.loss || 0));
-      existing.overtimeLosses = Math.max(existing.overtimeLosses, parseInt(goalie.ot_loss || 0));
-      existing.shutouts = Math.max(existing.shutouts, parseInt(goalie.shutout || 0));
-      existing.timeOnIce += secs;
-    }
-  });
-
-  for (const [id, stats] of Object.entries(gameGoaliesMap)) {
-    if (stats.timeOnIce > 0 || stats.saves > 0 || stats.goalsAgainst > 0) {
-      const matrix = scoringRules.goalies || DEFAULT_SCORING.goalies;
-      let pts = 0;
-      pts += stats.wins * (matrix.wins || 0);
-      pts += stats.overtimeLosses * (matrix.otl || 0);
-      pts += stats.goalsAgainst * (matrix.ga || 0);
-      pts += stats.saves * (matrix.saves || 0);
-      pts += stats.shutouts * (matrix.shutouts || 0);
-
-      const goalieStats = {
-        wins: stats.wins, losses: stats.losses, overtimeLosses: stats.overtimeLosses,
-        goalsAgainst: stats.goalsAgainst, saves: stats.saves, shutouts: stats.shutouts,
-        timeOnIce: stats.timeOnIce
-      };
-
-      if (!result[id]) {
-        result[id] = { fantasyPoints: 0, stats: goalieStats };
-      } else {
-        result[id].stats = goalieStats;
-      }
-      result[id].fantasyPoints += pts;
-    }
+  const box = normalizeBoxScore(summary, { final: true });
+  const pts = pointsForGame(box, scoringRules || {}, playersPosMap || {});
+  const result = {};
+  for (const [id, st] of Object.entries(box.skaters)) {
+    result[id] = {
+      fantasyPoints: pts[id] ?? 0,
+      stats: { goals: st.goals, assists: st.assists, plusMinus: st.plusMinus, ppp: st.ppp, shp: st.shp, sog: st.sog, hits: st.hits, blocks: st.blocks, pim: st.pim }
+    };
   }
-
-  // Round all fantasy points
-  for (const entry of Object.values(result)) {
-    entry.fantasyPoints = Math.round(entry.fantasyPoints * 100) / 100;
+  for (const [id, st] of Object.entries(box.goalies)) {
+    if (scoreGoalie(st) === null) continue; // did not play
+    result[id] = {
+      fantasyPoints: pts[id] ?? 0,
+      stats: { wins: st.wins, losses: st.losses, overtimeLosses: st.overtimeLosses, goalsAgainst: st.goalsAgainst, saves: st.saves, shutouts: st.shutouts, timeOnIce: st.timeOnIce }
+    };
   }
-
   return result;
 }
 

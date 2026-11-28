@@ -91,8 +91,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-season-weeks.js` | **passes** (reads the live feed; writes only to the emulator, then removes what it wrote) |
 | `test-server-transactions.js` | **passes** |
 | `test-playoffs.js` | **passes** |
+| `test-live-scoring.js` | **passes** (replays `test-fixtures/gamesummary-358-final.json` through a stubbed fetch) |
 
-All eleven pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
+All twelve pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
 
@@ -146,6 +147,31 @@ still build their own schedule in `initializeTestEnvironment`.
   own — `finalizeLeagueWeek` is per week.
 - Idempotent: does nothing if the league already has any matchup. Team order is sorted, so a retry is identical.
 - No week map → skipped with a logged error, the same rule as `getWeekBounds`.
+
+### Live scoring and the official switch
+
+`functions/liveStats.js` (plan: Drive, folder 05, "Plan — Live Scoring, Nightly Official Stats, Stat Corrections").
+One parser and scoring formula, `functions/boxScore.js#normalizeBoxScore` / `pointsForGame`, serve live scoring,
+the official switch, settlement **and** the simulation (`calculatePlayerStatsFromSummary` is now a wrapper; a
+parity run over 10 real games showed 0 differences). Server game days are **Pacific** (`functions/dates.js`).
+
+| When (Pacific) | Job | Does |
+|---|---|---|
+| every 5 min | `liveGamePoller` → `runLivePoll` | Reads `live_state/current`; on a day without games it stops there. From 30 min before puck drop it fetches each game until Final, then at +15/+30/+60/+120 min (`POST_GAME_CHECK_MIN`), and rebuilds the day's points when stats **or status** change |
+| 1:00 am | `reconcileFinalStatsScheduled` | Re-checks every game of the last 3 days; marks stable finals `official`; logs corrections |
+| 3:00 am | `syncDailyData` | Schedule + week maps; rebuilds yesterday from box scores (old summary path if a day has none); re-plans today |
+| 4:00 am | `planGameDayScheduled` | Writes `live_state/current` from `pwhl_games where date_played == today` |
+| hourly | `settleMatchupWeeksScheduled` | Settles a week only when every game in `weeks[].games` is `official` (`ensureWeekOfficial` re-checks now); after 24 h it settles anyway and writes an `unconfirmed_settlement` notice |
+
+- `game_box_scores/{gameId}` status: `live` → `final` (status 4 seen) → `official` (final, `meta.final == "1"`, and
+  unchanged for 30 min **or** `last_modified` 12+ h old). A change after Final writes `stat_corrections` entries;
+  a change after official reopens the game to `final` (`afterOfficial: true` on the entry).
+- Goalie W/L/OTL/SO count only at status 4 (preseason games can show a practice OT/shootout before Final).
+- `pwhl_game_summaries` is written only when a game becomes official — that write fires the heavy
+  `onGameSummaryWritten` season-totals rebuild, which must not run every 5 minutes.
+- Day status in `daily_game_stats/{date}`: `live` / `final` / `official`. The old `preliminary` value is gone.
+- **Open (Step 0):** whether LeagueStat's box score changes during play is being measured on games 363/364. If it
+  does not, only the fetch layer changes (Firebase goals for live G/A/+/-).
 
 ### Playoffs
 
