@@ -15,7 +15,8 @@ const noUnusedVars = ['error', {
 
 export default defineConfig([
   // scratch/ is gitignored throwaway work; dist/ is build output.
-  globalIgnores(['dist', 'dist-ssr', 'scratch', '**/node_modules']),
+  // .claude/worktrees holds parallel Claude sessions' checkouts of this repo.
+  globalIgnores(['dist', 'dist-ssr', 'scratch', '**/node_modules', '.claude']),
 
   // Browser app code — ESM + JSX + React rules.
   {

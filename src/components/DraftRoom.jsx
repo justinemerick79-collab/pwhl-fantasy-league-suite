@@ -16,6 +16,7 @@ import { useTimeTravel } from '../contexts/TimeTravelContext';
 import { useData } from '../contexts/DataContext';
 import { initializeDraft, submitDraftPick, toggleAutoDraftStatus } from '../services/leagueService';
 import { fetchDraftEligiblePlayers } from '../services/pwhlService';
+import PwhlTeamLabel from './PwhlTeamLabel';
 
 export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
   const { currentUser } = useAuth();
@@ -1306,7 +1307,7 @@ export default function DraftRoom({ activeLeagueId, setCurrentTab }) {
                   </div>
                   <div className="flex items-center gap-3 mt-3">
                     {teamInfo.logo && <img src={teamInfo.logo} alt="" className="w-6 h-6 object-contain" />}
-                    <span className="text-sm font-bold text-white/80">{teamInfo.name || teamInfo.code || 'Free Agent'}</span>
+                    <PwhlTeamLabel code={teamInfo.name || teamInfo.code} className="text-sm font-bold text-white/80" dark />
                   </div>
                 </div>
               </div>

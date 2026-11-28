@@ -11,6 +11,7 @@ import PlayerCardModal from './PlayerCardModal';
 import { fetchAggregatedStats } from '../services/statsEngine';
 import { submitAddDrop, submitWaiverClaim } from '../services/leagueService.js';
 import { normalizePosition } from '../services/pwhlService.js';
+import PwhlTeamLabel from './PwhlTeamLabel';
 
 export default function Players({ activeLeagueId, onProposeTrade }) {
   const { currentUser } = useAuth();
@@ -749,9 +750,7 @@ export default function Players({ activeLeagueId, onProposeTrade }) {
 
                       {/* Team */}
                       <td className="px-4 py-3.5 text-center">
-                        <span className="text-[10px] font-semibold text-slate-600">
-                          {player.teamCode}
-                        </span>
+                        <PwhlTeamLabel code={player.teamCode} />
                       </td>
 
                       {/* Owner Status */}
