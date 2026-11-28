@@ -89,8 +89,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-admin-callables.js` | **passes** |
 | `test-league-schedule.js` | **passes** |
 | `test-season-weeks.js` | **passes** (reads the live feed; writes only to the emulator, then removes what it wrote) |
+| `test-server-transactions.js` | **passes** |
 
-All nine pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
+All ten pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
 
@@ -241,8 +242,13 @@ Bare `YYYY-MM-DD` strings are deliberately parsed as `T08:00:00-08:00` to avoid 
 **When adding date logic, call `getSimulatedDate()` — never `new Date()` directly.** Both legacy and
 per-league paths must keep working.
 
-`TimeTravelContext` also opportunistically calls `processWaivers()` and `processAcceptedTrades()` on every
-active-league snapshot, so league-doc writes can trigger transaction processing as a side effect.
+**Waivers and accepted trades are processed on the server**, never in the browser (`functions/transactions.js`).
+`processTransactionsScheduled` runs every 15 minutes for all `active`/`active_full` leagues, using each league's
+`getSystemDate`; `onLeagueSimulatedDateWritten` also runs it when a simulation's date moves; `onTradeWritten`
+processes an `accepted_immediate` trade at once. Each waiver run reads everything before writing and tracks rosters
+in memory (the old client version failed when two waivers expired together and kept only one of a team's wins);
+each trade is re-read inside its own transaction and processed only if still waiting. The client only *submits*
+claims, drops and trade responses.
 
 Services that need simulation state outside React re-read it from Firestore via their own local
 `checkIsSimulation()` helpers (in `statsEngine.js` and `pwhlService.js`), which read

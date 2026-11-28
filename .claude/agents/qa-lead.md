@@ -17,7 +17,7 @@ Find defects before managers do. A defect that changes a score, loses a lineup o
 2. Write a **test plan** for each PRD in `06 Quality & Release`.
 3. Write and run **emulator tests**. Follow the pattern in `test-bot-draft.js` and `test-support.js`: client SDK for sign-in, Admin SDK for setup, assertions and cleanup.
 4. Run the **release checklist** before each deploy: `npm run lint` (no new findings), `npm run build`, `node check-pwhl-feed.js`, the guarded emulator tests.
-5. Add the emulator guard to the 6 unguarded scripts: `test-draft-system.js`, `test-emulator-time-travel.js`, `test-stats-calculations.js`, `test-transactions-engine.js`, `test-transactions-phase1.js`, `test-firestore.js`.
+5. Add the emulator guard to the 5 unguarded scripts: `test-draft-system.js`, `test-emulator-time-travel.js`, `test-stats-calculations.js`, `test-transactions-phase1.js`, `test-firestore.js`.
 
 ## How to run a test
 
