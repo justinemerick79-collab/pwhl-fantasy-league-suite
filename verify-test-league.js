@@ -196,6 +196,13 @@ async function runVerification() {
         throw new Error(`Assertion 3 Failed: Matchups are missing for week ${w}`);
       }
     }
+    // With a long enough week map, the next 2 game weeks are the playoff weeks.
+    const expectedPlayoffWeeks = gameWeeks.length >= 16 ? gameWeeks.slice(14, 16) : null;
+    const playoffWeeks = simLeagueSnap.data()?.schedule?.playoffWeeks || null;
+    console.log(`- Playoff weeks: ${JSON.stringify(playoffWeeks)} (expected ${JSON.stringify(expectedPlayoffWeeks)})`);
+    if (JSON.stringify(playoffWeeks) !== JSON.stringify(expectedPlayoffWeeks)) {
+      throw new Error(`Assertion 3 Failed: playoff weeks ${JSON.stringify(playoffWeeks)}, expected ${JSON.stringify(expectedPlayoffWeeks)}`);
+    }
     console.log("⭐ ASSERTION 3 PASSED: Matchup schedule has exactly 14 weeks represented!");
 
     // Assertion 4: The simulation_state document is active

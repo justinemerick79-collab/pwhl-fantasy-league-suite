@@ -10,6 +10,7 @@ const { liveGamePoller } = require("./livePoller");
 const { generateLeagueSchedule } = require("./schedule");
 const { buildSeasonWeeks } = require("./seasonWeeks");
 const { processLeagueTransactions, processLeagueTrades } = require("./transactions");
+const { afterWeekSettled, playoffWinner } = require("./playoffs");
 
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
@@ -817,7 +818,16 @@ exports.initializeTestEnvironment = onCall({ region: "us-central1" }, async (req
       rosterSettings: defaultRosterSettings,
       scoringSettings: defaultScoringSettings,
       scheduleSettings: defaultScheduleSettings,
-      waiverOrder: [adminTeamRef.id, ...botTeamRefs.map(r => r.id)]
+      waiverOrder: [adminTeamRef.id, ...botTeamRefs.map(r => r.id)],
+      // The 14 regular weeks below, plus the next game weeks for a 4-team,
+      // 2-round playoff (playoffs.js). Without a long enough week map there are
+      // no playoff weeks, and the season simply ends after week 14.
+      ...(activeWeeks.length >= 16 ? {
+        schedule: {
+          regularSeasonWeeks: activeWeeks.slice(0, 14).map(w => w.week),
+          playoffWeeks: activeWeeks.slice(14, 16).map(w => w.week)
+        }
+      } : {})
     });
 
     // F. Generate mathematically perfect Weekly H2H Matchups (Circle Rotation, Double Round-Robin for 14 weeks)
@@ -2431,6 +2441,26 @@ async function finalizeLeagueWeek(leagueId, weekInfo) {
 
   for (const mDoc of matchupsSnap.docs) {
     const matchup = mDoc.data();
+
+    // Playoff matchup: scored over its whole round (a round can span several
+    // weeks), decided by seed on a tie, and never counted in the standings.
+    if (matchup.isPlayoff) {
+      let homeScore = teamScores[matchup.homeTeamId] || 0.0;
+      let awayScore = teamScores[matchup.awayTeamId] || 0.0;
+      if (matchup.roundStart && new Date(matchup.roundStart) < new Date(weekInfo.start)) {
+        const range = [new Date(matchup.roundStart), new Date(weekInfo.end)];
+        homeScore = (await calculateTeamWeekScore(leagueId, matchup.homeTeamId, ...range, { dailyPointsCache, lineupCache })).totalScore;
+        awayScore = (await calculateTeamWeekScore(leagueId, matchup.awayTeamId, ...range, { dailyPointsCache, lineupCache })).totalScore;
+      }
+      txBatch.update(mDoc.ref, {
+        homeScore, awayScore,
+        status: "completed",
+        winnerId: playoffWinner(matchup, homeScore, awayScore),
+        updatedAt: Timestamp.fromMillis(Date.now())
+      });
+      continue;
+    }
+
     const homeScore = teamScores[matchup.homeTeamId] || 0.0;
     const awayScore = teamScores[matchup.awayTeamId] || 0.0;
 
@@ -2472,6 +2502,14 @@ async function finalizeLeagueWeek(leagueId, weekInfo) {
 
   await txBatch.commit();
   console.log(`[Finalizer] Successfully finalized Week ${weekInfo.week} for league ${leagueId}.`);
+
+  // Start or advance the playoffs. A failure here must not undo the settled week.
+  try {
+    const playoffStep = await afterWeekSettled(db, leagueId, weekInfo.week);
+    console.log(`[Playoffs] League ${leagueId}, week ${weekInfo.week}: ${playoffStep}`);
+  } catch (err) {
+    console.error(`[Playoffs] League ${leagueId}, week ${weekInfo.week}: failed:`, err);
+  }
 }
 
 /**

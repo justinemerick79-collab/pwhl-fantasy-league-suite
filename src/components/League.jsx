@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback} from 'react';
 import { 
-  Trophy, Shield, Settings, Zap, Trash2, Lock, Clock, ArrowRightLeft, Send, X, AlertCircle, Plus
+  Trophy, Settings, Zap, Trash2, Lock, Clock, ArrowRightLeft, Send, X, AlertCircle, Plus
 } from 'lucide-react';
 import { db } from '../firebase.js';
-import { doc, getDoc, updateDoc, collection, getDocs, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, collection, getDocs, deleteDoc, query, where } from 'firebase/firestore';
+import PlayoffBracket from './PlayoffBracket';
 import { useAuth } from '../contexts/AuthContext';
 import { 
   randomizeDraftOrder, submitTradeProposal, respondToTrade, cancelTradeProposal, cancelWaiverClaim, vetoTrade 
@@ -13,6 +14,7 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
   const { currentUser } = useAuth();
   const [leagueData, setLeagueData] = useState(null);
   const [teams, setTeams] = useState([]);
+  const [playoffMatchups, setPlayoffMatchups] = useState([]);
   const [loading, setLoading] = useState(true);
 
   // Transactions & Waivers states
@@ -188,6 +190,9 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
       const tradesSnap = await getDocs(collection(db, `fantasy_leagues/${activeLeagueId}/trades`));
       setTrades(tradesSnap.docs.map(d => ({ id: d.id, ...d.data() })));
 
+      const playoffSnap = await getDocs(query(collection(db, `fantasy_leagues/${activeLeagueId}/matchups`), where('isPlayoff', '==', true)));
+      setPlayoffMatchups(playoffSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+
       // Fetch Players dictionary for mapping names in transactions
       const playersSnap = await getDocs(collection(db, "pwhl_players"));
       const pMap = {};
@@ -248,6 +253,14 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
   }
 
   const myTeam = currentUser ? teams.find(t => t.ownerId === currentUser.uid) : null;
+
+  // Standings order: win percentage (a tie counts half), then points for.
+  // functions/playoffs.js#seedTeams seeds the playoffs the same way.
+  const winPct = (t) => {
+    const g = (t.wins || 0) + (t.losses || 0) + (t.ties || 0);
+    return g > 0 ? ((t.wins || 0) + 0.5 * (t.ties || 0)) / g : 0;
+  };
+  const rankedTeams = [...teams].sort((a, b) => winPct(b) - winPct(a) || (b.points || 0) - (a.points || 0));
   const isCommish = currentUser && leagueData && currentUser.uid === leagueData.ownerId;
   const isCommissioner = isCommish;
   const isPending = leagueData && (
@@ -473,18 +486,7 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
                         <td colSpan="4" className="p-8 text-center text-xs text-slate-400 font-bold italic">Standings loading or empty.</td>
                       </tr>
                     ) : (
-                      [...teams]
-                        .sort((a, b) => {
-                          const gamesA = (a.wins || 0) + (a.losses || 0) + (a.ties || 0);
-                          const gamesB = (b.wins || 0) + (b.losses || 0) + (b.ties || 0);
-                          const winPctA = gamesA > 0 ? ((a.wins || 0) + 0.5 * (a.ties || 0)) / gamesA : 0;
-                          const winPctB = gamesB > 0 ? ((b.wins || 0) + 0.5 * (b.ties || 0)) / gamesB : 0;
-                          if (winPctB !== winPctA) {
-                            return winPctB - winPctA;
-                          }
-                          return (b.points || 0) - (a.points || 0);
-                        })
-                        .map((team, idx) => (
+                      rankedTeams.map((team, idx) => (
                           <tr key={team.id} className="hover:bg-slate-50 transition-colors text-xs">
                             <td className="px-6 py-4 text-center font-black text-slate-400">{idx + 1}</td>
                             <td className="px-6 py-4 font-black text-slate-900 flex items-center gap-2.5">
@@ -512,65 +514,7 @@ export default function League({ activeLeagueId, initialTab, setActiveLeagueId }
               </div>
             </div>
 
-            {/* Playoff Bracket Tree (lg:col-span-5) */}
-            <div className="lg:col-span-5 bg-white border border-slate-200/80 p-6 rounded-2xl shadow-sm">
-              <h3 className="text-xs font-black uppercase tracking-wider text-slate-900 border-b border-slate-200 pb-4 mb-5 flex items-center gap-2">
-                <Shield className="w-4 h-4 text-indigo-600" /> Playoff Bracket Tree
-              </h3>
-              
-              <div className="space-y-6 relative pl-4 border-l-2 border-slate-200 py-2">
-                {/* Semifinal 1 */}
-                <div className="relative">
-                  <div className="absolute -left-[22px] top-4 w-4 h-[2px] bg-slate-200"></div>
-                  <span className="text-[9px] uppercase font-black text-indigo-600 tracking-wider">Semifinal Match A</span>
-                  <div className="bg-slate-50 border border-slate-200 p-3.5 rounded-xl mt-1 space-y-1.5 shadow-xs">
-                    <div className="flex justify-between text-xs font-bold text-slate-900">
-                      <span>#1 Seed</span>
-                      <span className="text-slate-400 font-semibold">-</span>
-                    </div>
-                    <div className="flex justify-between text-xs font-bold text-slate-500">
-                      <span>#4 Seed</span>
-                      <span className="text-slate-400 font-semibold">-</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Semifinal 2 */}
-                <div className="relative">
-                  <div className="absolute -left-[22px] top-4 w-4 h-[2px] bg-slate-200"></div>
-                  <span className="text-[9px] uppercase font-black text-indigo-600 tracking-wider">Semifinal Match B</span>
-                  <div className="bg-slate-50 border border-slate-200 p-3.5 rounded-xl mt-1 space-y-1.5 shadow-xs">
-                    <div className="flex justify-between text-xs font-bold text-slate-900">
-                      <span>#2 Seed</span>
-                      <span className="text-slate-400 font-semibold">-</span>
-                    </div>
-                    <div className="flex justify-between text-xs font-bold text-slate-500">
-                      <span>#3 Seed</span>
-                      <span className="text-slate-400 font-semibold">-</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Championship Match */}
-                <div className="relative pt-5 border-t border-slate-200 mt-5">
-                  <div className="absolute -left-[22px] top-9 w-4 h-[2px] bg-amber-400"></div>
-                  <span className="text-[9px] uppercase font-black text-amber-700 tracking-wider flex items-center gap-1.5">
-                    <Trophy className="w-3.5 h-3.5 text-amber-600" /> PWHL Championship Final
-                  </span>
-                  <div className="bg-amber-50 border border-amber-200 p-4.5 rounded-2xl mt-1.5 space-y-2 shadow-xs">
-                    <div className="flex justify-between text-xs font-black text-slate-900">
-                      <span>Winner Match A</span>
-                      <span className="text-amber-700 font-black">Ready</span>
-                    </div>
-                    <div className="flex justify-between text-xs font-black text-slate-900">
-                      <span>Winner Match B</span>
-                      <span className="text-amber-700 font-black">Ready</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
+            <PlayoffBracket leagueData={leagueData} teams={teams} rankedTeams={rankedTeams} playoffMatchups={playoffMatchups} />
           </div>
         )}
 

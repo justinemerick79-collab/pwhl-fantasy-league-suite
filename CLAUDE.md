@@ -90,8 +90,9 @@ Current state when run against the emulator with the repo's own rules:
 | `test-league-schedule.js` | **passes** |
 | `test-season-weeks.js` | **passes** (reads the live feed; writes only to the emulator, then removes what it wrote) |
 | `test-server-transactions.js` | **passes** |
+| `test-playoffs.js` | **passes** |
 
-All ten pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
+All eleven pass. `test-admin-callables.js` also needs the Functions emulator on port 5001, so start all three
 emulators — or run any of these via `firebase emulators:exec --only functions,firestore,auth "npx tsx <script>"`,
 which starts the emulators, sets both env vars, runs the script and shuts down.
 
@@ -139,12 +140,30 @@ still build their own schedule in `initializeTestEnvironment`.
 - Uses only non-off weeks that **start after** the draft, and sets `currentWeek` to the first of them. Settlement
   starts from `currentWeek`, so without this a league drafted mid-season would settle its past weeks with no games.
 - Reserves the last `ceil(log2(playoffTeams)) × playoffDuration` game weeks for playoffs, recorded in
-  `league.schedule.playoffWeeks`. Nothing settles those weeks yet (playoffs are issue #17).
+  `league.schedule.playoffWeeks` (see Playoffs below).
 - Circle-method round-robin, repeated with home/away swapped on each pass. Odd team counts give one bye a week
   (no matchup document). `matchupDuration: 2` keeps the same pairs for 2 weeks, but each week still settles on its
   own — `finalizeLeagueWeek` is per week.
 - Idempotent: does nothing if the league already has any matchup. Team order is sorted, so a retry is identical.
 - No week map → skipped with a logged error, the same rule as `getWeekBounds`.
+
+### Playoffs
+
+`functions/playoffs.js#afterWeekSettled` runs at the end of `finalizeLeagueWeek` — the one settlement path for
+real leagues (weekly scheduler) and per-league simulations. The legacy global simulation
+(`onSimulationStateWritten`) has its own settlement code and gets no playoffs.
+
+- After the last `schedule.regularSeasonWeeks` week settles: seed the top `scheduleSettings.playoffTeams` by win %
+  (tie = half a win), then points, then id — the Standings table sorts the same way. Non-power-of-two brackets
+  give the top seeds a round-1 bye; every round the best remaining seed plays the worst.
+- Playoff matchups are ordinary matchup docs with `isPlayoff: true`, `round`, `homeSeed`/`awaySeed`, stored under the
+  round's **last** week (`roundStart` covers multi-week rounds). `finalizeLeagueWeek` scores them over the round,
+  breaks a tie by seed, and **never** touches team W/L/T or points.
+- State lives in `league.playoffs` (`seeds`, `alive`, `byes`, `round`, `totalRounds`, `status`, `championTeamId`).
+  Every step re-reads it inside a transaction, so running it twice does nothing.
+- Simulation leagues get `schedule.playoffWeeks` = the 2 game weeks after their 14 regular weeks, when the season's
+  week map is long enough; otherwise the simulated season ends after week 14.
+- `src/components/PlayoffBracket.jsx` displays it on the Standings tab.
 
 ### The daily_lineups date comparison
 
