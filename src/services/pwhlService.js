@@ -32,6 +32,42 @@ export const normalizePosition = (posStr) => {
   return 'F';
 };
 
+/**
+ * The one rule for which season's player pool ("universe") a reader uses.
+ *
+ * A season that has players uses its own pool. A season with no players yet
+ * (an upcoming season before its rosters are synced) uses the most recent
+ * regular season (playoff '0', career '1') that starts before it. If none
+ * qualifies, the season itself is returned and the pool stays empty.
+ *
+ * The server keeps a copy of this rule in functions/universeSeason.js — keep
+ * the two in step; test-season-pool.js checks both.
+ *
+ * @param {string|number} seasonId - The season the caller asked for.
+ * @param {Array<object>} seasons - pwhl_seasons docs ({ season_id, start_date, playoff, career }).
+ * @param {boolean} hasPlayers - Whether pwhl_players has any doc for seasonId.
+ * @returns {{ seasonId: string, isFallback: boolean }}
+ */
+export function resolveUniverseSeason(seasonId, seasons, hasPlayers) {
+  const target = String(seasonId);
+  if (hasPlayers || !Array.isArray(seasons) || seasons.length === 0) {
+    return { seasonId: target, isFallback: false };
+  }
+  const idOf = (s) => String(s.season_id ?? s.id);
+  const targetDoc = seasons.find(s => idOf(s) === target);
+  const targetStart = targetDoc?.start_date ? new Date(targetDoc.start_date) : new Date();
+
+  const prevRegular = seasons
+    .filter(s => {
+      const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
+      return isRegular && idOf(s) !== target && s.start_date && new Date(s.start_date) < targetStart;
+    })
+    .sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
+
+  if (prevRegular.length === 0) return { seasonId: target, isFallback: false };
+  return { seasonId: idOf(prevRegular[0]), isFallback: true };
+}
+
 const API_KEY = '446521baf8c38984';
 const CLIENT_CODE = 'pwhl';
 const BASE_URL = '/api/pwhl/index.php';
@@ -425,28 +461,13 @@ export async function fetchDraftEligiblePlayers(draftSeasonId, selectedSeasonId)
   // 2. Fetch players for the draft/current season
   const playersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [draftSeasonId, Number(draftSeasonId)]));
   const playersSnap = await getDocs(playersQuery);
-  let resolvedSeasonId;
   let rawPlayers = playersSnap.docs.map(d => d.data());
 
-  if (rawPlayers.length === 0 && seasons.length > 0) {
-    const currentSeasonDoc = seasons.find(s => String(s.season_id) === String(draftSeasonId));
-    const currentStartDate = currentSeasonDoc ? new Date(currentSeasonDoc.start_date) : new Date();
-
-    const prevRegularSeasons = seasons.filter(s => {
-      const isRegular = (s.playoff === '0' || s.playoff === 0) && (s.career === '1' || s.career === 1);
-      const startsBefore = new Date(s.start_date) < currentStartDate;
-      return isRegular && startsBefore;
-    });
-
-    if (prevRegularSeasons.length > 0) {
-      prevRegularSeasons.sort((a, b) => new Date(b.start_date) - new Date(a.start_date));
-      const prevRegSeason = prevRegularSeasons[0];
-      resolvedSeasonId = prevRegSeason.season_id.toString();
-
-      const prevPlayersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [resolvedSeasonId, Number(resolvedSeasonId)]));
-      const prevPlayersSnap = await getDocs(prevPlayersQuery);
-      rawPlayers = prevPlayersSnap.docs.map(d => d.data());
-    }
+  const universe = resolveUniverseSeason(draftSeasonId, seasons, rawPlayers.length > 0);
+  if (universe.isFallback) {
+    const prevPlayersQuery = query(collection(db, 'pwhl_players'), where('season_id', 'in', [universe.seasonId, Number(universe.seasonId)]));
+    const prevPlayersSnap = await getDocs(prevPlayersQuery);
+    rawPlayers = prevPlayersSnap.docs.map(d => d.data());
   }
 
   // 3. Query and attach stats data based on selectedSeasonId
@@ -621,9 +642,14 @@ export async function generateSeasonProjectionsClient(seasonIdStr) {
   let playersSnap = await getDocs(query(collection(db, 'pwhl_players'), where('season_id', 'in', [seasonIdStr, Number(seasonIdStr)])));
   let allPlayers = playersSnap.docs.map(d => ({ id: d.id, data: d.data() }));
 
-  if (allPlayers.length === 0 && prevSeasonId) {
-    console.log(`[Projections Client] Season ${seasonIdStr} has 0 rostered players. Falling back to previous regular season ${prevSeasonId} player pool...`);
-    const prevPlayersSnap = await getDocs(query(collection(db, 'pwhl_players'), where('season_id', 'in', [prevSeasonId.toString(), Number(prevSeasonId)])));
+  const universe = resolveUniverseSeason(
+    seasonIdStr,
+    allSeasonsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+    allPlayers.length > 0
+  );
+  if (universe.isFallback) {
+    console.log(`[Projections Client] Season ${seasonIdStr} has 0 rostered players. Falling back to previous regular season ${universe.seasonId} player pool...`);
+    const prevPlayersSnap = await getDocs(query(collection(db, 'pwhl_players'), where('season_id', 'in', [universe.seasonId, Number(universe.seasonId)])));
     allPlayers = prevPlayersSnap.docs.map(d => ({ id: d.id, data: d.data() }));
   }
 

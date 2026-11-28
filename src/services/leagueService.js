@@ -8,6 +8,7 @@ import {
   query,
   where,
   getDocs,
+  limit,
   Timestamp,
   getDoc,
   setDoc,
@@ -340,6 +341,47 @@ export async function initializeDraft(leagueId, draftOrder) {
  * @param {boolean} isAutoPick - Set true to trigger timeout auto-assignment
  * @param {boolean} timedOut - Set true if the pick was forced due to time expiration, putting the user on auto-draft
  */
+/**
+ * The season a league plays: its own `season_id`, or the app's active season for
+ * leagues made by createLeague (which stores none).
+ */
+async function resolveLeagueSeasonId(leagueData) {
+  if (leagueData?.season_id !== undefined && leagueData?.season_id !== null && leagueData?.season_id !== '') {
+    return String(leagueData.season_id);
+  }
+  const activeSnap = await getDoc(doc(db, 'app_settings', 'active_season'));
+  const active = activeSnap.exists() ? activeSnap.data().active_season_id : null;
+  return active !== undefined && active !== null && active !== '' ? String(active) : null;
+}
+
+/**
+ * A drafted player's position. pwhl_players doc ids are "<seasonId>_<playerId>"
+ * while picks hold the bare player id, so read the league season's doc first,
+ * then any season's doc with that player_id. Only the engine's built-in scouting
+ * pool ("pwhl_N" ids, no pwhl_players doc) uses its fixed D/G id ranges.
+ */
+async function resolveDraftPosition(transaction, seasonId, playerId) {
+  const bareId = String(playerId);
+  if (seasonId) {
+    const snap = await transaction.get(doc(db, 'pwhl_players', `${seasonId}_${bareId}`));
+    if (snap.exists()) return normalizePosition(snap.data().position || snap.data().pos);
+  }
+  const ids = /^\d+$/.test(bareId) ? [bareId, Number(bareId)] : [bareId];
+  const anySeason = await getDocs(query(collection(db, 'pwhl_players'), where('player_id', 'in', ids), limit(1)));
+  if (!anySeason.empty) {
+    const data = anySeason.docs[0].data();
+    return normalizePosition(data.position || data.pos);
+  }
+  const scout = /^pwhl_(\d+)$/.exec(bareId);
+  if (scout) {
+    const n = Number(scout[1]);
+    if (n >= 12 && n <= 14) return 'G';
+    if (n >= 8 && n <= 11) return 'D';
+  }
+  if (!scout) console.warn(`[submitDraftPick] Player ${bareId} not found in pwhl_players; counting as F.`);
+  return 'F';
+}
+
 export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = false, timedOut = false) {
   const leagueRef = doc(db, "fantasy_leagues", leagueId);
   const draftStateRef = doc(db, `fantasy_leagues/${leagueId}/draft`, "state");
@@ -387,19 +429,9 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
     const N = draftData.draftOrder.length;
     const rosterSettings = leagueSnap.data().rosterSettings || { bench: 4, forwards: { starters: 6 }, defense: { starters: 4 }, goalies: { starters: 1 } };
 
-    // Resolve player position
-    const playerRef = doc(db, "pwhl_players", playerId);
-    const playerSnap = await transaction.get(playerRef);
-    let playerPos = 'F';
-    if (playerSnap.exists()) {
-      playerPos = normalizePosition(playerSnap.data().position);
-    } else {
-      const numId = parseInt(String(playerId).replace(/^\D+/g, ''), 10);
-      if (!isNaN(numId)) {
-        if (numId >= 12 && numId <= 14) playerPos = "G";
-        else if (numId >= 8 && numId <= 11) playerPos = "D";
-      }
-    }
+    // Resolve player position from the league's season doc ("<seasonId>_<playerId>")
+    const pickSeasonId = await resolveLeagueSeasonId(leagueSnap.data());
+    const playerPos = await resolveDraftPosition(transaction, pickSeasonId, playerId);
 
     // Verify roster position maximums limits and active roster requirements
     const currentRosterIds = draftData.activeRosters[draftData.currentTeamOnClock] || [];
@@ -408,18 +440,7 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
     let gCount = 0;
 
     for (const pId of currentRosterIds) {
-      const pRef = doc(db, "pwhl_players", pId);
-      const pSnap = await transaction.get(pRef);
-      let pPos = 'F';
-      if (pSnap.exists()) {
-        pPos = normalizePosition(pSnap.data().position);
-      } else {
-        const numId = parseInt(String(pId).replace(/^\D+/g, ''), 10);
-        if (!isNaN(numId)) {
-          if (numId >= 12 && numId <= 14) pPos = "G";
-          else if (numId >= 8 && numId <= 11) pPos = "D";
-        }
-      }
+      const pPos = await resolveDraftPosition(transaction, pickSeasonId, pId);
       if (pPos === 'F') fCount++;
       else if (pPos === 'D') dCount++;
       else if (pPos === 'G') gCount++;
@@ -480,6 +501,7 @@ export async function submitDraftPick(leagueId, userId, playerId, isAutoPick = f
       pickNumber: globalPickNumber,
       userId: pickerUserId,
       playerId: playerId,
+      position: playerPos,
       timestamp: now
     };
 
