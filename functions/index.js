@@ -9,6 +9,7 @@ const { snapshotDailyGameStats, calculateTeamWeekScore, getLocalDateStr: getDate
 const { liveGamePoller } = require("./livePoller");
 const { generateLeagueSchedule } = require("./schedule");
 const { buildSeasonWeeks } = require("./seasonWeeks");
+const { processLeagueTransactions, processLeagueTrades } = require("./transactions");
 
 // Re-export the live poller
 exports.liveGamePoller = liveGamePoller;
@@ -2552,6 +2553,51 @@ exports.settleMatchupWeeksScheduled = onSchedule(
     console.log("[Scheduler] Weekly matchup settlement complete.");
     return null;
   });
+/**
+ * Clears expired waivers and accepted trades for every active league.
+ * Before this, they were processed only in a manager's browser, so a league
+ * where nobody opened the app never cleared its claims.
+ * Leagues run one after another; fan out per league before thousands of leagues.
+ */
+exports.processTransactionsScheduled = onSchedule(
+  {
+    schedule: "every 15 minutes",
+    region: "us-central1",
+    memory: "512MiB",
+    timeoutSeconds: 540,
+  },
+  async (_event) => {
+    const leaguesSnap = await db.collection("fantasy_leagues")
+      .where("status", "in", ["active", "active_full"])
+      .get();
+    let awarded = 0, freeAgents = 0, trades = 0, failed = 0;
+    for (const leagueDoc of leaguesSnap.docs) {
+      const nowMs = await getSystemDate(leagueDoc.id);
+      const out = await processLeagueTransactions(db, leagueDoc.id, nowMs);
+      awarded += out.waivers?.awarded?.length || 0;
+      freeAgents += out.waivers?.freeAgents?.length || 0;
+      trades += Object.values(out.trades || {}).filter(s => s !== "waiting" && s !== "skipped").length;
+      if (out.waiversError || out.tradesError) failed++;
+    }
+    console.log(`[Transactions] ${leaguesSnap.size} leagues: ${awarded} waiver awards, ${freeAgents} to free agency, ${trades} trades settled, ${failed} leagues with errors.`);
+    return null;
+  });
+
+/**
+ * A trade accepted with no review window ('accepted_immediate') goes through
+ * at once, as it did when the browser processed it.
+ */
+exports.onTradeWritten = onDocumentWritten(
+  { document: "fantasy_leagues/{leagueId}/trades/{tradeId}", region: "us-central1" },
+  async (event) => {
+    const after = event.data?.after;
+    if (!after || !after.exists || after.data().status !== "accepted_immediate") return null;
+    const before = event.data.before;
+    if (before && before.exists && before.data().status === "accepted_immediate") return null;
+    const leagueId = event.params.leagueId;
+    await processLeagueTrades(db, leagueId, await getSystemDate(leagueId));
+    return null;
+  });
 
 /**
  * Per-league simulation trigger.
@@ -2588,6 +2634,12 @@ exports.onLeagueSimulatedDateWritten = onDocumentWritten({
   if (!newDateStr) return null;
 
   const leagueId = event.params.leagueId;
+
+  // Clear waivers and accepted trades as of the new simulated date, so a
+  // simulation sees results at once instead of at the next scheduled run.
+  if (oldDateStr !== newDateStr) {
+    await processLeagueTransactions(db, leagueId, await getSystemDate(leagueId));
+  }
   const newDate = new Date(newDateStr.includes('T') ? newDateStr : `${newDateStr}T23:59:59`);
   const oldDate = oldDateStr 
     ? new Date(oldDateStr.includes('T') ? oldDateStr : `${oldDateStr}T00:00:00`)

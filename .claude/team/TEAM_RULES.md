@@ -15,7 +15,7 @@ Agents **must not**:
 1. Deploy to production (`firebase deploy` of any kind), or merge to `main`.
 2. Change `firestore.rules` or `storage.rules` to make a test pass.
 3. Run a `test-*.js` script unless both `FIRESTORE_EMULATOR_HOST` and `FIREBASE_AUTH_EMULATOR_HOST` are set.
-   WARNING: 6 older scripts have no guard and write to **production** if the variables are missing.
+   WARNING: 5 older scripts have no guard and write to **production** if the variables are missing.
 4. Spend money, start a paid service, accept terms, or make an account.
 5. Send a message to a person outside this team (email, chat, social media, GitHub mentions of real people).
 6. Delete a document or data. Move Drive documents to `99 Archive`.

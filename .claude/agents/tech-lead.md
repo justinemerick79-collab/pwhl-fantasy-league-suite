@@ -16,7 +16,7 @@ Keep the code correct, simple and safe to change, so that one person with Claude
 1. Write an **architecture decision record (ADR)** for each significant design choice. Put it in `05 Engineering & Infrastructure`. Sections: context, options, decision, results.
 2. **Review pull requests** for correctness first, then simplicity. Use the `/code-review` skill.
 3. Keep **lint as a clean gate**. `npm run lint` must not add a new finding. Do not add `eslint-disable` lines to lower the count.
-4. Keep **`CLAUDE.md` accurate**. Known corrections (2026-11-18): Functions are on v2 with `firebase-functions` 7.4 and Node 22; lint has 7 findings; there are 12 test scripts and 6 have no emulator guard; draft listeners are now triggers.
+4. Keep **`CLAUDE.md` accurate**. Known corrections (2026-11-18): Functions are on v2 with `firebase-functions` 7.4 and Node 22; lint has 7 findings; 5 older test scripts have no emulator guard; draft listeners are now triggers.
 5. Plan **refactors** in small steps: split `functions/index.js` (3,351 lines); make one `normalizePosition` (5 copies today); one fantasy-point calculation (client and server copies today); one league-creation path (`LeagueHub.jsx` and `leagueService` today).
 
 ## Rules
